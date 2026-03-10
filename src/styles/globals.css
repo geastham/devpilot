@@ -1,0 +1,159 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Import fonts */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@layer base {
+  :root {
+    /* CSS custom properties for dynamic theming */
+    --bg-base: #0F1F3D;
+    --bg-panel: #060F1E;
+    --bg-surface: #1A2E4A;
+    --accent-primary: #3B82F6;
+    --accent-amber: #F59E0B;
+    --accent-red: #EF4444;
+    --accent-green: #10B981;
+    --accent-purple: #8B5CF6;
+    --pulse-color: rgba(245, 158, 11, 0.4);
+  }
+
+  html {
+    @apply antialiased;
+  }
+
+  body {
+    @apply bg-bg-base text-text-primary font-sans;
+    font-feature-settings: 'cv11', 'ss01', 'ss03';
+  }
+
+  /* Custom scrollbar for dark theme */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-bg-panel;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-bg-surface rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-text-muted;
+  }
+}
+
+@layer components {
+  /* Zone-specific card styles */
+  .card-ready {
+    @apply bg-zone-ready text-bg-base;
+  }
+
+  .card-refining {
+    @apply bg-zone-refining/10 border border-zone-refining/20;
+  }
+
+  .card-shaping {
+    @apply bg-zone-shaping/10 border border-zone-shaping/20;
+  }
+
+  .card-directional {
+    @apply bg-zone-directional/5;
+  }
+
+  /* Model badge styles */
+  .badge-haiku {
+    @apply bg-model-haiku text-white;
+  }
+
+  .badge-sonnet {
+    @apply bg-model-sonnet text-white;
+  }
+
+  .badge-opus {
+    @apply bg-model-opus text-white;
+  }
+
+  /* Complexity badge styles */
+  .complexity-s {
+    @apply bg-accent-green/20 text-accent-green border border-accent-green/30;
+  }
+
+  .complexity-m {
+    @apply bg-accent-primary/20 text-accent-primary border border-accent-primary/30;
+  }
+
+  .complexity-l {
+    @apply bg-accent-amber/20 text-accent-amber border border-accent-amber/30;
+  }
+
+  .complexity-xl {
+    @apply bg-accent-red/20 text-accent-red border border-accent-red/30;
+  }
+
+  /* Status indicator styles */
+  .status-active {
+    @apply bg-accent-primary;
+  }
+
+  .status-needs-spec {
+    @apply bg-accent-amber animate-pulse-dot;
+  }
+
+  .status-idle-imminent {
+    @apply bg-accent-red animate-pulse-dot;
+  }
+
+  .status-complete {
+    @apply bg-accent-green;
+  }
+
+  .status-error {
+    @apply bg-accent-red;
+  }
+
+  /* Pulse border variants */
+  .pulse-amber {
+    --pulse-color: rgba(245, 158, 11, 0.4);
+    @apply animate-border-pulse;
+  }
+
+  .pulse-red {
+    --pulse-color: rgba(239, 68, 68, 0.4);
+    @apply animate-border-pulse-fast;
+  }
+
+  /* Glass panel effect */
+  .glass-panel {
+    @apply bg-bg-surface/90 backdrop-blur-md border border-border-default;
+  }
+}
+
+@layer utilities {
+  /* Text gradient for scores/highlights */
+  .text-gradient-purple {
+    @apply bg-gradient-to-r from-purple-400 to-purple-600 bg-clip-text text-transparent;
+  }
+
+  /* Truncate multi-line text */
+  .line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  /* No scrollbar but still scrollable */
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+}
