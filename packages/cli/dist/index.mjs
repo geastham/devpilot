@@ -84,11 +84,11 @@ import chalk2 from "chalk";
 
 // src/server/index.ts
 import Fastify from "fastify";
-import { initDatabase } from "@devpilot/core/db";
+import { initDatabase } from "@devpilot.sh/core/db";
 import {
   initOrchestratorService,
   initStatusPoller
-} from "@devpilot/core/orchestrator";
+} from "@devpilot.sh/core/orchestrator";
 
 // src/server/api/items.ts
 import {
@@ -98,7 +98,7 @@ import {
   tasks,
   touchedFiles,
   activityEvents
-} from "@devpilot/core/db";
+} from "@devpilot.sh/core/db";
 import { eq, and, desc } from "drizzle-orm";
 async function registerItemRoutes(app) {
   const db2 = getDb();
@@ -451,11 +451,11 @@ import {
   touchedFiles as touchedFiles2,
   activityEvents as activityEvents2,
   conductorScores
-} from "@devpilot/core/db";
+} from "@devpilot.sh/core/db";
 import {
   getOrchestratorServiceOrNull,
   buildDispatchRequest
-} from "@devpilot/core/orchestrator";
+} from "@devpilot.sh/core/orchestrator";
 import { eq as eq2, or, desc as desc2, and as and2, asc } from "drizzle-orm";
 async function registerFleetRoutes(app) {
   const db2 = getDb();
@@ -737,7 +737,7 @@ async function registerFleetRoutes(app) {
 }
 
 // src/server/api/score.ts
-import { conductorScores as conductorScores2, scoreHistory } from "@devpilot/core/db";
+import { conductorScores as conductorScores2, scoreHistory } from "@devpilot.sh/core/db";
 import { eq as eq3, gte, and as and3, asc as asc2, desc as desc3 } from "drizzle-orm";
 async function registerScoreRoutes(app) {
   const db2 = getDb();
@@ -903,7 +903,7 @@ async function registerScoreRoutes(app) {
 }
 
 // src/server/api/events.ts
-import { activityEvents as activityEvents3, rufloSessions as rufloSessions2 } from "@devpilot/core/db";
+import { activityEvents as activityEvents3, rufloSessions as rufloSessions2 } from "@devpilot.sh/core/db";
 import { eq as eq4, and as and4, gt, desc as desc4, asc as asc3 } from "drizzle-orm";
 async function registerEventRoutes(app) {
   const db2 = getDb();
@@ -1036,7 +1036,7 @@ async function createServer(options) {
     initStatusPoller(orchestrator, {
       pollIntervalMs: 5e3,
       onStatusUpdate: async (sessionId, status) => {
-        const { rufloSessions: rufloSessions3 } = await import("@devpilot/core/db");
+        const { rufloSessions: rufloSessions3 } = await import("@devpilot.sh/core/db");
         const { eq: eq5 } = await import("drizzle-orm");
         await db.update(rufloSessions3).set({
           progressPercent: status.progressPercent,
@@ -1045,7 +1045,7 @@ async function createServer(options) {
         }).where(eq5(rufloSessions3.id, sessionId));
       },
       onComplete: async (sessionId, report) => {
-        const { rufloSessions: rufloSessions3, activityEvents: activityEvents4 } = await import("@devpilot/core/db");
+        const { rufloSessions: rufloSessions3, activityEvents: activityEvents4 } = await import("@devpilot.sh/core/db");
         const { eq: eq5 } = await import("drizzle-orm");
         await db.update(rufloSessions3).set({
           status: report.success ? "COMPLETE" : "ERROR",
@@ -1063,7 +1063,7 @@ async function createServer(options) {
         });
       },
       onError: async (sessionId, error) => {
-        const { rufloSessions: rufloSessions3, activityEvents: activityEvents4 } = await import("@devpilot/core/db");
+        const { rufloSessions: rufloSessions3, activityEvents: activityEvents4 } = await import("@devpilot.sh/core/db");
         const { eq: eq5 } = await import("drizzle-orm");
         await db.update(rufloSessions3).set({
           status: "ERROR",
@@ -1214,7 +1214,7 @@ import { existsSync as existsSync3, readFileSync, writeFileSync as writeFileSync
 import { join as join3 } from "path";
 import chalk4 from "chalk";
 import YAML from "yaml";
-import { linear } from "@devpilot/core";
+import { linear } from "@devpilot.sh/core";
 var linearCommand = new Command4("linear").description("Configure Linear integration").option("--api-key <key>", "Linear API key").option("--team-id <id>", "Linear team ID").option("--test", "Test the connection").action(async (options) => {
   const configPath = join3(process.cwd(), ".devpilot", "config.yaml");
   if (!existsSync3(configPath)) {
@@ -1319,7 +1319,7 @@ import { join as join5 } from "path";
 import chalk6 from "chalk";
 import YAML2 from "yaml";
 import * as readline from "readline";
-import { linear as linear2 } from "@devpilot/core";
+import { linear as linear2 } from "@devpilot.sh/core";
 
 // src/utils/orchestrator.ts
 import { execSync, spawnSync } from "child_process";
@@ -1729,7 +1729,7 @@ import { Command as Command9 } from "commander";
 // src/commands/bridge/connect.ts
 import { Command as Command6 } from "commander";
 import chalk7 from "chalk";
-import { BridgeClient, HeartbeatService, PubSubSubscriber } from "@devpilot/bridge-client";
+import { BridgeClient, HeartbeatService, PubSubSubscriber } from "@devpilot.sh/bridge-client";
 var connectCommand = new Command6("connect").description("Connect to DevPilot cloud bridge").option("-u, --bridge-url <url>", "Bridge service URL", process.env.DEVPILOT_BRIDGE_URL).option("-k, --api-key <key>", "API key for authentication", process.env.DEVPILOT_BRIDGE_API_KEY).option("-r, --repos <repos>", "Comma-separated list of repos to handle").option("-p, --project <project>", "GCP project ID for Pub/Sub", process.env.GCP_PROJECT_ID).action(async (options) => {
   if (!options.bridgeUrl) {
     console.error(chalk7.red("\u2717 Error: Bridge URL is required (--bridge-url or DEVPILOT_BRIDGE_URL)"));

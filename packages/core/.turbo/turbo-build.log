@@ -1,5 +1,5 @@
 
-> @devpilot/core@0.1.0 build /Users/garretteastham/dev/devpilot/platform/devpilot-core/packages/core
+> @devpilot.sh/core@0.1.0 build /Users/garretteastham/dev/devpilot/platform/devpilot-core/packages/core
 > tsup
 
 CLI Building entry: src/index.ts, src/db/index.ts
@@ -10,18 +10,18 @@ CLI Target: es2020
 CLI Cleaning output folder
 CJS Build start
 ESM Build start
-ESM dist/db/index.mjs     21.36 KB
 ESM dist/index.mjs        59.82 KB
-ESM dist/db/index.mjs.map 39.60 KB
+ESM dist/db/index.mjs     21.36 KB
 ESM dist/index.mjs.map    117.33 KB
-ESM ⚡️ Build success in 19ms
+ESM dist/db/index.mjs.map 39.60 KB
+ESM ⚡️ Build success in 27ms
 CJS dist/db/index.js     27.60 KB
 CJS dist/index.js        66.21 KB
 CJS dist/db/index.js.map 40.14 KB
 CJS dist/index.js.map    117.45 KB
-CJS ⚡️ Build success in 19ms
+CJS ⚡️ Build success in 27ms
 DTS Build start
-DTS ⚡️ Build success in 2136ms
+DTS ⚡️ Build success in 2103ms
 DTS dist/index.d.ts     26.46 KB
 DTS dist/db/index.d.ts  58.84 KB
 DTS dist/index.d.mts    26.46 KB

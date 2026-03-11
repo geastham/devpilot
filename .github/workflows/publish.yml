@@ -57,17 +57,17 @@ jobs:
       - name: Build packages
         run: pnpm run build
 
-      - name: Publish @devpilot/core
-        run: pnpm publish --filter @devpilot/core --access public --no-git-checks
+      - name: Publish @devpilot.sh/core
+        run: pnpm publish --filter @devpilot.sh/core --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish @devpilot/cli
-        run: pnpm publish --filter @devpilot/cli --access public --no-git-checks
+      - name: Publish @devpilot.sh/cli
+        run: pnpm publish --filter @devpilot.sh/cli --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish @devpilot/bridge-client
-        run: pnpm publish --filter @devpilot/bridge-client --access public --no-git-checks
+      - name: Publish @devpilot.sh/bridge-client
+        run: pnpm publish --filter @devpilot.sh/bridge-client --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

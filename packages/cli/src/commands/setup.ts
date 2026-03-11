@@ -4,7 +4,7 @@ import { join } from 'path';
 import chalk from 'chalk';
 import YAML from 'yaml';
 import * as readline from 'readline';
-import { linear } from '@devpilot/core';
+import { linear } from '@devpilot.sh/core';
 import {
   checkSystemRequirements,
   printRequirementsStatus,

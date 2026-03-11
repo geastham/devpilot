@@ -1,12 +1,12 @@
 {
-  "name": "@devpilot/core",
+  "name": "@devpilot.sh/core",
   "version": "0.1.0",
   "description": "Core library for DevPilot - database schemas, integrations, and utilities",
   "license": "MIT",
   "author": "DevPilot Team",
   "repository": {
     "type": "git",
-    "url": "https://github.com/devpilot/devpilot-core.git",
+    "url": "https://github.com/devpilot-sh/devpilot-core.git",
     "directory": "packages/core"
   },
   "main": "./dist/index.js",

@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { activityEvents, rufloSessions } from '@devpilot/core/db';
+import { activityEvents, rufloSessions } from '@devpilot.sh/core/db';
 import { eq, and, gt, desc, asc } from 'drizzle-orm';
 import { getDb } from '../index';
 

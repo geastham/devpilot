@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
-import { BridgeClient, HeartbeatService, PubSubSubscriber } from '@devpilot/bridge-client';
+import { BridgeClient, HeartbeatService, PubSubSubscriber } from '@devpilot.sh/bridge-client';
 
 interface ConnectOptions {
   bridgeUrl: string;

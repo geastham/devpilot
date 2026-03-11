@@ -1,5 +1,5 @@
 import Fastify, { FastifyInstance } from 'fastify';
-import { initDatabase, SQLiteDatabase } from '@devpilot/core/db';
+import { initDatabase, SQLiteDatabase } from '@devpilot.sh/core/db';
 import {
   initOrchestratorService,
   initStatusPoller,
@@ -7,7 +7,7 @@ import {
   getStatusPollerOrNull,
   type OrchestratorAdapterConfig,
   type OrchestratorMode,
-} from '@devpilot/core/orchestrator';
+} from '@devpilot.sh/core/orchestrator';
 import { registerItemRoutes } from './api/items';
 import { registerFleetRoutes } from './api/fleet';
 import { registerScoreRoutes } from './api/score';
@@ -58,7 +58,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
       pollIntervalMs: 5000,
       onStatusUpdate: async (sessionId, status) => {
         // Update session in database
-        const { rufloSessions } = await import('@devpilot/core/db');
+        const { rufloSessions } = await import('@devpilot.sh/core/db');
         const { eq } = await import('drizzle-orm');
         await db.update(rufloSessions)
           .set({
@@ -71,7 +71,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
           .where(eq(rufloSessions.id, sessionId));
       },
       onComplete: async (sessionId, report) => {
-        const { rufloSessions, activityEvents } = await import('@devpilot/core/db');
+        const { rufloSessions, activityEvents } = await import('@devpilot.sh/core/db');
         const { eq } = await import('drizzle-orm');
         await db.update(rufloSessions)
           .set({
@@ -93,7 +93,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
         });
       },
       onError: async (sessionId, error) => {
-        const { rufloSessions, activityEvents } = await import('@devpilot/core/db');
+        const { rufloSessions, activityEvents } = await import('@devpilot.sh/core/db');
         const { eq } = await import('drizzle-orm');
         await db.update(rufloSessions)
           .set({

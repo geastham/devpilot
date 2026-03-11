@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import chalk from 'chalk';
 import YAML from 'yaml';
-import { linear } from '@devpilot/core';
+import { linear } from '@devpilot.sh/core';
 
 // Linear setup subcommand
 const linearCommand = new Command('linear')

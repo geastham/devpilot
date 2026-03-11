@@ -3,7 +3,7 @@ import {
   initOrchestratorService,
   getOrchestratorService,
   type OrchestratorAdapterConfig,
-} from '@devpilot/core/orchestrator';
+} from '@devpilot.sh/core/orchestrator';
 
 describe('Orchestrator Service', () => {
   let service: ReturnType<typeof getOrchestratorService>;

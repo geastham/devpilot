@@ -6,7 +6,7 @@ import {
   tasks,
   touchedFiles,
   activityEvents,
-} from '@devpilot/core/db';
+} from '@devpilot.sh/core/db';
 import { eq, and, desc } from 'drizzle-orm';
 import { getDb } from '../index';
 

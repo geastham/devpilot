@@ -112,11 +112,11 @@ var import_chalk2 = __toESM(require("chalk"));
 
 // src/server/index.ts
 var import_fastify = __toESM(require("fastify"));
-var import_db5 = require("@devpilot/core/db");
-var import_orchestrator2 = require("@devpilot/core/orchestrator");
+var import_db5 = require("@devpilot.sh/core/db");
+var import_orchestrator2 = require("@devpilot.sh/core/orchestrator");
 
 // src/server/api/items.ts
-var import_db = require("@devpilot/core/db");
+var import_db = require("@devpilot.sh/core/db");
 var import_drizzle_orm = require("drizzle-orm");
 async function registerItemRoutes(app) {
   const db2 = getDb();
@@ -462,8 +462,8 @@ async function registerItemRoutes(app) {
 }
 
 // src/server/api/fleet.ts
-var import_db2 = require("@devpilot/core/db");
-var import_orchestrator = require("@devpilot/core/orchestrator");
+var import_db2 = require("@devpilot.sh/core/db");
+var import_orchestrator = require("@devpilot.sh/core/orchestrator");
 var import_drizzle_orm2 = require("drizzle-orm");
 async function registerFleetRoutes(app) {
   const db2 = getDb();
@@ -745,7 +745,7 @@ async function registerFleetRoutes(app) {
 }
 
 // src/server/api/score.ts
-var import_db3 = require("@devpilot/core/db");
+var import_db3 = require("@devpilot.sh/core/db");
 var import_drizzle_orm3 = require("drizzle-orm");
 async function registerScoreRoutes(app) {
   const db2 = getDb();
@@ -911,7 +911,7 @@ async function registerScoreRoutes(app) {
 }
 
 // src/server/api/events.ts
-var import_db4 = require("@devpilot/core/db");
+var import_db4 = require("@devpilot.sh/core/db");
 var import_drizzle_orm4 = require("drizzle-orm");
 async function registerEventRoutes(app) {
   const db2 = getDb();
@@ -1044,7 +1044,7 @@ async function createServer(options) {
     (0, import_orchestrator2.initStatusPoller)(orchestrator, {
       pollIntervalMs: 5e3,
       onStatusUpdate: async (sessionId, status) => {
-        const { rufloSessions: rufloSessions3 } = await import("@devpilot/core/db");
+        const { rufloSessions: rufloSessions3 } = await import("@devpilot.sh/core/db");
         const { eq: eq5 } = await import("drizzle-orm");
         await db.update(rufloSessions3).set({
           progressPercent: status.progressPercent,
@@ -1053,7 +1053,7 @@ async function createServer(options) {
         }).where(eq5(rufloSessions3.id, sessionId));
       },
       onComplete: async (sessionId, report) => {
-        const { rufloSessions: rufloSessions3, activityEvents: activityEvents4 } = await import("@devpilot/core/db");
+        const { rufloSessions: rufloSessions3, activityEvents: activityEvents4 } = await import("@devpilot.sh/core/db");
         const { eq: eq5 } = await import("drizzle-orm");
         await db.update(rufloSessions3).set({
           status: report.success ? "COMPLETE" : "ERROR",
@@ -1071,7 +1071,7 @@ async function createServer(options) {
         });
       },
       onError: async (sessionId, error) => {
-        const { rufloSessions: rufloSessions3, activityEvents: activityEvents4 } = await import("@devpilot/core/db");
+        const { rufloSessions: rufloSessions3, activityEvents: activityEvents4 } = await import("@devpilot.sh/core/db");
         const { eq: eq5 } = await import("drizzle-orm");
         await db.update(rufloSessions3).set({
           status: "ERROR",
@@ -1222,7 +1222,7 @@ var import_fs3 = require("fs");
 var import_path3 = require("path");
 var import_chalk4 = __toESM(require("chalk"));
 var import_yaml = __toESM(require("yaml"));
-var import_core = require("@devpilot/core");
+var import_core = require("@devpilot.sh/core");
 var linearCommand = new import_commander4.Command("linear").description("Configure Linear integration").option("--api-key <key>", "Linear API key").option("--team-id <id>", "Linear team ID").option("--test", "Test the connection").action(async (options) => {
   const configPath = (0, import_path3.join)(process.cwd(), ".devpilot", "config.yaml");
   if (!(0, import_fs3.existsSync)(configPath)) {
@@ -1327,7 +1327,7 @@ var import_path5 = require("path");
 var import_chalk6 = __toESM(require("chalk"));
 var import_yaml2 = __toESM(require("yaml"));
 var readline = __toESM(require("readline"));
-var import_core2 = require("@devpilot/core");
+var import_core2 = require("@devpilot.sh/core");
 
 // src/utils/orchestrator.ts
 var import_child_process = require("child_process");
@@ -1737,7 +1737,7 @@ var import_commander9 = require("commander");
 // src/commands/bridge/connect.ts
 var import_commander6 = require("commander");
 var import_chalk7 = __toESM(require("chalk"));
-var import_bridge_client = require("@devpilot/bridge-client");
+var import_bridge_client = require("@devpilot.sh/bridge-client");
 var connectCommand = new import_commander6.Command("connect").description("Connect to DevPilot cloud bridge").option("-u, --bridge-url <url>", "Bridge service URL", process.env.DEVPILOT_BRIDGE_URL).option("-k, --api-key <key>", "API key for authentication", process.env.DEVPILOT_BRIDGE_API_KEY).option("-r, --repos <repos>", "Comma-separated list of repos to handle").option("-p, --project <project>", "GCP project ID for Pub/Sub", process.env.GCP_PROJECT_ID).action(async (options) => {
   if (!options.bridgeUrl) {
     console.error(import_chalk7.default.red("\u2717 Error: Bridge URL is required (--bridge-url or DEVPILOT_BRIDGE_URL)"));

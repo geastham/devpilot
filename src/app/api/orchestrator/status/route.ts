@@ -5,7 +5,7 @@ import {
   activityEvents,
   eq,
 } from '@/lib/db';
-import { orchestrator, linear } from '@devpilot/core';
+import { orchestrator, linear } from '@devpilot.sh/core';
 
 // POST /api/orchestrator/status - Receive status updates from orchestrator
 export async function POST(request: Request) {

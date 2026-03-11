@@ -10,8 +10,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@devpilot/core": "workspace:*",
-    "@devpilot/ui": "workspace:*",
+    "@devpilot.sh/core": "workspace:*",
+    "@devpilot.sh/ui": "workspace:*",
     "next": "^14.2.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"

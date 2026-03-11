@@ -1,5 +1,5 @@
 
-> @devpilot/bridge@0.1.0 build /Users/garretteastham/dev/devpilot/platform/devpilot-core/packages/bridge
+> @devpilot.sh/bridge@0.1.0 build /Users/garretteastham/dev/devpilot/platform/devpilot-core/packages/bridge
 > tsup
 
 CLI Building entry: src/index.ts
@@ -10,13 +10,13 @@ CLI Target: es2020
 CLI Cleaning output folder
 CJS Build start
 ESM Build start
-CJS dist/index.js     19.66 KB
-CJS dist/index.js.map 34.37 KB
-CJS ⚡️ Build success in 16ms
 ESM dist/index.mjs     16.62 KB
 ESM dist/index.mjs.map 34.52 KB
-ESM ⚡️ Build success in 17ms
+ESM ⚡️ Build success in 22ms
+CJS dist/index.js     19.66 KB
+CJS dist/index.js.map 34.37 KB
+CJS ⚡️ Build success in 22ms
 DTS Build start
-DTS ⚡️ Build success in 1486ms
+DTS ⚡️ Build success in 1478ms
 DTS dist/index.d.ts  13.00 B
 DTS dist/index.d.mts 13.00 B

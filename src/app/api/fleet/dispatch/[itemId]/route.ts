@@ -10,7 +10,7 @@ import {
   eq,
   asc,
 } from '@/lib/db';
-import { linear, orchestrator } from '@devpilot/core';
+import { linear, orchestrator } from '@devpilot.sh/core';
 
 interface RouteParams {
   params: Promise<{ itemId: string }>;

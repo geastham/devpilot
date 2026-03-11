@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { linear } from '@devpilot/core';
+import { linear } from '@devpilot.sh/core';
 
 // POST /api/integrations/linear/connect - Configure Linear integration
 export async function POST(request: Request) {

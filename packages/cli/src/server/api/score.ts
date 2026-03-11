@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { conductorScores, scoreHistory } from '@devpilot/core/db';
+import { conductorScores, scoreHistory } from '@devpilot.sh/core/db';
 import { eq, gte, and, asc, desc } from 'drizzle-orm';
 import { getDb } from '../index';
 

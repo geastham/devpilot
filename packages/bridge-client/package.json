@@ -1,21 +1,43 @@
 {
-  "name": "@devpilot/bridge-client",
+  "name": "@devpilot.sh/bridge-client",
   "version": "0.1.0",
   "description": "DevPilot Bridge Client - Local orchestrator connection to cloud bridge",
+  "license": "MIT",
+  "author": "DevPilot Team",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/devpilot-sh/devpilot-core.git",
+    "directory": "packages/bridge-client"
+  },
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs",
-      "require": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "require": "./dist/index.js"
     }
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsup",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm run build"
   },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "keywords": [
+    "devpilot",
+    "bridge",
+    "pubsub",
+    "gcp"
+  ],
   "dependencies": {
     "@google-cloud/pubsub": "^4.0.0"
   },

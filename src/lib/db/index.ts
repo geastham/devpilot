@@ -1,13 +1,13 @@
 /**
- * Database client wrapper using Drizzle ORM from @devpilot/core
+ * Database client wrapper using Drizzle ORM from @devpilot.sh/core
  *
  * This replaces the Prisma client with Drizzle ORM for SQLite support.
  * The API routes should use this client for all database operations.
  */
 
-import { getDatabase, initDatabase, resetDatabase } from '@devpilot/core/db';
+import { getDatabase, initDatabase, resetDatabase } from '@devpilot.sh/core/db';
 import { eq, desc, asc, and, or, gt, lt, gte, lte, inArray, sql } from 'drizzle-orm';
-import * as schema from '@devpilot/core/db';
+import * as schema from '@devpilot.sh/core/db';
 
 // Initialize database on first import (for Next.js)
 const globalForDb = globalThis as unknown as {
@@ -52,7 +52,7 @@ export {
   taskStatusValues,
   fileStatusValues,
   eventTypeValues,
-} from '@devpilot/core/db';
+} from '@devpilot.sh/core/db';
 
 // Re-export types
 export type {
@@ -85,7 +85,7 @@ export type {
   NewScoreHistory,
   ActivityEvent,
   NewActivityEvent,
-} from '@devpilot/core/db';
+} from '@devpilot.sh/core/db';
 
 // Re-export query operators for building queries
 export { eq, desc, asc, and, or, gt, lt, gte, lte, inArray, sql };

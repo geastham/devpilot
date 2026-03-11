@@ -1,17 +1,17 @@
 {
-  "name": "@devpilot/cli",
+  "name": "@devpilot.sh/cli",
   "version": "0.1.0",
   "description": "DevPilot CLI - Manage your AI coding agent fleet from the command line",
   "license": "MIT",
   "author": "DevPilot Team",
   "repository": {
     "type": "git",
-    "url": "https://github.com/devpilot/devpilot-core.git",
+    "url": "https://github.com/devpilot-sh/devpilot-core.git",
     "directory": "packages/cli"
   },
-  "homepage": "https://github.com/devpilot/devpilot-core#readme",
+  "homepage": "https://github.com/devpilot-sh/devpilot-core#readme",
   "bugs": {
-    "url": "https://github.com/devpilot/devpilot-core/issues"
+    "url": "https://github.com/devpilot-sh/devpilot-core/issues"
   },
   "bin": {
     "devpilot": "./bin/devpilot.js"
@@ -36,8 +36,8 @@
     "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
-    "@devpilot/bridge-client": "workspace:*",
-    "@devpilot/core": "workspace:*",
+    "@devpilot.sh/bridge-client": "workspace:*",
+    "@devpilot.sh/core": "workspace:*",
     "chalk": "^5.3.0",
     "chokidar": "^3.6.0",
     "commander": "^12.0.0",

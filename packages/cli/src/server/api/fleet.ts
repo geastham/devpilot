@@ -6,11 +6,11 @@ import {
   touchedFiles,
   activityEvents,
   conductorScores,
-} from '@devpilot/core/db';
+} from '@devpilot.sh/core/db';
 import {
   getOrchestratorServiceOrNull,
   buildDispatchRequest,
-} from '@devpilot/core/orchestrator';
+} from '@devpilot.sh/core/orchestrator';
 import { eq, or, desc, and, asc } from 'drizzle-orm';
 import { getDb } from '../index';
 

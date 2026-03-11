@@ -1,5 +1,5 @@
 {
-  "name": "@devpilot/bridge",
+  "name": "@devpilot.sh/bridge",
   "version": "0.1.0",
   "description": "DevPilot Linear Bridge - GCP Cloud Run webhook relay service",
   "main": "dist/index.js",

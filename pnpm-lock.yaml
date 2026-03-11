@@ -26,10 +26,10 @@ importers:
 
   apps/web:
     dependencies:
-      '@devpilot/core':
+      '@devpilot.sh/core':
         specifier: workspace:*
         version: link:../../packages/core
-      '@devpilot/ui':
+      '@devpilot.sh/ui':
         specifier: workspace:*
         version: link:../../packages/ui
       next:
@@ -122,10 +122,10 @@ importers:
 
   packages/cli:
     dependencies:
-      '@devpilot/bridge-client':
+      '@devpilot.sh/bridge-client':
         specifier: workspace:*
         version: link:../bridge-client
-      '@devpilot/core':
+      '@devpilot.sh/core':
         specifier: workspace:*
         version: link:../core
       chalk:
