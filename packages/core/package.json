@@ -22,6 +22,11 @@
       "types": "./dist/db/index.d.ts",
       "import": "./dist/db/index.mjs",
       "require": "./dist/db/index.js"
+    },
+    "./orchestrator": {
+      "types": "./dist/orchestrator/index.d.ts",
+      "import": "./dist/orchestrator/index.mjs",
+      "require": "./dist/orchestrator/index.js"
     }
   },
   "files": [
