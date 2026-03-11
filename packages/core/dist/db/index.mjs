@@ -44,6 +44,7 @@ __export(schema_exports, {
   inFlightFiles: () => inFlightFiles,
   inFlightFilesRelations: () => inFlightFilesRelations,
   modelValues: () => modelValues,
+  orchestratorModeValues: () => orchestratorModeValues,
   plans: () => plans,
   plansRelations: () => plansRelations,
   rufloSessions: () => rufloSessions,
@@ -77,6 +78,7 @@ var eventTypeValues = [
   "FILE_UNLOCKED",
   "SCORE_UPDATE"
 ];
+var orchestratorModeValues = ["http", "ao-cli", "manual", "disabled"];
 
 // src/db/schema/horizon.ts
 import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
@@ -227,6 +229,11 @@ var rufloSessions = sqliteTable2("ruflo_sessions", {
   status: text2("status", { enum: sessionStatusValues }).notNull().default("ACTIVE"),
   inFlightFiles: text2("in_flight_files", { mode: "json" }).$type().default([]),
   prUrl: text2("pr_url"),
+  // External orchestrator tracking
+  externalSessionId: text2("external_session_id"),
+  orchestratorMode: text2("orchestrator_mode", { enum: orchestratorModeValues }),
+  tokensUsed: integer2("tokens_used"),
+  costUsd: integer2("cost_usd"),
   createdAt: integer2("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date()),
   updatedAt: integer2("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date())
 });
@@ -579,6 +586,7 @@ export {
   inFlightFilesRelations,
   initDatabase,
   modelValues,
+  orchestratorModeValues,
   plans,
   plansRelations,
   resetDatabase,

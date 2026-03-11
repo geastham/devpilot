@@ -51,6 +51,7 @@ __export(db_exports, {
   inFlightFilesRelations: () => inFlightFilesRelations,
   initDatabase: () => initDatabase,
   modelValues: () => modelValues,
+  orchestratorModeValues: () => orchestratorModeValues,
   plans: () => plans,
   plansRelations: () => plansRelations,
   resetDatabase: () => resetDatabase,
@@ -109,6 +110,7 @@ __export(schema_exports, {
   inFlightFiles: () => inFlightFiles,
   inFlightFilesRelations: () => inFlightFilesRelations,
   modelValues: () => modelValues,
+  orchestratorModeValues: () => orchestratorModeValues,
   plans: () => plans,
   plansRelations: () => plansRelations,
   rufloSessions: () => rufloSessions,
@@ -142,6 +144,7 @@ var eventTypeValues = [
   "FILE_UNLOCKED",
   "SCORE_UPDATE"
 ];
+var orchestratorModeValues = ["http", "ao-cli", "manual", "disabled"];
 
 // src/db/schema/horizon.ts
 var import_sqlite_core = require("drizzle-orm/sqlite-core");
@@ -292,6 +295,11 @@ var rufloSessions = (0, import_sqlite_core2.sqliteTable)("ruflo_sessions", {
   status: (0, import_sqlite_core2.text)("status", { enum: sessionStatusValues }).notNull().default("ACTIVE"),
   inFlightFiles: (0, import_sqlite_core2.text)("in_flight_files", { mode: "json" }).$type().default([]),
   prUrl: (0, import_sqlite_core2.text)("pr_url"),
+  // External orchestrator tracking
+  externalSessionId: (0, import_sqlite_core2.text)("external_session_id"),
+  orchestratorMode: (0, import_sqlite_core2.text)("orchestrator_mode", { enum: orchestratorModeValues }),
+  tokensUsed: (0, import_sqlite_core2.integer)("tokens_used"),
+  costUsd: (0, import_sqlite_core2.integer)("cost_usd"),
   createdAt: (0, import_sqlite_core2.integer)("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date()),
   updatedAt: (0, import_sqlite_core2.integer)("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date())
 });
@@ -645,6 +653,7 @@ function resetDatabase() {
   inFlightFilesRelations,
   initDatabase,
   modelValues,
+  orchestratorModeValues,
   plans,
   plansRelations,
   resetDatabase,

@@ -32,6 +32,8 @@ declare const fileStatusValues: readonly ["AVAILABLE", "IN_FLIGHT", "RECENTLY_MO
 type FileStatus = (typeof fileStatusValues)[number];
 declare const eventTypeValues: readonly ["SESSION_PROGRESS", "SESSION_COMPLETE", "PLAN_GENERATED", "PLAN_APPROVED", "ITEM_CREATED", "ITEM_DISPATCHED", "RUNWAY_UPDATE", "FILE_UNLOCKED", "SCORE_UPDATE"];
 type EventType = (typeof eventTypeValues)[number];
+declare const orchestratorModeValues: readonly ["http", "ao-cli", "manual", "disabled"];
+type OrchestratorMode = (typeof orchestratorModeValues)[number];
 
 declare const horizonItems: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
     name: "horizon_items";
@@ -958,6 +960,54 @@ declare const rufloSessions: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
             enumValues: [string, ...string[]];
             baseColumn: never;
         }, object>;
+        externalSessionId: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "external_session_id";
+            tableName: "ruflo_sessions";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        orchestratorMode: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "orchestrator_mode";
+            tableName: "ruflo_sessions";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: "http" | "ao-cli" | "manual" | "disabled";
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: ["http", "ao-cli", "manual", "disabled"];
+            baseColumn: never;
+        }, object>;
+        tokensUsed: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "tokens_used";
+            tableName: "ruflo_sessions";
+            dataType: "number";
+            columnType: "SQLiteInteger";
+            data: number;
+            driverParam: number;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        costUsd: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "cost_usd";
+            tableName: "ruflo_sessions";
+            dataType: "number";
+            columnType: "SQLiteInteger";
+            data: number;
+            driverParam: number;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
         createdAt: drizzle_orm_sqlite_core.SQLiteColumn<{
             name: "created_at";
             tableName: "ruflo_sessions";
@@ -1456,6 +1506,7 @@ type schema_NewScoreHistory = NewScoreHistory;
 type schema_NewTask = NewTask;
 type schema_NewTouchedFile = NewTouchedFile;
 type schema_NewWorkstream = NewWorkstream;
+type schema_OrchestratorMode = OrchestratorMode;
 type schema_Plan = Plan;
 type schema_RufloSession = RufloSession;
 type schema_ScoreHistory = ScoreHistory;
@@ -1479,6 +1530,7 @@ declare const schema_horizonItemsRelations: typeof horizonItemsRelations;
 declare const schema_inFlightFiles: typeof inFlightFiles;
 declare const schema_inFlightFilesRelations: typeof inFlightFilesRelations;
 declare const schema_modelValues: typeof modelValues;
+declare const schema_orchestratorModeValues: typeof orchestratorModeValues;
 declare const schema_plans: typeof plans;
 declare const schema_plansRelations: typeof plansRelations;
 declare const schema_rufloSessions: typeof rufloSessions;
@@ -1494,7 +1546,7 @@ declare const schema_workstreams: typeof workstreams;
 declare const schema_workstreamsRelations: typeof workstreamsRelations;
 declare const schema_zoneValues: typeof zoneValues;
 declare namespace schema {
-  export { type schema_ActivityEvent as ActivityEvent, type schema_CompletedTask as CompletedTask, type schema_Complexity as Complexity, type schema_ConductorScore as ConductorScore, type schema_ConflictingFile as ConflictingFile, type schema_EventType as EventType, type schema_FileStatus as FileStatus, type schema_HorizonItem as HorizonItem, type schema_InFlightFile as InFlightFile, type schema_Model as Model, type schema_NewActivityEvent as NewActivityEvent, type schema_NewCompletedTask as NewCompletedTask, type schema_NewConductorScore as NewConductorScore, type schema_NewConflictingFile as NewConflictingFile, type schema_NewHorizonItem as NewHorizonItem, type schema_NewInFlightFile as NewInFlightFile, type schema_NewPlan as NewPlan, type schema_NewRufloSession as NewRufloSession, type schema_NewScoreHistory as NewScoreHistory, type schema_NewTask as NewTask, type schema_NewTouchedFile as NewTouchedFile, type schema_NewWorkstream as NewWorkstream, type schema_Plan as Plan, type schema_RufloSession as RufloSession, type schema_ScoreHistory as ScoreHistory, type schema_SessionStatus as SessionStatus, type schema_Task as Task, type schema_TouchedFile as TouchedFile, type schema_Workstream as Workstream, type schema_Zone as Zone, schema_activityEvents as activityEvents, schema_completedTasks as completedTasks, schema_completedTasksRelations as completedTasksRelations, schema_complexityValues as complexityValues, schema_conductorScores as conductorScores, schema_conductorScoresRelations as conductorScoresRelations, schema_conflictingFiles as conflictingFiles, schema_conflictingFilesRelations as conflictingFilesRelations, schema_eventTypeValues as eventTypeValues, schema_fileStatusValues as fileStatusValues, schema_horizonItems as horizonItems, schema_horizonItemsRelations as horizonItemsRelations, schema_inFlightFiles as inFlightFiles, schema_inFlightFilesRelations as inFlightFilesRelations, schema_modelValues as modelValues, schema_plans as plans, schema_plansRelations as plansRelations, schema_rufloSessions as rufloSessions, schema_rufloSessionsRelations as rufloSessionsRelations, schema_scoreHistory as scoreHistory, schema_scoreHistoryRelations as scoreHistoryRelations, schema_sessionStatusValues as sessionStatusValues, schema_tasks as tasks, schema_tasksRelations as tasksRelations, schema_touchedFiles as touchedFiles, schema_touchedFilesRelations as touchedFilesRelations, schema_workstreams as workstreams, schema_workstreamsRelations as workstreamsRelations, schema_zoneValues as zoneValues };
+  export { type schema_ActivityEvent as ActivityEvent, type schema_CompletedTask as CompletedTask, type schema_Complexity as Complexity, type schema_ConductorScore as ConductorScore, type schema_ConflictingFile as ConflictingFile, type schema_EventType as EventType, type schema_FileStatus as FileStatus, type schema_HorizonItem as HorizonItem, type schema_InFlightFile as InFlightFile, type schema_Model as Model, type schema_NewActivityEvent as NewActivityEvent, type schema_NewCompletedTask as NewCompletedTask, type schema_NewConductorScore as NewConductorScore, type schema_NewConflictingFile as NewConflictingFile, type schema_NewHorizonItem as NewHorizonItem, type schema_NewInFlightFile as NewInFlightFile, type schema_NewPlan as NewPlan, type schema_NewRufloSession as NewRufloSession, type schema_NewScoreHistory as NewScoreHistory, type schema_NewTask as NewTask, type schema_NewTouchedFile as NewTouchedFile, type schema_NewWorkstream as NewWorkstream, type schema_OrchestratorMode as OrchestratorMode, type schema_Plan as Plan, type schema_RufloSession as RufloSession, type schema_ScoreHistory as ScoreHistory, type schema_SessionStatus as SessionStatus, type schema_Task as Task, type schema_TouchedFile as TouchedFile, type schema_Workstream as Workstream, type schema_Zone as Zone, schema_activityEvents as activityEvents, schema_completedTasks as completedTasks, schema_completedTasksRelations as completedTasksRelations, schema_complexityValues as complexityValues, schema_conductorScores as conductorScores, schema_conductorScoresRelations as conductorScoresRelations, schema_conflictingFiles as conflictingFiles, schema_conflictingFilesRelations as conflictingFilesRelations, schema_eventTypeValues as eventTypeValues, schema_fileStatusValues as fileStatusValues, schema_horizonItems as horizonItems, schema_horizonItemsRelations as horizonItemsRelations, schema_inFlightFiles as inFlightFiles, schema_inFlightFilesRelations as inFlightFilesRelations, schema_modelValues as modelValues, schema_orchestratorModeValues as orchestratorModeValues, schema_plans as plans, schema_plansRelations as plansRelations, schema_rufloSessions as rufloSessions, schema_rufloSessionsRelations as rufloSessionsRelations, schema_scoreHistory as scoreHistory, schema_scoreHistoryRelations as scoreHistoryRelations, schema_sessionStatusValues as sessionStatusValues, schema_tasks as tasks, schema_tasksRelations as tasksRelations, schema_touchedFiles as touchedFiles, schema_touchedFilesRelations as touchedFilesRelations, schema_workstreams as workstreams, schema_workstreamsRelations as workstreamsRelations, schema_zoneValues as zoneValues };
 }
 
 type SQLiteDatabase = BetterSQLite3Database<typeof schema>;
@@ -1525,4 +1577,4 @@ declare function initDatabase(config?: {
  */
 declare function resetDatabase(): void;
 
-export { type ActivityEvent, type CompletedTask, type Complexity, type ConductorScore, type ConflictingFile, type Database, type DatabaseConfig, type EventType, type FileStatus, type HorizonItem, type InFlightFile, type Model, type NewActivityEvent, type NewCompletedTask, type NewConductorScore, type NewConflictingFile, type NewHorizonItem, type NewInFlightFile, type NewPlan, type NewRufloSession, type NewScoreHistory, type NewTask, type NewTouchedFile, type NewWorkstream, type Plan, type PostgresDatabase, type RufloSession, type SQLiteDatabase, type ScoreHistory, type SessionStatus, type Task, type TouchedFile, type Workstream, type Zone, activityEvents, closeDatabase, completedTasks, completedTasksRelations, complexityValues, conductorScores, conductorScoresRelations, conflictingFiles, conflictingFilesRelations, createDatabase, databaseConfigSchema, eventTypeValues, fileStatusValues, getDatabase, getDatabaseConfig, horizonItems, horizonItemsRelations, inFlightFiles, inFlightFilesRelations, initDatabase, modelValues, plans, plansRelations, resetDatabase, rufloSessions, rufloSessionsRelations, scoreHistory, scoreHistoryRelations, sessionStatusValues, tasks, tasksRelations, touchedFiles, touchedFilesRelations, workstreams, workstreamsRelations, zoneValues };
+export { type ActivityEvent, type CompletedTask, type Complexity, type ConductorScore, type ConflictingFile, type Database, type DatabaseConfig, type EventType, type FileStatus, type HorizonItem, type InFlightFile, type Model, type NewActivityEvent, type NewCompletedTask, type NewConductorScore, type NewConflictingFile, type NewHorizonItem, type NewInFlightFile, type NewPlan, type NewRufloSession, type NewScoreHistory, type NewTask, type NewTouchedFile, type NewWorkstream, type OrchestratorMode, type Plan, type PostgresDatabase, type RufloSession, type SQLiteDatabase, type ScoreHistory, type SessionStatus, type Task, type TouchedFile, type Workstream, type Zone, activityEvents, closeDatabase, completedTasks, completedTasksRelations, complexityValues, conductorScores, conductorScoresRelations, conflictingFiles, conflictingFilesRelations, createDatabase, databaseConfigSchema, eventTypeValues, fileStatusValues, getDatabase, getDatabaseConfig, horizonItems, horizonItemsRelations, inFlightFiles, inFlightFilesRelations, initDatabase, modelValues, orchestratorModeValues, plans, plansRelations, resetDatabase, rufloSessions, rufloSessionsRelations, scoreHistory, scoreHistoryRelations, sessionStatusValues, tasks, tasksRelations, touchedFiles, touchedFilesRelations, workstreams, workstreamsRelations, zoneValues };

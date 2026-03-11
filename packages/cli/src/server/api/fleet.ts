@@ -7,6 +7,10 @@ import {
   activityEvents,
   conductorScores,
 } from '@devpilot/core/db';
+import {
+  getOrchestratorServiceOrNull,
+  buildDispatchRequest,
+} from '@devpilot/core/orchestrator';
 import { eq, or, desc, and, asc } from 'drizzle-orm';
 import { getDb } from '../index';
 
@@ -240,6 +244,58 @@ export async function registerFleetRoutes(app: FastifyInstance) {
       estimatedRemainingMinutes: estimatedMinutes,
       inFlightFiles: filePaths,
     }).returning();
+
+    // Dispatch to orchestrator if configured
+    const orchestrator = getOrchestratorServiceOrNull();
+    if (orchestrator && orchestrator.isEnabled) {
+      const dispatchRequest = buildDispatchRequest({
+        sessionId: session.id,
+        repo: item.repo,
+        title: item.title,
+        filePaths,
+        model: 'sonnet',
+        workstream: sortedWorkstreams[0]?.label,
+        linearTicketId: session.linearTicketId,
+        callbackUrl: '', // Will use the one from orchestrator config
+        estimatedMinutes,
+      });
+
+      const dispatchResult = await orchestrator.dispatch(dispatchRequest);
+
+      if (dispatchResult.accepted && dispatchResult.orchestratorJobId) {
+        // Update session with external job ID
+        await db.update(rufloSessions)
+          .set({
+            externalSessionId: dispatchResult.orchestratorJobId,
+            orchestratorMode: dispatchResult.mode,
+          })
+          .where(eq(rufloSessions.id, session.id));
+
+        await db.insert(activityEvents).values({
+          type: 'ITEM_DISPATCHED',
+          message: `Orchestrator accepted: ${dispatchResult.orchestratorJobId}`,
+          repo: item.repo,
+          ticketId: session.linearTicketId,
+          metadata: {
+            sessionId: session.id,
+            externalJobId: dispatchResult.orchestratorJobId,
+            mode: dispatchResult.mode,
+          },
+        });
+      } else if (!dispatchResult.accepted) {
+        // Log dispatch failure but don't fail the request
+        await db.insert(activityEvents).values({
+          type: 'ITEM_DISPATCHED',
+          message: `Orchestrator dispatch failed: ${dispatchResult.error}`,
+          repo: item.repo,
+          ticketId: session.linearTicketId,
+          metadata: {
+            sessionId: session.id,
+            error: dispatchResult.error,
+          },
+        });
+      }
+    }
 
     for (const file of item.plan.filesTouched) {
       await db.insert(inFlightFiles).values({

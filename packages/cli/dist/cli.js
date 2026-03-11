@@ -35,7 +35,7 @@ __export(cli_exports, {
   runCli: () => runCli
 });
 module.exports = __toCommonJS(cli_exports);
-var import_commander6 = require("commander");
+var import_commander10 = require("commander");
 
 // src/version.ts
 var VERSION = "0.1.0";
@@ -113,6 +113,7 @@ var import_chalk2 = __toESM(require("chalk"));
 // src/server/index.ts
 var import_fastify = __toESM(require("fastify"));
 var import_db5 = require("@devpilot/core/db");
+var import_orchestrator2 = require("@devpilot/core/orchestrator");
 
 // src/server/api/items.ts
 var import_db = require("@devpilot/core/db");
@@ -462,6 +463,7 @@ async function registerItemRoutes(app) {
 
 // src/server/api/fleet.ts
 var import_db2 = require("@devpilot/core/db");
+var import_orchestrator = require("@devpilot/core/orchestrator");
 var import_drizzle_orm2 = require("drizzle-orm");
 async function registerFleetRoutes(app) {
   const db2 = getDb();
@@ -646,6 +648,50 @@ async function registerFleetRoutes(app) {
       estimatedRemainingMinutes: estimatedMinutes,
       inFlightFiles: filePaths
     }).returning();
+    const orchestrator = (0, import_orchestrator.getOrchestratorServiceOrNull)();
+    if (orchestrator && orchestrator.isEnabled) {
+      const dispatchRequest = (0, import_orchestrator.buildDispatchRequest)({
+        sessionId: session.id,
+        repo: item.repo,
+        title: item.title,
+        filePaths,
+        model: "sonnet",
+        workstream: sortedWorkstreams[0]?.label,
+        linearTicketId: session.linearTicketId,
+        callbackUrl: "",
+        // Will use the one from orchestrator config
+        estimatedMinutes
+      });
+      const dispatchResult = await orchestrator.dispatch(dispatchRequest);
+      if (dispatchResult.accepted && dispatchResult.orchestratorJobId) {
+        await db2.update(import_db2.rufloSessions).set({
+          externalSessionId: dispatchResult.orchestratorJobId,
+          orchestratorMode: dispatchResult.mode
+        }).where((0, import_drizzle_orm2.eq)(import_db2.rufloSessions.id, session.id));
+        await db2.insert(import_db2.activityEvents).values({
+          type: "ITEM_DISPATCHED",
+          message: `Orchestrator accepted: ${dispatchResult.orchestratorJobId}`,
+          repo: item.repo,
+          ticketId: session.linearTicketId,
+          metadata: {
+            sessionId: session.id,
+            externalJobId: dispatchResult.orchestratorJobId,
+            mode: dispatchResult.mode
+          }
+        });
+      } else if (!dispatchResult.accepted) {
+        await db2.insert(import_db2.activityEvents).values({
+          type: "ITEM_DISPATCHED",
+          message: `Orchestrator dispatch failed: ${dispatchResult.error}`,
+          repo: item.repo,
+          ticketId: session.linearTicketId,
+          metadata: {
+            sessionId: session.id,
+            error: dispatchResult.error
+          }
+        });
+      }
+    }
     for (const file of item.plan.filesTouched) {
       await db2.insert(import_db2.inFlightFiles).values({
         path: file.path,
@@ -985,6 +1031,61 @@ async function createServer(options) {
     type: "sqlite",
     sqlitePath: options.dbPath
   });
+  if (options.orchestrator && options.orchestrator.mode !== "disabled") {
+    const orchestratorConfig = {
+      mode: options.orchestrator.mode,
+      aoProjectName: options.orchestrator.aoProjectName,
+      aoPath: options.orchestrator.aoPath,
+      url: options.orchestrator.httpUrl,
+      apiKey: options.orchestrator.apiKey,
+      callbackUrl: `http://127.0.0.1:${options.port}/api/fleet/callback`
+    };
+    const orchestrator = (0, import_orchestrator2.initOrchestratorService)(orchestratorConfig);
+    (0, import_orchestrator2.initStatusPoller)(orchestrator, {
+      pollIntervalMs: 5e3,
+      onStatusUpdate: async (sessionId, status) => {
+        const { rufloSessions: rufloSessions3 } = await import("@devpilot/core/db");
+        const { eq: eq5 } = await import("drizzle-orm");
+        await db.update(rufloSessions3).set({
+          progressPercent: status.progressPercent,
+          status: status.status === "running" ? "ACTIVE" : status.status === "complete" ? "COMPLETE" : status.status === "error" ? "ERROR" : "ACTIVE",
+          updatedAt: /* @__PURE__ */ new Date()
+        }).where(eq5(rufloSessions3.id, sessionId));
+      },
+      onComplete: async (sessionId, report) => {
+        const { rufloSessions: rufloSessions3, activityEvents: activityEvents4 } = await import("@devpilot/core/db");
+        const { eq: eq5 } = await import("drizzle-orm");
+        await db.update(rufloSessions3).set({
+          status: report.success ? "COMPLETE" : "ERROR",
+          progressPercent: 100,
+          prUrl: report.prUrl,
+          tokensUsed: report.tokensUsed,
+          costUsd: Math.round(report.costUsd * 100),
+          // Store as cents
+          updatedAt: /* @__PURE__ */ new Date()
+        }).where(eq5(rufloSessions3.id, sessionId));
+        await db.insert(activityEvents4).values({
+          type: "SESSION_COMPLETE",
+          message: report.success ? `Session completed: ${report.summary}` : `Session failed: ${report.error?.message || "Unknown error"}`,
+          metadata: { sessionId, prUrl: report.prUrl }
+        });
+      },
+      onError: async (sessionId, error) => {
+        const { rufloSessions: rufloSessions3, activityEvents: activityEvents4 } = await import("@devpilot/core/db");
+        const { eq: eq5 } = await import("drizzle-orm");
+        await db.update(rufloSessions3).set({
+          status: "ERROR",
+          updatedAt: /* @__PURE__ */ new Date()
+        }).where(eq5(rufloSessions3.id, sessionId));
+        await db.insert(activityEvents4).values({
+          type: "SESSION_COMPLETE",
+          message: `Session error: ${error.message}`,
+          metadata: { sessionId, error: error.message }
+        });
+      }
+    });
+    console.log(`Orchestrator initialized in ${options.orchestrator.mode} mode`);
+  }
   const app = (0, import_fastify.default)({
     logger: {
       level: "info",
@@ -1630,14 +1731,186 @@ async function configureOrchestrator(cwd, configPath, nonInteractive = false) {
   console.log(import_chalk6.default.gray("  ...\n"));
 }
 
+// src/commands/bridge.ts
+var import_commander9 = require("commander");
+
+// src/commands/bridge/connect.ts
+var import_commander6 = require("commander");
+var import_chalk7 = __toESM(require("chalk"));
+var import_bridge_client = require("@devpilot/bridge-client");
+var connectCommand = new import_commander6.Command("connect").description("Connect to DevPilot cloud bridge").option("-u, --bridge-url <url>", "Bridge service URL", process.env.DEVPILOT_BRIDGE_URL).option("-k, --api-key <key>", "API key for authentication", process.env.DEVPILOT_BRIDGE_API_KEY).option("-r, --repos <repos>", "Comma-separated list of repos to handle").option("-p, --project <project>", "GCP project ID for Pub/Sub", process.env.GCP_PROJECT_ID).action(async (options) => {
+  if (!options.bridgeUrl) {
+    console.error(import_chalk7.default.red("\u2717 Error: Bridge URL is required (--bridge-url or DEVPILOT_BRIDGE_URL)"));
+    process.exit(1);
+  }
+  console.log(import_chalk7.default.cyan("\u{1F309} Connecting to DevPilot Bridge"));
+  console.log("");
+  console.log(import_chalk7.default.gray(`   Bridge URL: ${options.bridgeUrl}`));
+  console.log("");
+  const client = new import_bridge_client.BridgeClient({
+    bridgeUrl: options.bridgeUrl,
+    apiKey: options.apiKey || "",
+    gcpProjectId: options.project
+  });
+  try {
+    const repos = options.repos?.split(",").map((r) => r.trim()) || [];
+    const result = await client.register({
+      repos,
+      maxConcurrentJobs: 4
+    });
+    console.log(import_chalk7.default.green("\u2713 Registered with bridge"));
+    console.log(import_chalk7.default.gray(`   Orchestrator ID: ${result.orchestratorId}`));
+    console.log(import_chalk7.default.gray(`   Repos: ${repos.join(", ") || "None specified"}`));
+    console.log("");
+    const heartbeat = new import_bridge_client.HeartbeatService({
+      bridgeUrl: options.bridgeUrl,
+      apiKey: options.apiKey || "",
+      orchestratorId: result.orchestratorId,
+      intervalMs: 3e4
+    });
+    heartbeat.start();
+    console.log(import_chalk7.default.green("\u2713 Heartbeat service started"));
+    console.log("");
+    if (options.project) {
+      const subscriber = new import_bridge_client.PubSubSubscriber({
+        projectId: options.project,
+        subscriptionName: `devpilot-dispatch-${result.orchestratorId}`,
+        onMessage: async (message) => {
+          console.log(import_chalk7.default.blue(`\u{1F4E8} Received dispatch: ${message.linearIdentifier} - ${message.title}`));
+        }
+      });
+      await subscriber.start();
+      console.log(import_chalk7.default.green("\u2713 Pub/Sub subscriber started"));
+      console.log("");
+    }
+    console.log(import_chalk7.default.cyan("Connected to bridge. Press Ctrl+C to disconnect."));
+    console.log("");
+    process.on("SIGINT", () => {
+      console.log("");
+      console.log(import_chalk7.default.yellow("Disconnecting from bridge..."));
+      heartbeat.stop();
+      console.log(import_chalk7.default.green("\u2713 Disconnected"));
+      process.exit(0);
+    });
+    process.on("SIGTERM", () => {
+      heartbeat.stop();
+      process.exit(0);
+    });
+    await new Promise(() => {
+    });
+  } catch (error) {
+    console.error(import_chalk7.default.red("\u2717 Failed to connect:"));
+    console.error(import_chalk7.default.red(`   ${error instanceof Error ? error.message : error}`));
+    process.exit(1);
+  }
+});
+
+// src/commands/bridge/disconnect.ts
+var import_commander7 = require("commander");
+var import_chalk8 = __toESM(require("chalk"));
+var disconnectCommand = new import_commander7.Command("disconnect").description("Disconnect from DevPilot cloud bridge").option("-u, --bridge-url <url>", "Bridge service URL", process.env.DEVPILOT_BRIDGE_URL).option("-k, --api-key <key>", "API key", process.env.DEVPILOT_BRIDGE_API_KEY).option("-i, --orchestrator-id <id>", "Orchestrator ID to disconnect").action(async (options) => {
+  if (!options.bridgeUrl || !options.orchestratorId) {
+    console.error(import_chalk8.default.red("\u2717 Error: Bridge URL and orchestrator ID required"));
+    console.error(import_chalk8.default.gray("   Use: devpilot bridge disconnect -u <url> -i <orchestrator-id>"));
+    process.exit(1);
+  }
+  console.log(import_chalk8.default.cyan("\u{1F309} Disconnecting from DevPilot Bridge"));
+  console.log("");
+  console.log(import_chalk8.default.gray(`   Bridge URL: ${options.bridgeUrl}`));
+  console.log(import_chalk8.default.gray(`   Orchestrator ID: ${options.orchestratorId}`));
+  console.log("");
+  try {
+    const response = await fetch(
+      `${options.bridgeUrl}/api/orchestrators/${options.orchestratorId}`,
+      {
+        method: "DELETE",
+        headers: {
+          "Authorization": `Bearer ${options.apiKey}`
+        }
+      }
+    );
+    if (response.ok) {
+      console.log(import_chalk8.default.green("\u2713 Successfully disconnected from bridge"));
+    } else {
+      const errorText = await response.text();
+      console.error(import_chalk8.default.red("\u2717 Failed to disconnect:"));
+      console.error(import_chalk8.default.red(`   ${errorText}`));
+      process.exit(1);
+    }
+  } catch (error) {
+    console.error(import_chalk8.default.red("\u2717 Error disconnecting:"));
+    console.error(import_chalk8.default.red(`   ${error instanceof Error ? error.message : error}`));
+    process.exit(1);
+  }
+});
+
+// src/commands/bridge/status.ts
+var import_commander8 = require("commander");
+var import_chalk9 = __toESM(require("chalk"));
+var statusCommand2 = new import_commander8.Command("status").description("Check bridge connection status").option("-u, --bridge-url <url>", "Bridge service URL", process.env.DEVPILOT_BRIDGE_URL).option("-i, --orchestrator-id <id>", "Orchestrator ID").option("-k, --api-key <key>", "API key", process.env.DEVPILOT_BRIDGE_API_KEY).action(async (options) => {
+  if (!options.bridgeUrl) {
+    console.error(import_chalk9.default.red("\u2717 Error: Bridge URL required"));
+    console.error(import_chalk9.default.gray("   Use: devpilot bridge status -u <url>"));
+    process.exit(1);
+  }
+  console.log(import_chalk9.default.cyan("\u{1F309} DevPilot Bridge Status"));
+  console.log("");
+  try {
+    const healthRes = await fetch(`${options.bridgeUrl}/health`);
+    const health = await healthRes.json();
+    console.log(import_chalk9.default.white("Bridge Status:"));
+    if (health.status === "ok") {
+      console.log(import_chalk9.default.gray("  Status: ") + import_chalk9.default.green("\u2713 Online"));
+    } else {
+      console.log(import_chalk9.default.gray("  Status: ") + import_chalk9.default.red("\u2717 Offline"));
+    }
+    console.log("");
+    if (options.orchestratorId) {
+      const orchRes = await fetch(
+        `${options.bridgeUrl}/api/orchestrators/${options.orchestratorId}`,
+        {
+          headers: {
+            "Authorization": `Bearer ${options.apiKey}`
+          }
+        }
+      );
+      if (orchRes.ok) {
+        const orch = await orchRes.json();
+        console.log(import_chalk9.default.white("Orchestrator Status:"));
+        console.log(import_chalk9.default.gray("  ID: ") + import_chalk9.default.cyan(orch.id));
+        console.log(import_chalk9.default.gray("  Name: ") + import_chalk9.default.white(orch.name));
+        if (orch.isOnline) {
+          console.log(import_chalk9.default.gray("  Online: ") + import_chalk9.default.green("\u2713"));
+        } else {
+          console.log(import_chalk9.default.gray("  Online: ") + import_chalk9.default.red("\u2717"));
+        }
+        console.log(import_chalk9.default.gray("  Active Jobs: ") + import_chalk9.default.yellow(orch.activeJobs));
+        console.log(import_chalk9.default.gray("  Last Heartbeat: ") + import_chalk9.default.white(orch.lastHeartbeat || "Never"));
+        console.log(import_chalk9.default.gray("  Repos: ") + import_chalk9.default.cyan(orch.repos?.join(", ") || "None"));
+      } else {
+        console.log(import_chalk9.default.white("Orchestrator Status:"));
+        console.log(import_chalk9.default.gray("  ") + import_chalk9.default.red("Not found or unauthorized"));
+      }
+    }
+  } catch (error) {
+    console.error(import_chalk9.default.red("\u2717 Error checking status:"));
+    console.error(import_chalk9.default.red(`   ${error instanceof Error ? error.message : error}`));
+    process.exit(1);
+  }
+});
+
+// src/commands/bridge.ts
+var bridgeCommand = new import_commander9.Command("bridge").description("Manage connection to DevPilot cloud bridge").addCommand(connectCommand).addCommand(disconnectCommand).addCommand(statusCommand2);
+
 // src/cli.ts
-var cli = new import_commander6.Command();
+var cli = new import_commander10.Command();
 cli.name("devpilot").description("DevPilot CLI - Manage your AI coding agent fleet").version(VERSION);
 cli.addCommand(initCommand);
 cli.addCommand(setupCommand);
 cli.addCommand(serveCommand);
 cli.addCommand(statusCommand);
 cli.addCommand(configCommand);
+cli.addCommand(bridgeCommand);
 function runCli(args = process.argv) {
   cli.parse(args);
 }

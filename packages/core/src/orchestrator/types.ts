@@ -37,7 +37,7 @@ export interface TaskSpec {
  */
 export interface StatusUpdate {
   sessionId: string;
-  status: 'queued' | 'running' | 'waiting' | 'complete' | 'error';
+  status: 'queued' | 'running' | 'waiting' | 'complete' | 'error' | 'cancelled';
   progressPercent: number;
   currentStep?: string;
   currentFile?: string;

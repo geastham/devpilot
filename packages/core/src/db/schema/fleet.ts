@@ -1,7 +1,7 @@
 import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
 import { relations } from 'drizzle-orm';
 import { createId } from '@paralleldrive/cuid2';
-import { sessionStatusValues, modelValues } from './enums';
+import { sessionStatusValues, modelValues, orchestratorModeValues } from './enums';
 
 // ============================================================================
 // Ruflo Sessions
@@ -19,6 +19,11 @@ export const rufloSessions = sqliteTable('ruflo_sessions', {
   status: text('status', { enum: sessionStatusValues }).notNull().default('ACTIVE'),
   inFlightFiles: text('in_flight_files', { mode: 'json' }).$type<string[]>().default([]),
   prUrl: text('pr_url'),
+  // External orchestrator tracking
+  externalSessionId: text('external_session_id'),
+  orchestratorMode: text('orchestrator_mode', { enum: orchestratorModeValues }),
+  tokensUsed: integer('tokens_used'),
+  costUsd: integer('cost_usd'),
   createdAt: integer('created_at', { mode: 'timestamp' })
     .notNull()
     .$defaultFn(() => new Date()),

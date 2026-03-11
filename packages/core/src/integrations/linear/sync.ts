@@ -5,6 +5,7 @@
 
 import { getLinearClient, isLinearConfigured } from './client';
 import type { SyncResult, LinearWebhookPayload } from './types';
+import { verifyLinearWebhookSignature } from './webhook-verify';
 
 export interface SessionToLinearSync {
   sessionId: string;
@@ -30,6 +31,16 @@ export interface SessionCompletionSync {
   prUrl?: string;
   filesModified: string[];
   completionMessage?: string;
+}
+
+export interface DispatchIntent {
+  linearIssueId: string;
+  linearIdentifier: string;
+  title: string;
+  description?: string;
+  teamId: string;
+  priority?: number;
+  labels?: string[];
 }
 
 /**
@@ -128,8 +139,27 @@ export async function syncCompletionToLinear(
  * Handle incoming Linear webhook
  */
 export async function handleLinearWebhook(
-  payload: LinearWebhookPayload
-): Promise<{ handled: boolean; action?: string }> {
+  payload: LinearWebhookPayload,
+  options?: {
+    botUserId?: string;
+    webhookSecret?: string;
+    signature?: string;
+    rawBody?: string;
+  }
+): Promise<{ handled: boolean; action?: string; dispatch?: DispatchIntent }> {
+  // Verify webhook signature if credentials are provided
+  if (options?.webhookSecret && options?.signature && options?.rawBody) {
+    const isValid = verifyLinearWebhookSignature(
+      options.rawBody,
+      options.signature,
+      options.webhookSecret
+    );
+
+    if (!isValid) {
+      throw new Error('Invalid webhook signature');
+    }
+  }
+
   // Only handle Issue updates for now
   if (payload.type !== 'Issue') {
     return { handled: false };
@@ -137,6 +167,27 @@ export async function handleLinearWebhook(
 
   switch (payload.action) {
     case 'update':
+      // Check if the issue was assigned to the bot user
+      if (options?.botUserId && payload.data?.assigneeId === options.botUserId) {
+        // Extract issue data for dispatch
+        const data = payload.data as Record<string, unknown>;
+        const dispatch: DispatchIntent = {
+          linearIssueId: data.id as string,
+          linearIdentifier: data.identifier as string,
+          title: data.title as string,
+          description: data.description as string | undefined,
+          teamId: data.teamId as string,
+          priority: data.priority as number | undefined,
+          labels: data.labelIds as string[] | undefined,
+        };
+
+        return {
+          handled: true,
+          action: 'bot_assigned',
+          dispatch
+        };
+      }
+
       // Handle issue state changes from Linear
       // This could update local session state if needed
       return { handled: true, action: 'issue_updated' };

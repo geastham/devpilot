@@ -28,3 +28,6 @@ export const eventTypeValues = [
   'SCORE_UPDATE',
 ] as const;
 export type EventType = (typeof eventTypeValues)[number];
+
+export const orchestratorModeValues = ['http', 'ao-cli', 'manual', 'disabled'] as const;
+export type OrchestratorMode = (typeof orchestratorModeValues)[number];
