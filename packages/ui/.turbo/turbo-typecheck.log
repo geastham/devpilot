@@ -1,0 +1,4 @@
+
+> @devpilot/ui@0.1.0 typecheck /Users/garretteastham/dev/devpilot/platform/devpilot-core/packages/ui
+> tsc --noEmit
+

@@ -1,0 +1,154 @@
+{
+  "version": 3,
+  "pages404": true,
+  "appType": "app",
+  "caseSensitive": false,
+  "basePath": "",
+  "redirects": [
+    {
+      "source": "/:path+/",
+      "destination": "/:path+",
+      "internal": true,
+      "priority": true,
+      "statusCode": 308,
+      "regex": "^(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))/$"
+    }
+  ],
+  "headers": [],
+  "rewrites": {
+    "beforeFiles": [],
+    "afterFiles": [],
+    "fallback": []
+  },
+  "dynamicRoutes": [
+    {
+      "page": "/api/fleet/dispatch/[itemId]",
+      "regex": "^/api/fleet/dispatch/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPitemId": "nxtPitemId"
+      },
+      "namedRegex": "^/api/fleet/dispatch/(?<nxtPitemId>[^/]+?)(?:/)?$"
+    },
+    {
+      "page": "/api/items/[id]",
+      "regex": "^/api/items/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/items/(?<nxtPid>[^/]+?)(?:/)?$"
+    },
+    {
+      "page": "/api/items/[id]/plan",
+      "regex": "^/api/items/([^/]+?)/plan(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/items/(?<nxtPid>[^/]+?)/plan(?:/)?$"
+    },
+    {
+      "page": "/api/items/[id]/plan/generate",
+      "regex": "^/api/items/([^/]+?)/plan/generate(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/items/(?<nxtPid>[^/]+?)/plan/generate(?:/)?$"
+    },
+    {
+      "page": "/api/items/[id]/plan/replan",
+      "regex": "^/api/items/([^/]+?)/plan/replan(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/items/(?<nxtPid>[^/]+?)/plan/replan(?:/)?$"
+    },
+    {
+      "page": "/api/items/[id]/plan/tasks/[taskId]",
+      "regex": "^/api/items/([^/]+?)/plan/tasks/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid",
+        "nxtPtaskId": "nxtPtaskId"
+      },
+      "namedRegex": "^/api/items/(?<nxtPid>[^/]+?)/plan/tasks/(?<nxtPtaskId>[^/]+?)(?:/)?$"
+    }
+  ],
+  "staticRoutes": [
+    {
+      "page": "/",
+      "regex": "^/(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/(?:/)?$"
+    },
+    {
+      "page": "/_global-error",
+      "regex": "^/_global\\-error(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/_global\\-error(?:/)?$"
+    },
+    {
+      "page": "/_not-found",
+      "regex": "^/_not\\-found(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/_not\\-found(?:/)?$"
+    },
+    {
+      "page": "/api/events",
+      "regex": "^/api/events(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/events(?:/)?$"
+    },
+    {
+      "page": "/api/events/stream",
+      "regex": "^/api/events/stream(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/events/stream(?:/)?$"
+    },
+    {
+      "page": "/api/fleet/sessions",
+      "regex": "^/api/fleet/sessions(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/fleet/sessions(?:/)?$"
+    },
+    {
+      "page": "/api/fleet/state",
+      "regex": "^/api/fleet/state(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/fleet/state(?:/)?$"
+    },
+    {
+      "page": "/api/items",
+      "regex": "^/api/items(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/items(?:/)?$"
+    },
+    {
+      "page": "/api/score",
+      "regex": "^/api/score(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/score(?:/)?$"
+    },
+    {
+      "page": "/api/score/history",
+      "regex": "^/api/score/history(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/score/history(?:/)?$"
+    }
+  ],
+  "dataRoutes": [],
+  "rsc": {
+    "header": "rsc",
+    "varyHeader": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch",
+    "prefetchHeader": "next-router-prefetch",
+    "didPostponeHeader": "x-nextjs-postponed",
+    "contentTypeHeader": "text/x-component",
+    "suffix": ".rsc",
+    "prefetchSegmentHeader": "next-router-segment-prefetch",
+    "prefetchSegmentSuffix": ".segment.rsc",
+    "prefetchSegmentDirSuffix": ".segments",
+    "clientParamParsing": false,
+    "dynamicRSCPrerender": false
+  },
+  "rewriteHeaders": {
+    "pathHeader": "x-nextjs-rewritten-path",
+    "queryHeader": "x-nextjs-rewritten-query"
+  }
+}

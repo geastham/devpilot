@@ -1,41 +1,24 @@
 {
-  "name": "devpilot-core",
+  "name": "devpilot-monorepo",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@9.0.0",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "next lint",
-    "db:generate": "prisma generate",
-    "db:push": "prisma db push",
-    "db:migrate": "prisma migrate dev",
-    "db:seed": "tsx prisma/seed.ts",
-    "db:studio": "prisma studio"
-  },
-  "dependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "next": "14.2.0",
-    "@prisma/client": "^5.10.0",
-    "zustand": "^4.5.0",
-    "framer-motion": "^11.0.0",
-    "recharts": "^2.12.0",
-    "date-fns": "^3.3.0",
-    "clsx": "^2.1.0",
-    "tailwind-merge": "^2.2.0"
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "db:migrate": "turbo run db:migrate",
+    "db:seed": "turbo run db:seed",
+    "db:studio": "turbo run db:studio",
+    "db:check-sync": "tsx scripts/check-schema-sync.ts",
+    "clean": "turbo run clean && rm -rf node_modules"
   },
   "devDependencies": {
-    "typescript": "^5.3.0",
     "@types/node": "^20.11.0",
-    "@types/react": "^18.2.0",
-    "@types/react-dom": "^18.2.0",
-    "autoprefixer": "^10.4.0",
-    "postcss": "^8.4.0",
-    "tailwindcss": "^3.4.0",
-    "eslint": "^8.56.0",
-    "eslint-config-next": "14.2.0",
-    "prisma": "^5.10.0",
-    "tsx": "^4.7.0"
+    "tsx": "^4.7.0",
+    "turbo": "^2.0.0",
+    "typescript": "^5.3.0"
   }
 }

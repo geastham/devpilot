@@ -1,0 +1,67 @@
+{
+  "name": "@devpilot/core",
+  "version": "0.1.0",
+  "description": "Core library for DevPilot - database schemas, integrations, and utilities",
+  "license": "MIT",
+  "author": "DevPilot Team",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/devpilot/devpilot-core.git",
+    "directory": "packages/core"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./db": {
+      "types": "./dist/db/index.d.ts",
+      "import": "./dist/db/index.mjs",
+      "require": "./dist/db/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "db:push": "drizzle-kit push",
+    "db:migrate": "drizzle-kit migrate",
+    "db:generate": "drizzle-kit generate",
+    "db:studio": "drizzle-kit studio",
+    "db:seed": "tsx src/db/seed.ts",
+    "prepublishOnly": "pnpm run build"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "@linear/sdk": "^77.0.0",
+    "@paralleldrive/cuid2": "^2.2.2",
+    "better-sqlite3": "^11.0.0",
+    "drizzle-orm": "^0.30.0",
+    "postgres": "^3.4.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.9",
+    "drizzle-kit": "^0.21.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.3.0"
+  },
+  "keywords": [
+    "devpilot",
+    "ai",
+    "database",
+    "drizzle",
+    "linear"
+  ]
+}

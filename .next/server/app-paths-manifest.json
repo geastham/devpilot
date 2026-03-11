@@ -1,0 +1,18 @@
+{
+  "/(main)/page": "app/(main)/page.js",
+  "/_global-error/page": "app/_global-error/page.js",
+  "/_not-found/page": "app/_not-found/page.js",
+  "/api/events/route": "app/api/events/route.js",
+  "/api/events/stream/route": "app/api/events/stream/route.js",
+  "/api/fleet/dispatch/[itemId]/route": "app/api/fleet/dispatch/[itemId]/route.js",
+  "/api/fleet/sessions/route": "app/api/fleet/sessions/route.js",
+  "/api/fleet/state/route": "app/api/fleet/state/route.js",
+  "/api/items/[id]/plan/generate/route": "app/api/items/[id]/plan/generate/route.js",
+  "/api/items/[id]/plan/replan/route": "app/api/items/[id]/plan/replan/route.js",
+  "/api/items/[id]/plan/route": "app/api/items/[id]/plan/route.js",
+  "/api/items/[id]/plan/tasks/[taskId]/route": "app/api/items/[id]/plan/tasks/[taskId]/route.js",
+  "/api/items/[id]/route": "app/api/items/[id]/route.js",
+  "/api/items/route": "app/api/items/route.js",
+  "/api/score/history/route": "app/api/score/history/route.js",
+  "/api/score/route": "app/api/score/route.js"
+}

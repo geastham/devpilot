@@ -1,0 +1,18 @@
+{
+  "/(main)/page": "/",
+  "/_global-error/page": "/_global-error",
+  "/_not-found/page": "/_not-found",
+  "/api/events/route": "/api/events",
+  "/api/events/stream/route": "/api/events/stream",
+  "/api/fleet/dispatch/[itemId]/route": "/api/fleet/dispatch/[itemId]",
+  "/api/fleet/sessions/route": "/api/fleet/sessions",
+  "/api/fleet/state/route": "/api/fleet/state",
+  "/api/items/[id]/plan/generate/route": "/api/items/[id]/plan/generate",
+  "/api/items/[id]/plan/replan/route": "/api/items/[id]/plan/replan",
+  "/api/items/[id]/plan/route": "/api/items/[id]/plan",
+  "/api/items/[id]/plan/tasks/[taskId]/route": "/api/items/[id]/plan/tasks/[taskId]",
+  "/api/items/[id]/route": "/api/items/[id]",
+  "/api/items/route": "/api/items",
+  "/api/score/history/route": "/api/score/history",
+  "/api/score/route": "/api/score"
+}

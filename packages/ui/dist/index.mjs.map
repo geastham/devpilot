@@ -1,0 +1,1 @@
+{"version":3,"sources":["../src/hooks/index.ts"],"sourcesContent":["// React Hooks\n// This module exports all shared React hooks\n\nexport const HOOKS_VERSION = '0.1.0';\n\n// Placeholder - hooks will be added as needed\n"],"mappings":";;;;;;;;;AAGO,IAAM,gBAAgB;","names":[]}

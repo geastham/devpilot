@@ -1,0 +1,4 @@
+
+> web@0.1.0 typecheck /Users/garretteastham/dev/devpilot/platform/devpilot-core/apps/web
+> tsc --noEmit
+

@@ -1,0 +1,28 @@
+
+> @devpilot/cli@0.1.0 build /Users/garretteastham/dev/devpilot/platform/devpilot-core/packages/cli
+> tsup
+
+CLI Building entry: src/cli.ts, src/index.ts
+CLI Using tsconfig: tsconfig.json
+CLI tsup v8.5.1
+CLI Using tsup config: /Users/garretteastham/dev/devpilot/platform/devpilot-core/packages/cli/tsup.config.ts
+CLI Target: es2020
+CLI Cleaning output folder
+CJS Build start
+ESM Build start
+CJS dist/cli.js       62.55 KB
+CJS dist/index.js     62.61 KB
+CJS dist/cli.js.map   107.62 KB
+CJS dist/index.js.map 107.75 KB
+CJS ⚡️ Build success in 17ms
+ESM dist/cli.mjs       56.46 KB
+ESM dist/index.mjs     56.47 KB
+ESM dist/cli.mjs.map   107.38 KB
+ESM dist/index.mjs.map 107.38 KB
+ESM ⚡️ Build success in 17ms
+DTS Build start
+DTS ⚡️ Build success in 2543ms
+DTS dist/index.d.ts  115.00 B
+DTS dist/cli.d.ts    139.00 B
+DTS dist/index.d.mts 116.00 B
+DTS dist/cli.d.mts   139.00 B

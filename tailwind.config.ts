@@ -43,8 +43,8 @@ const config: Config = {
         'border-red': 'rgba(239, 68, 68, 0.6)',
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
-        mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+        sans: ['var(--font-inter)', 'Inter', 'system-ui', 'sans-serif'],
+        mono: ['var(--font-jetbrains)', 'JetBrains Mono', 'Fira Code', 'monospace'],
       },
       fontSize: {
         'xs': ['11px', { lineHeight: '16px' }],

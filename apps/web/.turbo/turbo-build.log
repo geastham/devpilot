@@ -1,0 +1,45 @@
+
+> web@0.1.0 build /Users/garretteastham/dev/devpilot/platform/devpilot-core/apps/web
+> next build
+
+  ▲ Next.js 14.2.35
+
+   Creating an optimized production build ...
+ ⚠ Found lockfile missing swc dependencies, patching...
+ ⚠ Found lockfile missing swc dependencies, patching...
+ ⚠ Found lockfile missing swc dependencies, patching...
+ ⨯ Failed to patch lockfile, please try uninstalling and reinstalling next in this workspace
+TypeError: Cannot read properties of undefined (reading 'os')
+    at fetchPkgInfo (/Users/garretteastham/dev/devpilot/platform/devpilot-core/node_modules/.pnpm/next@14.2.35_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/lib/patch-incorrect-lockfile.js:73:25)
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at async Promise.all (index 0)
+    at async patchIncorrectLockfile (/Users/garretteastham/dev/devpilot/platform/devpilot-core/node_modules/.pnpm/next@14.2.35_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/lib/patch-incorrect-lockfile.js:162:26)
+ ✓ Compiled successfully
+   Linting and checking validity of types ...
+   Collecting page data ...
+ ⚠ Found lockfile missing swc dependencies, patching...
+   Generating static pages (0/4) ...
+   Generating static pages (1/4) 
+   Generating static pages (2/4) 
+   Generating static pages (3/4) 
+ ✓ Generating static pages (4/4)
+   Finalizing page optimization ...
+   Collecting build traces ...
+ ⨯ Failed to patch lockfile, please try uninstalling and reinstalling next in this workspace
+TypeError: Cannot read properties of undefined (reading 'os')
+    at fetchPkgInfo (/Users/garretteastham/dev/devpilot/platform/devpilot-core/node_modules/.pnpm/next@14.2.35_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/lib/patch-incorrect-lockfile.js:73:25)
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at async Promise.all (index 0)
+    at async patchIncorrectLockfile (/Users/garretteastham/dev/devpilot/platform/devpilot-core/node_modules/.pnpm/next@14.2.35_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/lib/patch-incorrect-lockfile.js:162:26)
+
+Route (app)                              Size     First Load JS
+┌ ○ /                                    138 B          87.4 kB
+└ ○ /_not-found                          872 B          88.1 kB
++ First Load JS shared by all            87.2 kB
+  ├ chunks/5b8f0dd8-0b7e1dd47e2a464c.js  53.6 kB
+  ├ chunks/749-39e755d29f953c93.js       31.7 kB
+  └ other shared chunks (total)          1.86 kB
+
+
+○  (Static)  prerendered as static content
+

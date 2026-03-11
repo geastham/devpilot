@@ -1,0 +1,69 @@
+{
+  "name": "@devpilot/cli",
+  "version": "0.1.0",
+  "description": "DevPilot CLI - Manage your AI coding agent fleet from the command line",
+  "license": "MIT",
+  "author": "DevPilot Team",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/devpilot/devpilot-core.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/devpilot/devpilot-core#readme",
+  "bugs": {
+    "url": "https://github.com/devpilot/devpilot-core/issues"
+  },
+  "bin": {
+    "devpilot": "./bin/devpilot.js"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "start": "node bin/devpilot.js",
+    "prepublishOnly": "pnpm run build"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "@devpilot/core": "workspace:*",
+    "chalk": "^5.3.0",
+    "chokidar": "^3.6.0",
+    "commander": "^12.0.0",
+    "drizzle-orm": "^0.30.0",
+    "fastify": "^4.26.0",
+    "inquirer": "^9.2.0",
+    "open": "^10.0.0",
+    "ora": "^8.0.0",
+    "pino-pretty": "^13.1.3",
+    "yaml": "^2.4.0"
+  },
+  "devDependencies": {
+    "@types/inquirer": "^9.0.7",
+    "tsup": "^8.0.0",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "devpilot",
+    "ai",
+    "coding",
+    "agent",
+    "fleet",
+    "cli",
+    "developer-tools",
+    "automation"
+  ]
+}
