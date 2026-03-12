@@ -1,0 +1,16 @@
+id,name,email,segment,signup_date,region
+CUST-001,Alice Johnson,alice@example.com,enterprise,2023-01-15,north_america
+CUST-002,Bob Smith,bob@example.com,smb,2023-03-22,north_america
+CUST-003,Charlie Chen,charlie@example.com,startup,2023-06-01,asia_pacific
+CUST-004,Diana Patel,diana@example.com,enterprise,2023-02-10,europe
+CUST-005,Eve Martinez,eve@example.com,individual,2023-07-18,latin_america
+CUST-006,Frank Weber,frank@example.com,smb,2023-04-05,europe
+CUST-007,Grace Kim,grace@example.com,startup,2023-08-12,asia_pacific
+CUST-008,Henry Brown,henry@example.com,enterprise,2023-01-28,north_america
+CUST-009,Iris Tanaka,iris@example.com,individual,2023-09-03,asia_pacific
+CUST-010,Jack O'Brien,jack@example.com,smb,2023-05-14,north_america
+CUST-011,Karen Liu,karen@example.com,startup,2023-10-22,asia_pacific
+CUST-012,Leo Rossi,leo@example.com,enterprise,2023-03-08,europe
+CUST-013,Maya Singh,maya@example.com,individual,2023-11-15,asia_pacific
+CUST-014,Noah Davis,noah@example.com,smb,2023-06-30,north_america
+CUST-015,Olivia Müller,olivia@example.com,startup,2023-12-01,europe

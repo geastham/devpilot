@@ -1,0 +1,16 @@
+id,name,category,cost
+PROD-001,Wireless Headphones,electronics,32.50
+PROD-002,Organic Coffee Beans,food,8.75
+PROD-003,Running Shoes,apparel,45.00
+PROD-004,Desk Lamp,home,15.20
+PROD-005,Python Cookbook,books,22.00
+PROD-006,Yoga Mat,fitness,12.00
+PROD-007,Bluetooth Speaker,electronics,28.00
+PROD-008,Green Tea Set,food,18.50
+PROD-009,Winter Jacket,apparel,65.00
+PROD-010,Standing Desk,home,180.00
+PROD-011,Data Science Handbook,books,35.00
+PROD-012,Resistance Bands,fitness,9.50
+PROD-013,Noise Cancelling Earbuds,electronics,55.00
+PROD-014,Protein Powder,food,24.00
+PROD-015,Hiking Boots,apparel,78.00

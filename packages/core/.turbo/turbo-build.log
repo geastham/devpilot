@@ -2,7 +2,7 @@
 > @devpilot.sh/core@0.1.0 build /Users/garretteastham/dev/devpilot/platform/devpilot-core/packages/core
 > tsup
 
-CLI Building entry: src/index.ts, src/db/index.ts
+CLI Building entry: src/index.ts, src/db/index.ts, src/orchestrator/index.ts
 CLI Using tsconfig: tsconfig.json
 CLI tsup v8.5.1
 CLI Using tsup config: /Users/garretteastham/dev/devpilot/platform/devpilot-core/packages/core/tsup.config.ts
@@ -10,19 +10,27 @@ CLI Target: es2020
 CLI Cleaning output folder
 CJS Build start
 ESM Build start
-ESM dist/index.mjs        59.82 KB
-ESM dist/db/index.mjs     21.36 KB
-ESM dist/index.mjs.map    117.33 KB
-ESM dist/db/index.mjs.map 39.60 KB
-ESM ⚡️ Build success in 27ms
-CJS dist/db/index.js     27.60 KB
-CJS dist/index.js        66.21 KB
-CJS dist/db/index.js.map 40.14 KB
-CJS dist/index.js.map    117.45 KB
-CJS ⚡️ Build success in 27ms
+ESM dist/orchestrator/index.mjs     26.28 KB
+ESM dist/index.mjs                  59.82 KB
+ESM dist/db/index.mjs               21.36 KB
+ESM dist/orchestrator/index.mjs.map 53.48 KB
+ESM dist/index.mjs.map              117.33 KB
+ESM dist/db/index.mjs.map           39.60 KB
+ESM ⚡️ Build success in 31ms
+CJS dist/index.js                  66.21 KB
+CJS dist/orchestrator/index.js     28.22 KB
+CJS dist/db/index.js               27.60 KB
+CJS dist/index.js.map              117.45 KB
+CJS dist/orchestrator/index.js.map 53.84 KB
+CJS dist/db/index.js.map           40.14 KB
+CJS ⚡️ Build success in 32ms
 DTS Build start
-DTS ⚡️ Build success in 2103ms
-DTS dist/index.d.ts     26.46 KB
-DTS dist/db/index.d.ts  58.84 KB
-DTS dist/index.d.mts    26.46 KB
-DTS dist/db/index.d.mts 58.84 KB
+DTS ⚡️ Build success in 2437ms
+DTS dist/index.d.ts               8.59 KB
+DTS dist/db/index.d.ts            58.84 KB
+DTS dist/orchestrator/index.d.ts  889.00 B
+DTS dist/index-D-MH25FF.d.ts      18.75 KB
+DTS dist/index.d.mts              8.59 KB
+DTS dist/db/index.d.mts           58.84 KB
+DTS dist/orchestrator/index.d.mts 890.00 B
+DTS dist/index-D-MH25FF.d.mts     18.75 KB

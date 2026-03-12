@@ -7,7 +7,8 @@ var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require
 });
 
 // src/cli.ts
-import { Command as Command10 } from "commander";
+import { Command as Command11 } from "commander";
+import updateNotifier from "update-notifier";
 
 // src/version.ts
 var VERSION = "0.1.0";
@@ -1894,8 +1895,134 @@ var statusCommand2 = new Command8("status").description("Check bridge connection
 // src/commands/bridge.ts
 var bridgeCommand = new Command9("bridge").description("Manage connection to DevPilot cloud bridge").addCommand(connectCommand).addCommand(disconnectCommand).addCommand(statusCommand2);
 
+// src/commands/update.ts
+import { Command as Command10 } from "commander";
+import { execSync as execSync2, spawn } from "child_process";
+import chalk10 from "chalk";
+async function getLatestVersion() {
+  try {
+    const result = execSync2("npm view @devpilot.sh/cli version", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    return result.trim();
+  } catch {
+    return null;
+  }
+}
+function compareVersions(a, b) {
+  const partsA = a.split(".").map(Number);
+  const partsB = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
+    const numA = partsA[i] || 0;
+    const numB = partsB[i] || 0;
+    if (numA > numB) return 1;
+    if (numA < numB) return -1;
+  }
+  return 0;
+}
+function detectPackageManager() {
+  try {
+    const pnpmList = execSync2("pnpm list -g @devpilot.sh/cli 2>/dev/null", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    if (pnpmList.includes("@devpilot.sh/cli")) return "pnpm";
+  } catch {
+  }
+  try {
+    const yarnList = execSync2("yarn global list 2>/dev/null", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    if (yarnList.includes("@devpilot.sh/cli")) return "yarn";
+  } catch {
+  }
+  try {
+    execSync2("bun --version", { stdio: ["pipe", "pipe", "pipe"] });
+    return "bun";
+  } catch {
+  }
+  return "npm";
+}
+function getUpdateCommand(pm) {
+  switch (pm) {
+    case "pnpm":
+      return "pnpm add -g @devpilot.sh/cli@latest";
+    case "yarn":
+      return "yarn global add @devpilot.sh/cli@latest";
+    case "bun":
+      return "bun add -g @devpilot.sh/cli@latest";
+    default:
+      return "npm install -g @devpilot.sh/cli@latest";
+  }
+}
+var updateCommand = new Command10("update").description("Update DevPilot CLI to the latest version").option("-c, --check", "Only check for updates without installing").option("--force", "Force update even if already on latest version").action(async (options) => {
+  console.log(chalk10.cyan("Checking for updates..."));
+  const latestVersion = await getLatestVersion();
+  if (!latestVersion) {
+    console.log(chalk10.yellow("Could not check for updates. Please check your network connection."));
+    console.log(chalk10.gray("You can manually update with: npm install -g @devpilot.sh/cli@latest"));
+    return;
+  }
+  const comparison = compareVersions(latestVersion, VERSION);
+  if (comparison === 0 && !options.force) {
+    console.log(chalk10.green(`You're already on the latest version (${VERSION})`));
+    return;
+  }
+  if (comparison === -1 && !options.force) {
+    console.log(chalk10.yellow(`You're on a newer version (${VERSION}) than the latest release (${latestVersion})`));
+    console.log(chalk10.gray("This might be a pre-release or development version."));
+    return;
+  }
+  if (options.check) {
+    if (comparison === 1) {
+      console.log(chalk10.yellow(`Update available: ${VERSION} \u2192 ${latestVersion}`));
+      console.log(chalk10.gray('Run "devpilot update" to install the latest version.'));
+    }
+    return;
+  }
+  const pm = detectPackageManager();
+  const updateCmd = getUpdateCommand(pm);
+  console.log(chalk10.cyan(`Updating from ${VERSION} to ${latestVersion}...`));
+  console.log(chalk10.gray(`Using: ${updateCmd}`));
+  console.log("");
+  try {
+    const [cmd, ...args] = updateCmd.split(" ");
+    const child = spawn(cmd, args, {
+      stdio: "inherit",
+      shell: true
+    });
+    child.on("close", (code) => {
+      if (code === 0) {
+        console.log("");
+        console.log(chalk10.green(`Successfully updated to ${latestVersion}`));
+        console.log(chalk10.gray('Run "devpilot --version" to verify.'));
+      } else {
+        console.log("");
+        console.log(chalk10.red("Update failed. Please try manually:"));
+        console.log(chalk10.cyan(`  ${updateCmd}`));
+      }
+    });
+    child.on("error", (err) => {
+      console.log(chalk10.red(`Update failed: ${err.message}`));
+      console.log(chalk10.gray("Please try manually:"));
+      console.log(chalk10.cyan(`  ${updateCmd}`));
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    console.log(chalk10.red(`Update failed: ${message}`));
+    console.log(chalk10.gray("Please try manually:"));
+    console.log(chalk10.cyan(`  ${updateCmd}`));
+  }
+});
+
 // src/cli.ts
-var cli = new Command10();
+var pkg = {
+  name: "@devpilot.sh/cli",
+  version: VERSION
+};
+var cli = new Command11();
 cli.name("devpilot").description("DevPilot CLI - Manage your AI coding agent fleet").version(VERSION);
 cli.addCommand(initCommand);
 cli.addCommand(setupCommand);
@@ -1903,7 +2030,23 @@ cli.addCommand(serveCommand);
 cli.addCommand(statusCommand);
 cli.addCommand(configCommand);
 cli.addCommand(bridgeCommand);
+cli.addCommand(updateCommand);
 function runCli(args = process.argv) {
+  const notifier = updateNotifier({
+    pkg,
+    updateCheckInterval: 1e3 * 60 * 60 * 24
+    // 24 hours
+  });
+  notifier.notify({
+    message: `Update available: {currentVersion} \u2192 {latestVersion}
+Run {updateCommand} to update`,
+    boxenOptions: {
+      padding: 1,
+      margin: 1,
+      borderColor: "cyan",
+      borderStyle: "round"
+    }
+  });
   cli.parse(args);
 }
 export {

@@ -35,7 +35,8 @@ __export(cli_exports, {
   runCli: () => runCli
 });
 module.exports = __toCommonJS(cli_exports);
-var import_commander10 = require("commander");
+var import_commander11 = require("commander");
+var import_update_notifier = __toESM(require("update-notifier"));
 
 // src/version.ts
 var VERSION = "0.1.0";
@@ -1902,8 +1903,134 @@ var statusCommand2 = new import_commander8.Command("status").description("Check 
 // src/commands/bridge.ts
 var bridgeCommand = new import_commander9.Command("bridge").description("Manage connection to DevPilot cloud bridge").addCommand(connectCommand).addCommand(disconnectCommand).addCommand(statusCommand2);
 
+// src/commands/update.ts
+var import_commander10 = require("commander");
+var import_child_process2 = require("child_process");
+var import_chalk10 = __toESM(require("chalk"));
+async function getLatestVersion() {
+  try {
+    const result = (0, import_child_process2.execSync)("npm view @devpilot.sh/cli version", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    return result.trim();
+  } catch {
+    return null;
+  }
+}
+function compareVersions(a, b) {
+  const partsA = a.split(".").map(Number);
+  const partsB = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
+    const numA = partsA[i] || 0;
+    const numB = partsB[i] || 0;
+    if (numA > numB) return 1;
+    if (numA < numB) return -1;
+  }
+  return 0;
+}
+function detectPackageManager() {
+  try {
+    const pnpmList = (0, import_child_process2.execSync)("pnpm list -g @devpilot.sh/cli 2>/dev/null", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    if (pnpmList.includes("@devpilot.sh/cli")) return "pnpm";
+  } catch {
+  }
+  try {
+    const yarnList = (0, import_child_process2.execSync)("yarn global list 2>/dev/null", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    if (yarnList.includes("@devpilot.sh/cli")) return "yarn";
+  } catch {
+  }
+  try {
+    (0, import_child_process2.execSync)("bun --version", { stdio: ["pipe", "pipe", "pipe"] });
+    return "bun";
+  } catch {
+  }
+  return "npm";
+}
+function getUpdateCommand(pm) {
+  switch (pm) {
+    case "pnpm":
+      return "pnpm add -g @devpilot.sh/cli@latest";
+    case "yarn":
+      return "yarn global add @devpilot.sh/cli@latest";
+    case "bun":
+      return "bun add -g @devpilot.sh/cli@latest";
+    default:
+      return "npm install -g @devpilot.sh/cli@latest";
+  }
+}
+var updateCommand = new import_commander10.Command("update").description("Update DevPilot CLI to the latest version").option("-c, --check", "Only check for updates without installing").option("--force", "Force update even if already on latest version").action(async (options) => {
+  console.log(import_chalk10.default.cyan("Checking for updates..."));
+  const latestVersion = await getLatestVersion();
+  if (!latestVersion) {
+    console.log(import_chalk10.default.yellow("Could not check for updates. Please check your network connection."));
+    console.log(import_chalk10.default.gray("You can manually update with: npm install -g @devpilot.sh/cli@latest"));
+    return;
+  }
+  const comparison = compareVersions(latestVersion, VERSION);
+  if (comparison === 0 && !options.force) {
+    console.log(import_chalk10.default.green(`You're already on the latest version (${VERSION})`));
+    return;
+  }
+  if (comparison === -1 && !options.force) {
+    console.log(import_chalk10.default.yellow(`You're on a newer version (${VERSION}) than the latest release (${latestVersion})`));
+    console.log(import_chalk10.default.gray("This might be a pre-release or development version."));
+    return;
+  }
+  if (options.check) {
+    if (comparison === 1) {
+      console.log(import_chalk10.default.yellow(`Update available: ${VERSION} \u2192 ${latestVersion}`));
+      console.log(import_chalk10.default.gray('Run "devpilot update" to install the latest version.'));
+    }
+    return;
+  }
+  const pm = detectPackageManager();
+  const updateCmd = getUpdateCommand(pm);
+  console.log(import_chalk10.default.cyan(`Updating from ${VERSION} to ${latestVersion}...`));
+  console.log(import_chalk10.default.gray(`Using: ${updateCmd}`));
+  console.log("");
+  try {
+    const [cmd, ...args] = updateCmd.split(" ");
+    const child = (0, import_child_process2.spawn)(cmd, args, {
+      stdio: "inherit",
+      shell: true
+    });
+    child.on("close", (code) => {
+      if (code === 0) {
+        console.log("");
+        console.log(import_chalk10.default.green(`Successfully updated to ${latestVersion}`));
+        console.log(import_chalk10.default.gray('Run "devpilot --version" to verify.'));
+      } else {
+        console.log("");
+        console.log(import_chalk10.default.red("Update failed. Please try manually:"));
+        console.log(import_chalk10.default.cyan(`  ${updateCmd}`));
+      }
+    });
+    child.on("error", (err) => {
+      console.log(import_chalk10.default.red(`Update failed: ${err.message}`));
+      console.log(import_chalk10.default.gray("Please try manually:"));
+      console.log(import_chalk10.default.cyan(`  ${updateCmd}`));
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    console.log(import_chalk10.default.red(`Update failed: ${message}`));
+    console.log(import_chalk10.default.gray("Please try manually:"));
+    console.log(import_chalk10.default.cyan(`  ${updateCmd}`));
+  }
+});
+
 // src/cli.ts
-var cli = new import_commander10.Command();
+var pkg = {
+  name: "@devpilot.sh/cli",
+  version: VERSION
+};
+var cli = new import_commander11.Command();
 cli.name("devpilot").description("DevPilot CLI - Manage your AI coding agent fleet").version(VERSION);
 cli.addCommand(initCommand);
 cli.addCommand(setupCommand);
@@ -1911,7 +2038,23 @@ cli.addCommand(serveCommand);
 cli.addCommand(statusCommand);
 cli.addCommand(configCommand);
 cli.addCommand(bridgeCommand);
+cli.addCommand(updateCommand);
 function runCli(args = process.argv) {
+  const notifier = (0, import_update_notifier.default)({
+    pkg,
+    updateCheckInterval: 1e3 * 60 * 60 * 24
+    // 24 hours
+  });
+  notifier.notify({
+    message: `Update available: {currentVersion} \u2192 {latestVersion}
+Run {updateCommand} to update`,
+    boxenOptions: {
+      padding: 1,
+      margin: 1,
+      borderColor: "cyan",
+      borderStyle: "round"
+    }
+  });
   cli.parse(args);
 }
 // Annotate the CommonJS export names for ESM import in node:
