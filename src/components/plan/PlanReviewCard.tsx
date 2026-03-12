@@ -1,13 +1,15 @@
 'use client';
 
 import { cn, formatCurrency, calculateSavingsPercent } from '@/lib/utils';
-import { useHorizonStore, useUIStore } from '@/stores';
+import { useHorizonStore, useUIStore, useWavePlanStore } from '@/stores';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { RepoBadge } from '@/components/ui/badge';
 import { WorkstreamGrid } from './WorkstreamGrid';
 import { CostBreakdown } from './CostBreakdown';
+import { WaveProgressBar } from './WaveProgressBar';
 import type { HorizonItem } from '@/types';
+import { useState, useEffect } from 'react';
 
 interface PlanReviewCardProps {
   item: HorizonItem;
@@ -16,6 +18,16 @@ interface PlanReviewCardProps {
 export function PlanReviewCard({ item }: PlanReviewCardProps) {
   const approvePlan = useHorizonStore((state) => state.approvePlan);
   const openDiffView = useUIStore((state) => state.openDiffView);
+  const getWavePlanByHorizonItem = useWavePlanStore((state) => state.getWavePlanByHorizonItem);
+
+  const [wavePlan, setWavePlan] = useState(() => getWavePlanByHorizonItem(item.id));
+
+  useEffect(() => {
+    const unsubscribe = useWavePlanStore.subscribe((state) => {
+      setWavePlan(state.getWavePlanByHorizonItem(item.id));
+    });
+    return unsubscribe;
+  }, [item.id]);
 
   if (!item.plan) return null;
 
@@ -34,8 +46,55 @@ export function PlanReviewCard({ item }: PlanReviewCardProps) {
     console.log('Replan requested');
   };
 
+  const handlePauseWave = async () => {
+    if (!wavePlan) return;
+    try {
+      await fetch(`/api/wave-plans/${wavePlan.id}/pause`, { method: 'POST' });
+    } catch (error) {
+      console.error('Failed to pause wave plan:', error);
+    }
+  };
+
+  const handleResumeWave = async () => {
+    if (!wavePlan) return;
+    try {
+      await fetch(`/api/wave-plans/${wavePlan.id}/resume`, { method: 'POST' });
+    } catch (error) {
+      console.error('Failed to resume wave plan:', error);
+    }
+  };
+
+  const handleReoptimize = async () => {
+    if (!wavePlan) return;
+    try {
+      await fetch(`/api/items/${item.id}/wave-plan/reoptimize`, { method: 'POST' });
+    } catch (error) {
+      console.error('Failed to reoptimize wave plan:', error);
+    }
+  };
+
+  const handleViewDAG = () => {
+    if (!wavePlan) return;
+    // TODO: Open DAG visualization modal
+    console.log('View DAG for wave plan:', wavePlan.id);
+  };
+
   return (
-    <Card className="bg-bg-surface border border-border-default">
+    <Card className="bg-bg-surface border border-border-default relative">
+      {/* Wave Plan Overlay */}
+      {wavePlan && (
+        <div className="absolute top-0 right-0 m-2 z-10">
+          <div className="flex items-center gap-2 bg-bg-panel/90 backdrop-blur-sm border border-border-default rounded-lg px-3 py-1.5">
+            <span className="text-xs text-accent-primary font-medium">
+              {wavePlan.status === 'executing' ? '⚡ Wave Active' :
+               wavePlan.status === 'paused' ? '⏸ Paused' :
+               wavePlan.status === 're-optimizing' ? '⟳ Re-optimizing' :
+               '✓ Wave Plan'}
+            </span>
+          </div>
+        </div>
+      )}
+
       <CardContent className="p-0">
         {/* Header */}
         <div className="flex items-start justify-between p-4 border-b border-border-default">
@@ -59,14 +118,45 @@ export function PlanReviewCard({ item }: PlanReviewCardProps) {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={handleReplan}>
-              Re-plan ↺
-            </Button>
-            <Button size="sm" onClick={handleApprove}>
-              Approve →
-            </Button>
+            {!wavePlan && (
+              <>
+                <Button variant="ghost" size="sm" onClick={handleReplan}>
+                  Re-plan ↺
+                </Button>
+                <Button size="sm" onClick={handleApprove}>
+                  Approve →
+                </Button>
+              </>
+            )}
+            {wavePlan && (
+              <>
+                {wavePlan.status === 'executing' && (
+                  <Button variant="ghost" size="sm" onClick={handlePauseWave}>
+                    Pause
+                  </Button>
+                )}
+                {wavePlan.status === 'paused' && (
+                  <Button variant="ghost" size="sm" onClick={handleResumeWave}>
+                    Resume
+                  </Button>
+                )}
+                <Button variant="ghost" size="sm" onClick={handleReoptimize}>
+                  Re-optimize
+                </Button>
+                <Button variant="ghost" size="sm" onClick={handleViewDAG}>
+                  View DAG
+                </Button>
+              </>
+            )}
           </div>
         </div>
+
+        {/* Wave Progress Section */}
+        {wavePlan && (
+          <div className="p-4 border-b border-border-default bg-bg-panel/30">
+            <WaveProgressBar wavePlan={wavePlan} />
+          </div>
+        )}
 
         {/* Workstream Grid */}
         <div className="p-4">

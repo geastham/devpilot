@@ -4,3 +4,4 @@ export { PlanReviewCard } from './PlanReviewCard';
 export { WorkstreamGrid } from './WorkstreamGrid';
 export { TaskRow } from './TaskRow';
 export { CostBreakdown } from './CostBreakdown';
+export { WaveProgressBar, CompactWaveProgress } from './WaveProgressBar';

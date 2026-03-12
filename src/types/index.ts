@@ -20,7 +20,12 @@ export type EventType =
   | 'plan_approved'
   | 'item_dispatched'
   | 'runway_update'
-  | 'score_update';
+  | 'score_update'
+  | 'wave_advance'
+  | 'wave_task_complete'
+  | 'wave_plan_complete'
+  | 'wave_plan_paused'
+  | 'wave_plan_resumed';
 
 // ============================================================================
 // Core Data Models
@@ -236,4 +241,98 @@ export interface PaginatedResponse<T> {
   total: number;
   page: number;
   pageSize: number;
+}
+
+// ============================================================================
+// Wave Plan Types
+// ============================================================================
+
+export type WavePlanStatus = 'draft' | 'approved' | 'executing' | 'paused' | 're-optimizing' | 'completed' | 'failed';
+export type WaveStatus = 'pending' | 'ready' | 'executing' | 'completed' | 'blocked';
+export type WaveTaskStatus = 'pending' | 'ready' | 'dispatched' | 'running' | 'completed' | 'failed' | 'blocked';
+export type DependencyEdgeType = 'file' | 'logical' | 'external';
+
+export interface WavePlan {
+  id: string;
+  horizonItemId: string;
+  planId: string;
+  version: number;
+  status: WavePlanStatus;
+  totalWaves: number;
+  currentWaveIndex: number;
+  totalTasks: number;
+  completedTasks: number;
+  failedTasks: number;
+  estimatedTotalMinutes: number;
+  actualElapsedMinutes: number;
+  createdAt: Date;
+  updatedAt: Date;
+  previousWavePlanId: string | null;
+  waves: Wave[];
+  waveTasks: WaveTask[];
+  dependencyEdges: DependencyEdge[];
+  metrics?: WavePlanMetric;
+}
+
+export interface Wave {
+  id: string;
+  wavePlanId: string;
+  waveIndex: number;
+  status: WaveStatus;
+  taskCount: number;
+  completedTaskCount: number;
+  estimatedMinutes: number;
+  actualMinutes: number | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  tasks: WaveTask[];
+}
+
+export interface WaveTask {
+  id: string;
+  wavePlanId: string;
+  waveId: string | null;
+  taskId: string;
+  waveIndex: number;
+  status: WaveTaskStatus;
+  dispatchedAt: Date | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  failedAt: Date | null;
+  rufloSessionId: string | null;
+  errorMessage: string | null;
+}
+
+export interface DependencyEdge {
+  id: string;
+  wavePlanId: string;
+  sourceTaskId: string;
+  targetTaskId: string;
+  edgeType: DependencyEdgeType;
+  blockerFilePath: string | null;
+  strengthScore: number;
+}
+
+export interface WavePlanMetric {
+  id: string;
+  wavePlanId: string;
+  parallelismEfficiency: number;
+  waveUtilization: number;
+  criticalPathLength: number;
+  avgWaveSize: number;
+  taskDistributionVariance: number;
+  estimatedCompletionTimeMinutes: number;
+  createdAt: Date;
+}
+
+export interface WavePlanHeartbeat {
+  id: string;
+  horizonItemId: string;
+  status: WavePlanStatus;
+  currentWaveIndex: number;
+  totalWaves: number;
+  completedTasks: number;
+  activeTasks: number;
+  failedTasks: number;
+  totalTasks: number;
 }

@@ -41,6 +41,12 @@ export const {
   scoreHistory,
   // Event tables
   activityEvents,
+  // Wave planner tables
+  wavePlans,
+  waves,
+  waveTasks,
+  dependencyEdges,
+  wavePlanMetrics,
 } = schema;
 
 // Re-export enums for API routes
@@ -52,6 +58,11 @@ export {
   taskStatusValues,
   fileStatusValues,
   eventTypeValues,
+  // Wave planner enums
+  wavePlanStatusValues,
+  waveStatusValues,
+  waveTaskStatusValues,
+  dependencyEdgeTypeValues,
 } from '@devpilot.sh/core/db';
 
 // Re-export types
@@ -85,6 +96,21 @@ export type {
   NewScoreHistory,
   ActivityEvent,
   NewActivityEvent,
+  // Wave planner types
+  WavePlan,
+  NewWavePlan,
+  Wave,
+  NewWave,
+  WaveTask,
+  NewWaveTask,
+  DependencyEdge,
+  NewDependencyEdge,
+  WavePlanMetric,
+  NewWavePlanMetric,
+  WavePlanStatus,
+  WaveStatus,
+  WaveTaskStatus,
+  DependencyEdgeType,
 } from '@devpilot.sh/core/db';
 
 // Re-export query operators for building queries

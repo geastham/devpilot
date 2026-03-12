@@ -187,6 +187,20 @@ export function useFleetSSE() {
           addActivityEvent(data.event);
           break;
 
+        case 'wave_plan_heartbeat':
+          // Update wave plan store with heartbeat data
+          if (data.wavePlans && Array.isArray(data.wavePlans)) {
+            const { useWavePlanStore } = require('./wavePlanStore');
+            data.wavePlans.forEach((wp: any) => {
+              useWavePlanStore.getState().updateFromHeartbeat(wp);
+            });
+          }
+          break;
+
+        case 'fleet_heartbeat':
+          // Handle fleet heartbeat if needed
+          break;
+
         default:
           console.log('Unknown event type:', data.type);
       }

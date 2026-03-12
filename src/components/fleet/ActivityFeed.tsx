@@ -23,6 +23,11 @@ const eventTypeConfig: Record<
   item_dispatched: { color: 'text-accent-primary', icon: '🚀' },
   runway_update: { color: 'text-accent-amber', icon: '⏱' },
   score_update: { color: 'text-accent-purple', icon: '★' },
+  wave_advance: { color: 'text-accent-primary', icon: '⚡' },
+  wave_task_complete: { color: 'text-accent-green', icon: '✓' },
+  wave_plan_complete: { color: 'text-accent-green', icon: '🎉' },
+  wave_plan_paused: { color: 'text-accent-amber', icon: '⏸' },
+  wave_plan_resumed: { color: 'text-accent-primary', icon: '▶' },
 };
 
 export function ActivityFeed({ className, maxItems = 20 }: ActivityFeedProps) {
@@ -69,12 +74,15 @@ function ActivityEventRow({ event, isNew }: ActivityEventRowProps) {
     icon: '•',
   };
 
+  const isWaveEvent = event.type.startsWith('wave_');
+
   return (
     <div
       className={cn(
         'flex items-start gap-2 border-b border-border-default px-4 py-2',
         'hover:bg-white/5 transition-colors',
-        isNew && 'animate-slide-in-top bg-white/5'
+        isNew && 'animate-slide-in-top bg-white/5',
+        isWaveEvent && 'border-l-2 border-l-accent-primary'
       )}
     >
       {/* Timestamp */}
@@ -88,9 +96,57 @@ function ActivityEventRow({ event, isNew }: ActivityEventRowProps) {
       )}
 
       {/* Message */}
-      <span className={cn('flex-1 text-xs', config.color)}>
-        {config.icon} {event.message}
-      </span>
+      <div className="flex-1 flex flex-col gap-1">
+        <span className={cn('text-xs', config.color)}>
+          {config.icon} {event.message}
+        </span>
+
+        {/* Wave event metadata */}
+        {isWaveEvent && event.metadata && (
+          <WaveEventMetadata type={event.type} metadata={event.metadata} />
+        )}
+      </div>
     </div>
   );
+}
+
+interface WaveEventMetadataProps {
+  type: EventType;
+  metadata: Record<string, unknown>;
+}
+
+function WaveEventMetadata({ type, metadata }: WaveEventMetadataProps) {
+  if (type === 'wave_advance') {
+    return (
+      <div className="text-[10px] text-text-muted font-mono">
+        Wave {metadata.fromWave} → {metadata.toWave} ({metadata.tasksCompleted}/{metadata.totalTasks} tasks)
+      </div>
+    );
+  }
+
+  if (type === 'wave_task_complete') {
+    return (
+      <div className="text-[10px] text-text-muted font-mono">
+        {metadata.taskLabel} • {metadata.duration}m • {metadata.model}
+      </div>
+    );
+  }
+
+  if (type === 'wave_plan_complete') {
+    return (
+      <div className="text-[10px] text-text-muted font-mono">
+        {metadata.totalTasks} tasks • {metadata.totalWaves} waves • {metadata.duration}m elapsed
+      </div>
+    );
+  }
+
+  if (type === 'wave_plan_paused' || type === 'wave_plan_resumed') {
+    return (
+      <div className="text-[10px] text-text-muted font-mono">
+        Wave {metadata.currentWave}/{metadata.totalWaves} • {metadata.completedTasks}/{metadata.totalTasks} tasks
+      </div>
+    );
+  }
+
+  return null;
 }

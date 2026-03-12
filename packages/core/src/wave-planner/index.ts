@@ -21,3 +21,28 @@ export * from './wave-assigner';
 
 // Plan scoring
 export * from './plan-scorer';
+
+// AI client
+export * from './ai-client';
+
+// Fallback logic
+export * from './fallback';
+
+// Context services
+export * from './fleet-context';
+export * from './codebase-context';
+
+// Prompt construction
+export * from './prompt-constructor';
+
+// Plan refinement
+export * from './plan-refinement-service';
+
+// Wave plan generation
+export * from './generator';
+
+// Prompt templates
+export * from './prompt-templates';
+
+// Execution
+export * from './execution';
