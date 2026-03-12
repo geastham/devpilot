@@ -1,0 +1,121 @@
+{
+  "$schema": "../schemas/ground-truth.schema.json",
+  "benchmarkId": "01-cli-static-site-gen",
+  "description": "Forgepress - CLI Static Site Generator with plugin system",
+  "waves": [
+    {
+      "wave": 1,
+      "name": "Foundation",
+      "tasks": ["scaffold", "config", "frontmatter", "markdown"],
+      "parallel": ["frontmatter", "markdown"],
+      "rationale": "Config is gating for 6 components, but frontmatter and markdown have zero dependencies and can build in parallel with config."
+    },
+    {
+      "wave": 2,
+      "name": "Core Infrastructure",
+      "tasks": ["discovery", "templates", "plugins", "writer"],
+      "parallel": ["discovery", "templates", "plugins", "writer"],
+      "dependsOn": [1],
+      "rationale": "All 4 tasks depend only on config (Wave 1). Full parallelism possible."
+    },
+    {
+      "wave": 3,
+      "name": "Plugins",
+      "tasks": ["plugin-syntax", "plugin-toc", "plugin-reading-time", "plugin-seo"],
+      "parallel": ["plugin-syntax", "plugin-toc", "plugin-reading-time", "plugin-seo"],
+      "dependsOn": [2],
+      "rationale": "100% parallel. All plugins implement the same interface independently."
+    },
+    {
+      "wave": 4,
+      "name": "Integration",
+      "tasks": ["pipeline", "cli", "server"],
+      "parallel": ["cli", "server"],
+      "dependsOn": [3],
+      "rationale": "Pipeline must come first. CLI and server can parallelize after pipeline."
+    },
+    {
+      "wave": 5,
+      "name": "Testing",
+      "tasks": ["tests"],
+      "parallel": [],
+      "dependsOn": [4],
+      "rationale": "Run full build against fixtures, validate output."
+    }
+  ],
+  "criticalPath": ["config", "plugins", "plugin-syntax", "pipeline", "cli"],
+  "maxParallelism": 4,
+  "taskDetails": {
+    "scaffold": {
+      "files": ["package.json", "directory structure"],
+      "description": "Project scaffold with package.json and directory structure"
+    },
+    "config": {
+      "files": ["src/config.js"],
+      "description": "Configuration loader module"
+    },
+    "frontmatter": {
+      "files": ["src/frontmatter.js"],
+      "description": "YAML frontmatter parser using gray-matter"
+    },
+    "markdown": {
+      "files": ["src/markdown.js"],
+      "description": "Markdown to HTML renderer using marked"
+    },
+    "discovery": {
+      "files": ["src/discovery.js"],
+      "description": "Content file discovery - recursively find .md files"
+    },
+    "templates": {
+      "files": ["src/templates.js"],
+      "description": "Handlebars-style template engine"
+    },
+    "plugins": {
+      "files": ["src/plugins.js"],
+      "description": "Plugin system interface and loader"
+    },
+    "writer": {
+      "files": ["src/writer.js"],
+      "description": "File writer for rendered HTML output"
+    },
+    "plugin-syntax": {
+      "files": ["src/plugins/syntax.js"],
+      "description": "Syntax highlighting plugin using highlight.js"
+    },
+    "plugin-toc": {
+      "files": ["src/plugins/toc.js"],
+      "description": "Table of contents generator plugin"
+    },
+    "plugin-reading-time": {
+      "files": ["src/plugins/reading-time.js"],
+      "description": "Reading time calculator plugin"
+    },
+    "plugin-seo": {
+      "files": ["src/plugins/seo.js"],
+      "description": "SEO meta tags injector plugin"
+    },
+    "pipeline": {
+      "files": ["src/pipeline.js"],
+      "description": "Build pipeline orchestrator"
+    },
+    "cli": {
+      "files": ["src/cli.js", "bin/forgepress"],
+      "description": "CLI entry point with build/serve/init commands"
+    },
+    "server": {
+      "files": ["src/server.js"],
+      "description": "Development server with file watching"
+    },
+    "tests": {
+      "files": ["tests/"],
+      "description": "Integration tests and acceptance validation"
+    }
+  },
+  "keyDecisionPoints": [
+    "Does the planner recognize config as a gating dependency?",
+    "Does the planner parallelize the 4 plugins?",
+    "Does the planner build the plugin interface before individual plugins?",
+    "Does the planner defer the pipeline to a late wave?",
+    "Does the planner create fixtures before tests?"
+  ]
+}

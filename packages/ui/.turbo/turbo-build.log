@@ -10,29 +10,22 @@ CLI Target: es2020
 CLI Cleaning output folder
 CJS Build start
 ESM Build start
+ESM dist/chunk-IFCP6WH7.mjs       272.00 B
 ESM dist/index.mjs                280.00 B
 ESM dist/components/index.mjs     139.00 B
-ESM dist/chunk-IFCP6WH7.mjs       272.00 B
 ESM dist/stores/index.mjs         119.00 B
 ESM dist/chunk-DPRONAV4.mjs       124.00 B
-ESM dist/index.mjs.map            276.00 B
-ESM dist/chunk-IFCP6WH7.mjs.map   603.00 B
-ESM dist/chunk-DPRONAV4.mjs.map   274.00 B
-ESM dist/stores/index.mjs.map     71.00 B
 ESM dist/components/index.mjs.map 71.00 B
-ESM ⚡️ Build success in 19ms
-CJS dist/index.js                1.56 KB
+ESM dist/index.mjs.map            276.00 B
+ESM dist/stores/index.mjs.map     71.00 B
+ESM dist/chunk-DPRONAV4.mjs.map   274.00 B
+ESM dist/chunk-IFCP6WH7.mjs.map   603.00 B
+ESM ⚡️ Build success in 22ms
 CJS dist/components/index.js     1.35 KB
+CJS dist/index.js                1.56 KB
 CJS dist/stores/index.js         1.11 KB
 CJS dist/components/index.js.map 650.00 B
 CJS dist/index.js.map            1.20 KB
 CJS dist/stores/index.js.map     321.00 B
-CJS ⚡️ Build success in 20ms
+CJS ⚡️ Build success in 22ms
 DTS Build start
-DTS ⚡️ Build success in 1269ms
-DTS dist/index.d.ts             196.00 B
-DTS dist/components/index.d.ts  168.00 B
-DTS dist/stores/index.d.ts      66.00 B
-DTS dist/index.d.mts            198.00 B
-DTS dist/components/index.d.mts 168.00 B
-DTS dist/stores/index.d.mts     66.00 B

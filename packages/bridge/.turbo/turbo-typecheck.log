@@ -1,0 +1,7 @@
+
+> @devpilot.sh/bridge@0.1.0 typecheck /Users/garretteastham/dev/devpilot/platform/devpilot-core/packages/bridge
+> tsc --noEmit
+
+src/db/index.ts(2,22): error TS7016: Could not find a declaration file for module 'pg'. '/Users/garretteastham/dev/devpilot/platform/devpilot-core/node_modules/.pnpm/pg@8.20.0/node_modules/pg/esm/index.mjs' implicitly has an 'any' type.
+  Try `npm i --save-dev @types/pg` if it exists or add a new declaration (.d.ts) file containing `declare module 'pg';`
+ ELIFECYCLE  Command failed with exit code 2.

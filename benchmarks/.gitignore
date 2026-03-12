@@ -1,0 +1,10 @@
+# Benchmark Results
+results/**/workspace.tar.gz
+results/**/session-log.jsonl
+
+# Keep results directory structure
+!results/.gitkeep
+
+# Temporary files
+*.tmp
+*.log

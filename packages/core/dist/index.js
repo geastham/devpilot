@@ -42,6 +42,9 @@ __export(index_exports, {
   conflictingFilesRelations: () => conflictingFilesRelations,
   createDatabase: () => createDatabase,
   databaseConfigSchema: () => databaseConfigSchema,
+  dependencyEdgeTypeValues: () => dependencyEdgeTypeValues,
+  dependencyEdges: () => dependencyEdges,
+  dependencyEdgesRelations: () => dependencyEdgesRelations,
   eventTypeValues: () => eventTypeValues,
   fileStatusValues: () => fileStatusValues,
   getDatabase: () => getDatabase,
@@ -67,6 +70,18 @@ __export(index_exports, {
   tasksRelations: () => tasksRelations,
   touchedFiles: () => touchedFiles,
   touchedFilesRelations: () => touchedFilesRelations,
+  wavePlanMetrics: () => wavePlanMetrics,
+  wavePlanMetricsRelations: () => wavePlanMetricsRelations,
+  wavePlanStatusValues: () => wavePlanStatusValues,
+  wavePlanner: () => wave_planner_exports,
+  wavePlans: () => wavePlans,
+  wavePlansRelations: () => wavePlansRelations,
+  waveStatusValues: () => waveStatusValues,
+  waveTaskStatusValues: () => waveTaskStatusValues,
+  waveTasks: () => waveTasks,
+  waveTasksRelations: () => waveTasksRelations,
+  waves: () => waves,
+  wavesRelations: () => wavesRelations,
   workstreams: () => workstreams,
   workstreamsRelations: () => workstreamsRelations,
   zoneValues: () => zoneValues
@@ -106,6 +121,9 @@ __export(schema_exports, {
   conductorScoresRelations: () => conductorScoresRelations,
   conflictingFiles: () => conflictingFiles,
   conflictingFilesRelations: () => conflictingFilesRelations,
+  dependencyEdgeTypeValues: () => dependencyEdgeTypeValues,
+  dependencyEdges: () => dependencyEdges,
+  dependencyEdgesRelations: () => dependencyEdgesRelations,
   eventTypeValues: () => eventTypeValues,
   fileStatusValues: () => fileStatusValues,
   horizonItems: () => horizonItems,
@@ -125,6 +143,17 @@ __export(schema_exports, {
   tasksRelations: () => tasksRelations,
   touchedFiles: () => touchedFiles,
   touchedFilesRelations: () => touchedFilesRelations,
+  wavePlanMetrics: () => wavePlanMetrics,
+  wavePlanMetricsRelations: () => wavePlanMetricsRelations,
+  wavePlanStatusValues: () => wavePlanStatusValues,
+  wavePlans: () => wavePlans,
+  wavePlansRelations: () => wavePlansRelations,
+  waveStatusValues: () => waveStatusValues,
+  waveTaskStatusValues: () => waveTaskStatusValues,
+  waveTasks: () => waveTasks,
+  waveTasksRelations: () => waveTasksRelations,
+  waves: () => waves,
+  wavesRelations: () => wavesRelations,
   workstreams: () => workstreams,
   workstreamsRelations: () => workstreamsRelations,
   zoneValues: () => zoneValues
@@ -145,9 +174,47 @@ var eventTypeValues = [
   "ITEM_DISPATCHED",
   "RUNWAY_UPDATE",
   "FILE_UNLOCKED",
-  "SCORE_UPDATE"
+  "SCORE_UPDATE",
+  // Wave Planner events
+  "WAVE_PLAN_CREATED",
+  "WAVE_DISPATCHING",
+  "WAVE_TASK_DISPATCHED",
+  "WAVE_TASK_COMPLETE",
+  "WAVE_TASK_FAILED",
+  "WAVE_COMPLETE",
+  "WAVE_ADVANCE",
+  "WAVE_PLAN_COMPLETE",
+  "WAVE_PLAN_FAILED",
+  "WAVE_PLAN_REOPTIMIZING"
 ];
 var orchestratorModeValues = ["http", "ao-cli", "manual", "disabled"];
+var wavePlanStatusValues = [
+  "draft",
+  "approved",
+  "executing",
+  "paused",
+  "completed",
+  "failed",
+  "re-optimizing"
+];
+var waveStatusValues = [
+  "pending",
+  "dispatching",
+  "active",
+  "completed",
+  "failed",
+  "skipped"
+];
+var waveTaskStatusValues = [
+  "pending",
+  "dispatched",
+  "running",
+  "completed",
+  "failed",
+  "retrying",
+  "skipped"
+];
+var dependencyEdgeTypeValues = ["hard", "soft"];
 
 // src/db/schema/horizon.ts
 var import_sqlite_core = require("drizzle-orm/sqlite-core");
@@ -375,6 +442,143 @@ var activityEvents = (0, import_sqlite_core4.sqliteTable)("activity_events", {
   createdAt: (0, import_sqlite_core4.integer)("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date())
 });
 
+// src/db/schema/wave-planner.ts
+var import_sqlite_core5 = require("drizzle-orm/sqlite-core");
+var import_drizzle_orm4 = require("drizzle-orm");
+var import_cuid25 = require("@paralleldrive/cuid2");
+var wavePlans = (0, import_sqlite_core5.sqliteTable)("wave_plans", {
+  id: (0, import_sqlite_core5.text)("id").primaryKey().$defaultFn(() => (0, import_cuid25.createId)()),
+  planId: (0, import_sqlite_core5.text)("plan_id").notNull(),
+  horizonItemId: (0, import_sqlite_core5.text)("horizon_item_id").notNull(),
+  totalWaves: (0, import_sqlite_core5.integer)("total_waves").notNull(),
+  totalTasks: (0, import_sqlite_core5.integer)("total_tasks").notNull(),
+  maxParallelism: (0, import_sqlite_core5.integer)("max_parallelism").notNull(),
+  criticalPath: (0, import_sqlite_core5.text)("critical_path", { mode: "json" }).$type().notNull(),
+  criticalPathLength: (0, import_sqlite_core5.integer)("critical_path_length").notNull(),
+  parallelizationScore: (0, import_sqlite_core5.real)("parallelization_score").notNull(),
+  status: (0, import_sqlite_core5.text)("status", { enum: wavePlanStatusValues }).notNull().default("draft"),
+  currentWaveIndex: (0, import_sqlite_core5.integer)("current_wave_index").notNull().default(0),
+  version: (0, import_sqlite_core5.integer)("version").notNull().default(1),
+  previousWavePlanId: (0, import_sqlite_core5.text)("previous_wave_plan_id"),
+  rawMarkdown: (0, import_sqlite_core5.text)("raw_markdown"),
+  startedAt: (0, import_sqlite_core5.integer)("started_at", { mode: "timestamp" }),
+  completedAt: (0, import_sqlite_core5.integer)("completed_at", { mode: "timestamp" }),
+  createdAt: (0, import_sqlite_core5.integer)("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date()),
+  updatedAt: (0, import_sqlite_core5.integer)("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date())
+});
+var wavePlansRelations = (0, import_drizzle_orm4.relations)(wavePlans, ({ one, many }) => ({
+  plan: one(plans, {
+    fields: [wavePlans.planId],
+    references: [plans.id]
+  }),
+  horizonItem: one(horizonItems, {
+    fields: [wavePlans.horizonItemId],
+    references: [horizonItems.id]
+  }),
+  previousWavePlan: one(wavePlans, {
+    fields: [wavePlans.previousWavePlanId],
+    references: [wavePlans.id],
+    relationName: "wavePlanHistory"
+  }),
+  waves: many(waves),
+  waveTasks: many(waveTasks),
+  dependencyEdges: many(dependencyEdges),
+  metrics: one(wavePlanMetrics, {
+    fields: [wavePlans.id],
+    references: [wavePlanMetrics.wavePlanId]
+  })
+}));
+var waves = (0, import_sqlite_core5.sqliteTable)("waves", {
+  id: (0, import_sqlite_core5.text)("id").primaryKey().$defaultFn(() => (0, import_cuid25.createId)()),
+  wavePlanId: (0, import_sqlite_core5.text)("wave_plan_id").notNull(),
+  waveIndex: (0, import_sqlite_core5.integer)("wave_index").notNull(),
+  label: (0, import_sqlite_core5.text)("label").notNull(),
+  maxParallelTasks: (0, import_sqlite_core5.integer)("max_parallel_tasks").notNull(),
+  status: (0, import_sqlite_core5.text)("status", { enum: waveStatusValues }).notNull().default("pending"),
+  startedAt: (0, import_sqlite_core5.integer)("started_at", { mode: "timestamp" }),
+  completedAt: (0, import_sqlite_core5.integer)("completed_at", { mode: "timestamp" })
+});
+var wavesRelations = (0, import_drizzle_orm4.relations)(waves, ({ one, many }) => ({
+  wavePlan: one(wavePlans, {
+    fields: [waves.wavePlanId],
+    references: [wavePlans.id]
+  }),
+  tasks: many(waveTasks)
+}));
+var waveTasks = (0, import_sqlite_core5.sqliteTable)("wave_tasks", {
+  id: (0, import_sqlite_core5.text)("id").primaryKey().$defaultFn(() => (0, import_cuid25.createId)()),
+  waveId: (0, import_sqlite_core5.text)("wave_id").notNull(),
+  wavePlanId: (0, import_sqlite_core5.text)("wave_plan_id").notNull(),
+  taskId: (0, import_sqlite_core5.text)("task_id"),
+  // FK to existing tasks table (nullable)
+  waveIndex: (0, import_sqlite_core5.integer)("wave_index").notNull(),
+  taskCode: (0, import_sqlite_core5.text)("task_code").notNull(),
+  // e.g., "1.1", "4.3"
+  label: (0, import_sqlite_core5.text)("label").notNull(),
+  description: (0, import_sqlite_core5.text)("description").notNull().default(""),
+  filePaths: (0, import_sqlite_core5.text)("file_paths", { mode: "json" }).$type().notNull().default([]),
+  dependencies: (0, import_sqlite_core5.text)("dependencies", { mode: "json" }).$type().notNull().default([]),
+  recommendedModel: (0, import_sqlite_core5.text)("recommended_model", { enum: modelValues }),
+  complexity: (0, import_sqlite_core5.text)("complexity", { enum: complexityValues }),
+  isOnCriticalPath: (0, import_sqlite_core5.integer)("is_on_critical_path", { mode: "boolean" }).notNull().default(false),
+  canRunInParallel: (0, import_sqlite_core5.integer)("can_run_in_parallel", { mode: "boolean" }).notNull().default(true),
+  status: (0, import_sqlite_core5.text)("status", { enum: waveTaskStatusValues }).notNull().default("pending"),
+  assignedSessionId: (0, import_sqlite_core5.text)("assigned_session_id"),
+  startedAt: (0, import_sqlite_core5.integer)("started_at", { mode: "timestamp" }),
+  completedAt: (0, import_sqlite_core5.integer)("completed_at", { mode: "timestamp" }),
+  errorMessage: (0, import_sqlite_core5.text)("error_message"),
+  retryCount: (0, import_sqlite_core5.integer)("retry_count").notNull().default(0)
+});
+var waveTasksRelations = (0, import_drizzle_orm4.relations)(waveTasks, ({ one }) => ({
+  wave: one(waves, {
+    fields: [waveTasks.waveId],
+    references: [waves.id]
+  }),
+  wavePlan: one(wavePlans, {
+    fields: [waveTasks.wavePlanId],
+    references: [wavePlans.id]
+  }),
+  task: one(tasks, {
+    fields: [waveTasks.taskId],
+    references: [tasks.id]
+  })
+}));
+var dependencyEdges = (0, import_sqlite_core5.sqliteTable)("dependency_edges", {
+  id: (0, import_sqlite_core5.text)("id").primaryKey().$defaultFn(() => (0, import_cuid25.createId)()),
+  wavePlanId: (0, import_sqlite_core5.text)("wave_plan_id").notNull(),
+  fromTaskCode: (0, import_sqlite_core5.text)("from_task_code").notNull(),
+  toTaskCode: (0, import_sqlite_core5.text)("to_task_code").notNull(),
+  edgeType: (0, import_sqlite_core5.text)("edge_type", { enum: dependencyEdgeTypeValues }).notNull().default("hard")
+});
+var dependencyEdgesRelations = (0, import_drizzle_orm4.relations)(dependencyEdges, ({ one }) => ({
+  wavePlan: one(wavePlans, {
+    fields: [dependencyEdges.wavePlanId],
+    references: [wavePlans.id]
+  })
+}));
+var wavePlanMetrics = (0, import_sqlite_core5.sqliteTable)("wave_plan_metrics", {
+  id: (0, import_sqlite_core5.text)("id").primaryKey().$defaultFn(() => (0, import_cuid25.createId)()),
+  wavePlanId: (0, import_sqlite_core5.text)("wave_plan_id").notNull().unique(),
+  totalWallClockMs: (0, import_sqlite_core5.integer)("total_wall_clock_ms"),
+  theoreticalMinMs: (0, import_sqlite_core5.integer)("theoretical_min_ms"),
+  parallelizationEfficiency: (0, import_sqlite_core5.real)("parallelization_efficiency"),
+  wavesExecuted: (0, import_sqlite_core5.integer)("waves_executed").notNull().default(0),
+  tasksCompleted: (0, import_sqlite_core5.integer)("tasks_completed").notNull().default(0),
+  tasksFailed: (0, import_sqlite_core5.integer)("tasks_failed").notNull().default(0),
+  tasksRetried: (0, import_sqlite_core5.integer)("tasks_retried").notNull().default(0),
+  avgTaskDurationMs: (0, import_sqlite_core5.integer)("avg_task_duration_ms"),
+  maxWaveWaitMs: (0, import_sqlite_core5.integer)("max_wave_wait_ms"),
+  fileConflictsAvoided: (0, import_sqlite_core5.integer)("file_conflicts_avoided").notNull().default(0),
+  reOptimizationCount: (0, import_sqlite_core5.integer)("re_optimization_count").notNull().default(0),
+  recordedAt: (0, import_sqlite_core5.integer)("recorded_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date())
+});
+var wavePlanMetricsRelations = (0, import_drizzle_orm4.relations)(wavePlanMetrics, ({ one }) => ({
+  wavePlan: one(wavePlans, {
+    fields: [wavePlanMetrics.wavePlanId],
+    references: [wavePlans.id]
+  })
+}));
+
 // src/db/adapters/sqlite.ts
 var import_fs = require("fs");
 var import_path = require("path");
@@ -523,12 +727,97 @@ CREATE TABLE IF NOT EXISTS score_history (
 -- Activity Events
 CREATE TABLE IF NOT EXISTS activity_events (
   id TEXT PRIMARY KEY,
-  type TEXT NOT NULL CHECK(type IN ('SESSION_PROGRESS', 'SESSION_COMPLETE', 'PLAN_GENERATED', 'PLAN_APPROVED', 'ITEM_CREATED', 'ITEM_DISPATCHED', 'RUNWAY_UPDATE', 'FILE_UNLOCKED', 'SCORE_UPDATE')),
+  type TEXT NOT NULL CHECK(type IN ('SESSION_PROGRESS', 'SESSION_COMPLETE', 'PLAN_GENERATED', 'PLAN_APPROVED', 'ITEM_CREATED', 'ITEM_DISPATCHED', 'RUNWAY_UPDATE', 'FILE_UNLOCKED', 'SCORE_UPDATE', 'WAVE_PLAN_CREATED', 'WAVE_DISPATCHING', 'WAVE_TASK_DISPATCHED', 'WAVE_TASK_COMPLETE', 'WAVE_TASK_FAILED', 'WAVE_COMPLETE', 'WAVE_ADVANCE', 'WAVE_PLAN_COMPLETE', 'WAVE_PLAN_FAILED', 'WAVE_PLAN_REOPTIMIZING')),
   message TEXT NOT NULL,
   repo TEXT,
   ticket_id TEXT,
   metadata TEXT,
   created_at INTEGER NOT NULL
+);
+
+-- Wave Plans
+CREATE TABLE IF NOT EXISTS wave_plans (
+  id TEXT PRIMARY KEY,
+  plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+  horizon_item_id TEXT NOT NULL REFERENCES horizon_items(id) ON DELETE CASCADE,
+  total_waves INTEGER NOT NULL,
+  total_tasks INTEGER NOT NULL,
+  max_parallelism INTEGER NOT NULL,
+  critical_path TEXT NOT NULL,
+  critical_path_length INTEGER NOT NULL,
+  parallelization_score REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'approved', 'executing', 'paused', 'completed', 'failed', 're-optimizing')),
+  current_wave_index INTEGER NOT NULL DEFAULT 0,
+  version INTEGER NOT NULL DEFAULT 1,
+  previous_wave_plan_id TEXT REFERENCES wave_plans(id),
+  raw_markdown TEXT,
+  started_at INTEGER,
+  completed_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- Waves
+CREATE TABLE IF NOT EXISTS waves (
+  id TEXT PRIMARY KEY,
+  wave_plan_id TEXT NOT NULL REFERENCES wave_plans(id) ON DELETE CASCADE,
+  wave_index INTEGER NOT NULL,
+  label TEXT NOT NULL,
+  max_parallel_tasks INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'dispatching', 'active', 'completed', 'failed', 'skipped')),
+  started_at INTEGER,
+  completed_at INTEGER
+);
+
+-- Wave Tasks
+CREATE TABLE IF NOT EXISTS wave_tasks (
+  id TEXT PRIMARY KEY,
+  wave_id TEXT NOT NULL REFERENCES waves(id) ON DELETE CASCADE,
+  wave_plan_id TEXT NOT NULL REFERENCES wave_plans(id) ON DELETE CASCADE,
+  task_id TEXT REFERENCES tasks(id),
+  wave_index INTEGER NOT NULL,
+  task_code TEXT NOT NULL,
+  label TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  file_paths TEXT NOT NULL DEFAULT '[]',
+  dependencies TEXT NOT NULL DEFAULT '[]',
+  recommended_model TEXT CHECK(recommended_model IN ('HAIKU', 'SONNET', 'OPUS')),
+  complexity TEXT CHECK(complexity IN ('S', 'M', 'L', 'XL')),
+  is_on_critical_path INTEGER NOT NULL DEFAULT 0,
+  can_run_in_parallel INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'dispatched', 'running', 'completed', 'failed', 'retrying', 'skipped')),
+  assigned_session_id TEXT,
+  started_at INTEGER,
+  completed_at INTEGER,
+  error_message TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0
+);
+
+-- Dependency Edges
+CREATE TABLE IF NOT EXISTS dependency_edges (
+  id TEXT PRIMARY KEY,
+  wave_plan_id TEXT NOT NULL REFERENCES wave_plans(id) ON DELETE CASCADE,
+  from_task_code TEXT NOT NULL,
+  to_task_code TEXT NOT NULL,
+  edge_type TEXT NOT NULL DEFAULT 'hard' CHECK(edge_type IN ('hard', 'soft'))
+);
+
+-- Wave Plan Metrics
+CREATE TABLE IF NOT EXISTS wave_plan_metrics (
+  id TEXT PRIMARY KEY,
+  wave_plan_id TEXT NOT NULL UNIQUE REFERENCES wave_plans(id) ON DELETE CASCADE,
+  total_wall_clock_ms INTEGER,
+  theoretical_min_ms INTEGER,
+  parallelization_efficiency REAL,
+  waves_executed INTEGER NOT NULL DEFAULT 0,
+  tasks_completed INTEGER NOT NULL DEFAULT 0,
+  tasks_failed INTEGER NOT NULL DEFAULT 0,
+  tasks_retried INTEGER NOT NULL DEFAULT 0,
+  avg_task_duration_ms INTEGER,
+  max_wave_wait_ms INTEGER,
+  file_conflicts_avoided INTEGER NOT NULL DEFAULT 0,
+  re_optimization_count INTEGER NOT NULL DEFAULT 0,
+  recorded_at INTEGER NOT NULL
 );
 
 -- Create indexes
@@ -538,6 +827,16 @@ CREATE INDEX IF NOT EXISTS idx_ruflo_sessions_status ON ruflo_sessions(status);
 CREATE INDEX IF NOT EXISTS idx_ruflo_sessions_repo ON ruflo_sessions(repo);
 CREATE INDEX IF NOT EXISTS idx_activity_events_type ON activity_events(type);
 CREATE INDEX IF NOT EXISTS idx_activity_events_created_at ON activity_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_wave_plans_plan_id ON wave_plans(plan_id);
+CREATE INDEX IF NOT EXISTS idx_wave_plans_horizon_item_id ON wave_plans(horizon_item_id);
+CREATE INDEX IF NOT EXISTS idx_wave_plans_status ON wave_plans(status);
+CREATE INDEX IF NOT EXISTS idx_waves_wave_plan_id ON waves(wave_plan_id);
+CREATE INDEX IF NOT EXISTS idx_waves_status ON waves(status);
+CREATE INDEX IF NOT EXISTS idx_wave_tasks_wave_id ON wave_tasks(wave_id);
+CREATE INDEX IF NOT EXISTS idx_wave_tasks_wave_plan_id ON wave_tasks(wave_plan_id);
+CREATE INDEX IF NOT EXISTS idx_wave_tasks_status ON wave_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_wave_tasks_task_code ON wave_tasks(task_code);
+CREATE INDEX IF NOT EXISTS idx_dependency_edges_wave_plan_id ON dependency_edges(wave_plan_id);
 `;
 function createSQLiteAdapter(path) {
   if (sqliteDb) {
@@ -632,6 +931,896 @@ function initDatabase(config) {
 }
 function resetDatabase() {
   db = null;
+}
+
+// src/wave-planner/index.ts
+var wave_planner_exports = {};
+__export(wave_planner_exports, {
+  assignWaves: () => assignWaves,
+  buildDAGGraph: () => buildDAGGraph,
+  computeCriticalPath: () => computeCriticalPath,
+  extractAllTaskCodes: () => extractAllTaskCodes,
+  extractWaveFromTaskCode: () => extractWaveFromTaskCode,
+  findCommonTheme: () => findCommonTheme,
+  findTaskByCode: () => findTaskByCode,
+  generateWaveLabel: () => generateWaveLabel,
+  getTasksInWave: () => getTasksInWave,
+  groupBy: () => groupBy,
+  normalizeComplexity: () => normalizeComplexity,
+  normalizeModel: () => normalizeModel,
+  parseDependencies: () => parseDependencies,
+  parseFilePaths: () => parseFilePaths,
+  parseWavePlanResponse: () => parseWavePlanResponse,
+  scorePlan: () => scorePlan,
+  sleep: () => sleep,
+  topologicalSort: () => topologicalSort,
+  validateDAG: () => validateDAG
+});
+
+// src/wave-planner/utils.ts
+function topologicalSort(graph) {
+  const inDegree = /* @__PURE__ */ new Map();
+  const adjacency = /* @__PURE__ */ new Map();
+  for (const [taskCode, node] of graph) {
+    inDegree.set(taskCode, node.dependencies.size);
+    adjacency.set(taskCode, node.dependents);
+  }
+  const queue = [];
+  for (const [taskCode, degree] of inDegree) {
+    if (degree === 0) {
+      queue.push(taskCode);
+    }
+  }
+  const order = [];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    order.push(current);
+    for (const dependent of adjacency.get(current) || []) {
+      const newDegree = (inDegree.get(dependent) || 0) - 1;
+      inDegree.set(dependent, newDegree);
+      if (newDegree === 0) {
+        queue.push(dependent);
+      }
+    }
+  }
+  const valid = order.length === graph.size;
+  if (!valid) {
+    const cycleParticipants = [...inDegree.entries()].filter(([_, degree]) => degree > 0).map(([taskCode]) => taskCode);
+    return { order, valid: false, cycleParticipants };
+  }
+  return { order, valid: true };
+}
+function buildDAGGraph(tasks2, edges) {
+  const graph = /* @__PURE__ */ new Map();
+  for (const task of tasks2) {
+    graph.set(task.taskCode, {
+      taskCode: task.taskCode,
+      inDegree: 0,
+      outDegree: 0,
+      dependencies: /* @__PURE__ */ new Set(),
+      dependents: /* @__PURE__ */ new Set(),
+      filePaths: new Set(task.filePaths)
+    });
+  }
+  for (const edge of edges) {
+    const fromNode = graph.get(edge.from);
+    const toNode = graph.get(edge.to);
+    if (fromNode && toNode) {
+      fromNode.dependents.add(edge.to);
+      fromNode.outDegree++;
+      toNode.dependencies.add(edge.from);
+      toNode.inDegree++;
+    }
+  }
+  return graph;
+}
+function groupBy(items, keyFn) {
+  const map = /* @__PURE__ */ new Map();
+  for (const item of items) {
+    const key = keyFn(item);
+    const existing = map.get(key) || [];
+    existing.push(item);
+    map.set(key, existing);
+  }
+  return map;
+}
+function extractWaveFromTaskCode(taskCode) {
+  const match = taskCode.match(/^(\d+)\./);
+  return match ? parseInt(match[1], 10) : 0;
+}
+function normalizeModel(raw) {
+  const normalized = raw?.toLowerCase().trim();
+  if (normalized === "haiku") return "haiku";
+  if (normalized === "opus") return "opus";
+  return "sonnet";
+}
+function normalizeComplexity(raw) {
+  const normalized = raw?.toUpperCase().trim();
+  if (normalized === "S" || normalized === "SMALL") return "S";
+  if (normalized === "M" || normalized === "MEDIUM") return "M";
+  if (normalized === "L" || normalized === "LARGE") return "L";
+  if (normalized === "XL" || normalized === "EXTRA LARGE" || normalized === "EXTRA-LARGE") return "XL";
+  return "M";
+}
+function parseDependencies(raw) {
+  if (!raw || raw.toLowerCase() === "none" || raw.trim() === "" || raw.trim() === "-") {
+    return [];
+  }
+  return raw.split(/[,;\n]/).map((s) => s.trim()).filter((s) => s.length > 0 && /^\d+\.\d+$/.test(s));
+}
+function parseFilePaths(raw) {
+  if (!raw || raw.toLowerCase() === "none" || raw.trim() === "" || raw.trim() === "-") {
+    return [];
+  }
+  return raw.split(/[,;\n]/).map((s) => s.trim()).filter((s) => s.length > 0);
+}
+function findCommonTheme(descriptions) {
+  if (descriptions.length === 0) return null;
+  const themes = [
+    "setup",
+    "initialize",
+    "bootstrap",
+    "foundation",
+    "core",
+    "base",
+    "api",
+    "endpoint",
+    "route",
+    "component",
+    "ui",
+    "view",
+    "test",
+    "testing",
+    "unit test",
+    "integration",
+    "wire",
+    "connect",
+    "refactor",
+    "cleanup",
+    "optimize",
+    "database",
+    "schema",
+    "migration"
+  ];
+  const descLower = descriptions.map((d) => d.toLowerCase());
+  for (const theme of themes) {
+    if (descLower.every((d) => d.includes(theme))) {
+      return theme.charAt(0).toUpperCase() + theme.slice(1);
+    }
+  }
+  const wordCounts = /* @__PURE__ */ new Map();
+  for (const desc of descLower) {
+    const words = desc.split(/\s+/).filter((w) => w.length > 3);
+    for (const word of words) {
+      wordCounts.set(word, (wordCounts.get(word) || 0) + 1);
+    }
+  }
+  let maxWord = null;
+  let maxCount = 0;
+  for (const [word, count] of wordCounts) {
+    if (count > maxCount && count >= descriptions.length * 0.5) {
+      maxCount = count;
+      maxWord = word;
+    }
+  }
+  if (maxWord) {
+    return maxWord.charAt(0).toUpperCase() + maxWord.slice(1);
+  }
+  return null;
+}
+function generateWaveLabel(originalIndex, tasks2, subIndex) {
+  const subSuffix = subIndex !== void 0 ? ` (Part ${subIndex + 1})` : "";
+  const commonTheme = findCommonTheme(tasks2.map((t) => t.description));
+  if (commonTheme) {
+    return `Wave ${originalIndex + 1}: ${commonTheme}${subSuffix}`;
+  }
+  return `Wave ${originalIndex + 1}${subSuffix}`;
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// src/wave-planner/parser.ts
+function parseWavePlanResponse(markdown) {
+  const waves2 = parseWaves(markdown);
+  const allTasks = waves2.flatMap((w) => w.tasks);
+  const dependencyEdges2 = extractDependencyEdges(allTasks);
+  const criticalPath = parseCriticalPath(markdown);
+  const statistics = parseStatistics(markdown, allTasks.length, waves2.length, criticalPath.length);
+  return {
+    waves: waves2,
+    dependencyEdges: dependencyEdges2,
+    criticalPath,
+    statistics,
+    rawMarkdown: markdown
+  };
+}
+function parseWaves(markdown) {
+  const waves2 = [];
+  const waveHeaderRegex = /^##\s+Wave\s+(\d+):\s*(.+?)(?:\s*\((\d+)\s+tasks?\))?$/gim;
+  const sections = splitIntoSections(markdown);
+  for (const section of sections) {
+    const headerMatch = waveHeaderRegex.exec(section.header);
+    if (headerMatch) {
+      const waveIndex = parseInt(headerMatch[1], 10);
+      const label = headerMatch[2].trim();
+      const tasks2 = parseTaskTable(section.content);
+      waves2.push({
+        waveIndex,
+        label,
+        tasks: tasks2
+      });
+    }
+    waveHeaderRegex.lastIndex = 0;
+  }
+  return waves2.sort((a, b) => a.waveIndex - b.waveIndex);
+}
+function splitIntoSections(markdown) {
+  const sections = [];
+  const lines = markdown.split("\n");
+  let currentHeader = "";
+  let currentContent = [];
+  for (const line of lines) {
+    if (line.match(/^##\s+/)) {
+      if (currentHeader) {
+        sections.push({
+          header: currentHeader,
+          content: currentContent.join("\n")
+        });
+      }
+      currentHeader = line;
+      currentContent = [];
+    } else {
+      currentContent.push(line);
+    }
+  }
+  if (currentHeader) {
+    sections.push({
+      header: currentHeader,
+      content: currentContent.join("\n")
+    });
+  }
+  return sections;
+}
+function parseTaskTable(tableContent) {
+  const tasks2 = [];
+  const lines = tableContent.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  let headerIndex = -1;
+  let separatorIndex = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.includes("Task ID") || line.includes("Task Code")) {
+      headerIndex = i;
+    } else if (line.match(/^\|[\s\-:]+\|/)) {
+      separatorIndex = i;
+      break;
+    }
+  }
+  if (headerIndex === -1 || separatorIndex === -1) {
+    return tasks2;
+  }
+  const headerCells = parseTableRow(lines[headerIndex]);
+  const columnMap = buildColumnMap(headerCells);
+  for (let i = separatorIndex + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.startsWith("|")) break;
+    const cells = parseTableRow(line);
+    if (cells.length === 0) continue;
+    const task = parseTaskRow(cells, columnMap);
+    if (task) {
+      tasks2.push(task);
+    }
+  }
+  return tasks2;
+}
+function parseTableRow(line) {
+  return line.split("|").slice(1, -1).map((cell) => cell.trim());
+}
+function buildColumnMap(headers) {
+  const map = {
+    taskId: -1,
+    description: -1,
+    files: -1,
+    dependencies: -1,
+    parallel: -1,
+    model: -1,
+    complexity: -1
+  };
+  for (let i = 0; i < headers.length; i++) {
+    const header = headers[i].toLowerCase();
+    if (header.includes("task id") || header.includes("task code")) {
+      map.taskId = i;
+    } else if (header.includes("description")) {
+      map.description = i;
+    } else if (header.includes("file")) {
+      map.files = i;
+    } else if (header.includes("depend")) {
+      map.dependencies = i;
+    } else if (header.includes("parallel")) {
+      map.parallel = i;
+    } else if (header.includes("model")) {
+      map.model = i;
+    } else if (header.includes("complex")) {
+      map.complexity = i;
+    }
+  }
+  return map;
+}
+function parseTaskRow(cells, columnMap) {
+  if (columnMap.taskId === -1 || !cells[columnMap.taskId]) {
+    return null;
+  }
+  const taskCode = cells[columnMap.taskId].trim();
+  if (!taskCode.match(/^\d+\.\d+$/)) {
+    return null;
+  }
+  const description = columnMap.description !== -1 ? cells[columnMap.description]?.trim() || "" : "";
+  const filePaths = columnMap.files !== -1 ? parseFilePaths(cells[columnMap.files]) : [];
+  const dependencies = columnMap.dependencies !== -1 ? parseDependencies(cells[columnMap.dependencies]) : [];
+  const canRunInParallel = columnMap.parallel !== -1 ? parseBoolean(cells[columnMap.parallel]) : false;
+  const recommendedModel = columnMap.model !== -1 ? normalizeModel(cells[columnMap.model]) : "sonnet";
+  const complexity = columnMap.complexity !== -1 ? normalizeComplexity(cells[columnMap.complexity]) : "M";
+  return {
+    taskCode,
+    description,
+    filePaths,
+    dependencies,
+    canRunInParallel,
+    recommendedModel,
+    complexity
+  };
+}
+function parseBoolean(value) {
+  if (!value) return false;
+  const normalized = value.toLowerCase().trim();
+  return normalized === "yes" || normalized === "true" || normalized === "y" || normalized === "1" || normalized === "parallel";
+}
+function extractDependencyEdges(tasks2) {
+  const edges = [];
+  for (const task of tasks2) {
+    for (const dep of task.dependencies) {
+      edges.push({
+        from: dep,
+        to: task.taskCode,
+        type: "hard"
+      });
+    }
+  }
+  return edges;
+}
+function parseCriticalPath(markdown) {
+  const sections = splitIntoSections(markdown);
+  for (const section of sections) {
+    if (section.header.match(/^##\s+Critical\s+Path/i)) {
+      const content = section.content.trim();
+      if (content.includes("->")) {
+        return content.split("->").map((s) => s.trim()).filter((s) => s.match(/^\d+\.\d+$/));
+      }
+      const lines = content.split("\n");
+      const path = [];
+      for (const line of lines) {
+        const match = line.match(/\b(\d+\.\d+)\b/);
+        if (match) {
+          path.push(match[1]);
+        }
+      }
+      if (path.length > 0) {
+        return path;
+      }
+    }
+  }
+  return [];
+}
+function parseStatistics(markdown, totalTasksCalculated, totalWavesCalculated, criticalPathLengthCalculated) {
+  const sections = splitIntoSections(markdown);
+  let totalTasks = totalTasksCalculated;
+  let totalWaves = totalWavesCalculated;
+  let maxParallelism = 0;
+  let criticalPathLength = criticalPathLengthCalculated;
+  let sequentialChains = 0;
+  for (const section of sections) {
+    if (section.header.match(/^##\s+Statistics/i)) {
+      const lines = section.content.split("\n");
+      for (const line of lines) {
+        const cells = parseTableRow(line);
+        if (cells.length < 2) continue;
+        const metric = cells[0].toLowerCase();
+        const value = cells[1];
+        if (metric.includes("total tasks")) {
+          totalTasks = parseInt(value, 10) || totalTasks;
+        } else if (metric.includes("total waves")) {
+          totalWaves = parseInt(value, 10) || totalWaves;
+        } else if (metric.includes("max parallelism")) {
+          maxParallelism = parseInt(value, 10) || maxParallelism;
+        } else if (metric.includes("critical path")) {
+          criticalPathLength = parseInt(value, 10) || criticalPathLength;
+        } else if (metric.includes("sequential chains")) {
+          sequentialChains = parseInt(value, 10) || sequentialChains;
+        }
+      }
+    }
+  }
+  return {
+    totalTasks,
+    totalWaves,
+    maxParallelism,
+    criticalPathLength,
+    sequentialChains
+  };
+}
+function extractAllTaskCodes(plan) {
+  return plan.waves.flatMap((w) => w.tasks.map((t) => t.taskCode));
+}
+function findTaskByCode(plan, taskCode) {
+  for (const wave of plan.waves) {
+    const task = wave.tasks.find((t) => t.taskCode === taskCode);
+    if (task) return task;
+  }
+  return void 0;
+}
+function getTasksInWave(plan, waveIndex) {
+  const wave = plan.waves.find((w) => w.waveIndex === waveIndex);
+  return wave?.tasks || [];
+}
+
+// src/wave-planner/dag-validator.ts
+function validateDAG(tasks2, edges, config) {
+  const errors = [];
+  const warnings = [];
+  if (tasks2.length === 0) {
+    errors.push({
+      code: "EMPTY_PLAN",
+      message: "Wave plan contains no tasks",
+      detail: "A valid wave plan must contain at least one task"
+    });
+    return {
+      valid: false,
+      errors,
+      warnings
+    };
+  }
+  const taskCodeCounts = /* @__PURE__ */ new Map();
+  const duplicateTaskCodes = [];
+  for (const task of tasks2) {
+    const count = (taskCodeCounts.get(task.taskCode) || 0) + 1;
+    taskCodeCounts.set(task.taskCode, count);
+    if (count === 2) {
+      duplicateTaskCodes.push(task.taskCode);
+    }
+  }
+  if (duplicateTaskCodes.length > 0) {
+    errors.push({
+      code: "DUPLICATE_TASK_CODE",
+      message: "Duplicate task codes detected",
+      taskCodes: duplicateTaskCodes,
+      detail: `Task codes must be unique. Found duplicates: ${duplicateTaskCodes.join(", ")}`
+    });
+  }
+  const validTaskCodes = new Set(tasks2.map((t) => t.taskCode));
+  const danglingDependencies = /* @__PURE__ */ new Map();
+  for (const task of tasks2) {
+    const missing = [];
+    for (const dep of task.dependencies) {
+      if (!validTaskCodes.has(dep)) {
+        missing.push(dep);
+      }
+    }
+    if (missing.length > 0) {
+      danglingDependencies.set(task.taskCode, missing);
+    }
+  }
+  for (const edge of edges) {
+    if (!validTaskCodes.has(edge.from)) {
+      const existing = danglingDependencies.get(edge.to) || [];
+      if (!existing.includes(edge.from)) {
+        existing.push(edge.from);
+        danglingDependencies.set(edge.to, existing);
+      }
+    }
+    if (!validTaskCodes.has(edge.to)) {
+      const existing = danglingDependencies.get(edge.from) || [];
+      if (!existing.includes(edge.to)) {
+        existing.push(edge.to);
+        danglingDependencies.set(edge.from, existing);
+      }
+    }
+  }
+  if (danglingDependencies.size > 0) {
+    for (const [taskCode, missingDeps] of danglingDependencies) {
+      warnings.push({
+        code: "DANGLING_DEPENDENCY",
+        message: `Task ${taskCode} references non-existent dependencies`,
+        taskCodes: [taskCode],
+        detail: `Missing dependencies: ${missingDeps.join(", ")}`
+      });
+    }
+  }
+  const graph = buildDAGGraph(tasks2, edges);
+  const topoResult = topologicalSort(graph);
+  if (!topoResult.valid && topoResult.cycleParticipants) {
+    errors.push({
+      code: "CYCLE_DETECTED",
+      message: "Circular dependency detected in task graph",
+      taskCodes: topoResult.cycleParticipants,
+      detail: `The following tasks form a cycle: ${topoResult.cycleParticipants.join(" -> ")}`
+    });
+  }
+  const rootTasks = tasks2.filter((t) => t.dependencies.length === 0);
+  if (rootTasks.length === 0) {
+    errors.push({
+      code: "NO_ROOT_TASK",
+      message: "No root tasks found (all tasks have dependencies)",
+      detail: "At least one task must have no dependencies to serve as a starting point"
+    });
+  }
+  const fileOverlapWarnings = checkFileOverlapInWaves(tasks2);
+  warnings.push(...fileOverlapWarnings);
+  const valid = errors.length === 0;
+  return {
+    valid,
+    errors,
+    warnings,
+    // TODO: Implement auto-correction if config.enableAutoCorrection is true
+    correctedPlan: void 0
+  };
+}
+function checkFileOverlapInWaves(tasks2) {
+  const warnings = [];
+  const tasksByWave = groupBy(tasks2, (task) => extractWaveFromTaskCode(task.taskCode));
+  for (const [waveIndex, waveTasks2] of tasksByWave) {
+    const fileToTasks = /* @__PURE__ */ new Map();
+    for (const task of waveTasks2) {
+      for (const filePath of task.filePaths) {
+        const existing = fileToTasks.get(filePath) || [];
+        existing.push(task.taskCode);
+        fileToTasks.set(filePath, existing);
+      }
+    }
+    for (const [filePath, taskCodes] of fileToTasks) {
+      if (taskCodes.length > 1) {
+        warnings.push({
+          code: "FILE_OVERLAP_SAME_WAVE",
+          message: `Multiple tasks in wave ${waveIndex} modify the same file`,
+          taskCodes,
+          detail: `File "${filePath}" is modified by tasks: ${taskCodes.join(", ")}`
+        });
+      }
+    }
+  }
+  return warnings;
+}
+
+// src/wave-planner/critical-path.ts
+function computeCriticalPath(tasks2, edges) {
+  if (tasks2.length === 0) {
+    return {
+      path: [],
+      length: 0,
+      annotations: /* @__PURE__ */ new Map()
+    };
+  }
+  const graph = buildDAGGraph(tasks2, edges);
+  const sortResult = topologicalSort(graph);
+  if (!sortResult.valid) {
+    const annotations2 = /* @__PURE__ */ new Map();
+    for (const task of tasks2) {
+      annotations2.set(task.taskCode, {
+        taskCode: task.taskCode,
+        isOnCriticalPath: false,
+        distanceFromRoot: 0,
+        distanceToEnd: 0,
+        slack: 0
+      });
+    }
+    return {
+      path: [],
+      length: 0,
+      annotations: annotations2
+    };
+  }
+  const order = sortResult.order;
+  const distanceFromRoot = /* @__PURE__ */ new Map();
+  const predecessor = /* @__PURE__ */ new Map();
+  for (const taskCode of order) {
+    const node = graph.get(taskCode);
+    if (node.dependencies.size === 0) {
+      distanceFromRoot.set(taskCode, 0);
+      predecessor.set(taskCode, null);
+    } else {
+      let maxDist = -1;
+      let maxPred = null;
+      for (const depCode of node.dependencies) {
+        const depDist = distanceFromRoot.get(depCode) ?? 0;
+        if (depDist >= maxDist) {
+          maxDist = depDist;
+          maxPred = depCode;
+        }
+      }
+      distanceFromRoot.set(taskCode, maxDist + 1);
+      predecessor.set(taskCode, maxPred);
+    }
+  }
+  let maxDistance = -1;
+  let terminalNode = null;
+  for (const taskCode of order) {
+    const dist = distanceFromRoot.get(taskCode);
+    if (dist > maxDistance) {
+      maxDistance = dist;
+      terminalNode = taskCode;
+    }
+  }
+  const path = [];
+  let current = terminalNode;
+  while (current !== null) {
+    path.unshift(current);
+    current = predecessor.get(current) ?? null;
+  }
+  const criticalPathLength = path.length;
+  const distanceToEnd = /* @__PURE__ */ new Map();
+  for (let i = order.length - 1; i >= 0; i--) {
+    const taskCode = order[i];
+    const node = graph.get(taskCode);
+    if (node.dependents.size === 0) {
+      distanceToEnd.set(taskCode, 0);
+    } else {
+      let maxDist = -1;
+      for (const depCode of node.dependents) {
+        const depDist = distanceToEnd.get(depCode) ?? 0;
+        maxDist = Math.max(maxDist, depDist);
+      }
+      distanceToEnd.set(taskCode, maxDist + 1);
+    }
+  }
+  const criticalPathSet = new Set(path);
+  const annotations = /* @__PURE__ */ new Map();
+  for (const task of tasks2) {
+    const taskCode = task.taskCode;
+    const distFromRoot = distanceFromRoot.get(taskCode) ?? 0;
+    const distToEnd = distanceToEnd.get(taskCode) ?? 0;
+    const slack = Math.max(0, criticalPathLength - 1 - (distFromRoot + distToEnd));
+    annotations.set(taskCode, {
+      taskCode,
+      isOnCriticalPath: criticalPathSet.has(taskCode),
+      distanceFromRoot: distFromRoot,
+      distanceToEnd: distToEnd,
+      slack
+    });
+  }
+  return {
+    path,
+    length: criticalPathLength,
+    annotations
+  };
+}
+
+// src/wave-planner/wave-assigner.ts
+function assignWaves(tasks2, edges, config) {
+  if (tasks2.length === 0) {
+    return {
+      waves: [],
+      totalWaves: 0,
+      maxParallelism: 0,
+      adjustments: []
+    };
+  }
+  const graph = buildDAGGraph(tasks2, edges);
+  const sortResult = topologicalSort(graph);
+  if (!sortResult.valid) {
+    throw new Error(
+      `Cannot assign waves: cycle detected in dependency graph involving tasks: ${sortResult.cycleParticipants?.join(", ")}`
+    );
+  }
+  const depths = computeWaveDepths(graph, sortResult.order);
+  const tasksByDepth = groupTasksByDepth(tasks2, depths);
+  const { wavesAfterConflicts, conflictAdjustments } = resolveFileConflicts(
+    tasksByDepth
+  );
+  const { finalWaves, capacityAdjustments } = applyCapacityConstraints(
+    wavesAfterConflicts,
+    config?.maxTasksPerWave
+  );
+  const totalWaves = finalWaves.length;
+  const maxParallelism = Math.max(
+    ...finalWaves.map((w) => w.tasks.length),
+    0
+  );
+  return {
+    waves: finalWaves,
+    totalWaves,
+    maxParallelism,
+    adjustments: [...conflictAdjustments, ...capacityAdjustments]
+  };
+}
+function computeWaveDepths(graph, topologicalOrder) {
+  const depths = /* @__PURE__ */ new Map();
+  for (const taskCode of topologicalOrder) {
+    depths.set(taskCode, 0);
+  }
+  for (const taskCode of topologicalOrder) {
+    const node = graph.get(taskCode);
+    let maxDepth = 0;
+    for (const depTaskCode of node.dependencies) {
+      const depDepth = depths.get(depTaskCode) || 0;
+      maxDepth = Math.max(maxDepth, depDepth + 1);
+    }
+    depths.set(taskCode, maxDepth);
+  }
+  return depths;
+}
+function groupTasksByDepth(tasks2, depths) {
+  const grouped = /* @__PURE__ */ new Map();
+  for (const task of tasks2) {
+    const depth = depths.get(task.taskCode) || 0;
+    const existing = grouped.get(depth) || [];
+    existing.push(task);
+    grouped.set(depth, existing);
+  }
+  return grouped;
+}
+function resolveFileConflicts(tasksByDepth) {
+  const adjustments = [];
+  const result = /* @__PURE__ */ new Map();
+  const depths = Array.from(tasksByDepth.keys()).sort((a, b) => a - b);
+  for (const depth of depths) {
+    const tasksAtDepth = tasksByDepth.get(depth) || [];
+    const remainingTasks = [];
+    const bumpedTasks = [];
+    const claimedFiles = /* @__PURE__ */ new Set();
+    for (const task of tasksAtDepth) {
+      const hasConflict = task.filePaths.some((file) => claimedFiles.has(file));
+      if (hasConflict) {
+        bumpedTasks.push(task);
+        const conflictingFiles2 = task.filePaths.filter(
+          (file) => claimedFiles.has(file)
+        );
+        adjustments.push({
+          type: "FILE_CONFLICT_BUMP",
+          taskCode: task.taskCode,
+          fromWave: depth,
+          toWave: depth + 1,
+          reason: `File conflict detected with files: ${conflictingFiles2.join(", ")}`
+        });
+      } else {
+        remainingTasks.push(task);
+        for (const file of task.filePaths) {
+          claimedFiles.add(file);
+        }
+      }
+    }
+    if (remainingTasks.length > 0) {
+      result.set(depth, remainingTasks);
+    }
+    if (bumpedTasks.length > 0) {
+      const nextDepth = depth + 1;
+      const existingAtNext = result.get(nextDepth) || [];
+      result.set(nextDepth, [...existingAtNext, ...bumpedTasks]);
+    }
+  }
+  return {
+    wavesAfterConflicts: result,
+    conflictAdjustments: adjustments
+  };
+}
+function applyCapacityConstraints(tasksByDepth, maxTasksPerWave) {
+  const adjustments = [];
+  const waves2 = [];
+  const depths = Array.from(tasksByDepth.keys()).sort((a, b) => a - b);
+  for (const depth of depths) {
+    const tasksAtDepth = tasksByDepth.get(depth) || [];
+    if (!maxTasksPerWave || tasksAtDepth.length <= maxTasksPerWave) {
+      waves2.push({
+        waveIndex: waves2.length,
+        label: generateWaveLabel(depth, tasksAtDepth),
+        tasks: tasksAtDepth
+      });
+    } else {
+      const subWaveCount = Math.ceil(tasksAtDepth.length / maxTasksPerWave);
+      for (let subIndex = 0; subIndex < subWaveCount; subIndex++) {
+        const startIdx = subIndex * maxTasksPerWave;
+        const endIdx = Math.min(
+          startIdx + maxTasksPerWave,
+          tasksAtDepth.length
+        );
+        const subWaveTasks = tasksAtDepth.slice(startIdx, endIdx);
+        waves2.push({
+          waveIndex: waves2.length,
+          label: generateWaveLabel(depth, subWaveTasks, subIndex),
+          tasks: subWaveTasks
+        });
+        if (subIndex > 0) {
+          for (const task of subWaveTasks) {
+            adjustments.push({
+              type: "CAPACITY_SPLIT",
+              taskCode: task.taskCode,
+              fromWave: depth,
+              toWave: waves2.length - 1,
+              reason: `Wave split due to capacity constraint (max ${maxTasksPerWave} tasks per wave)`
+            });
+          }
+        }
+      }
+    }
+  }
+  return {
+    finalWaves: waves2,
+    capacityAdjustments: adjustments
+  };
+}
+
+// src/wave-planner/plan-scorer.ts
+function scorePlan(assignment, criticalPathLength, edges, tasks2) {
+  const totalTasks = tasks2.length;
+  if (totalTasks === 0) {
+    return {
+      parallelizationScore: 0,
+      maxParallelism: 0,
+      waveEfficiency: 0,
+      dependencyDensity: 0,
+      fileConflictScore: 1,
+      confidenceSignals: {
+        parallelization: "LOW",
+        conflictRisk: "LOW"
+      }
+    };
+  }
+  const parallelizationScore = criticalPathLength > 0 ? 1 - criticalPathLength / totalTasks : 0;
+  const maxParallelism = assignment.maxParallelism;
+  const waveEfficiency = assignment.totalWaves > 0 ? totalTasks / assignment.totalWaves : 0;
+  const maxPossibleEdges = totalTasks * (totalTasks - 1) / 2;
+  const dependencyDensity = maxPossibleEdges > 0 ? edges.length / maxPossibleEdges : 0;
+  const fileConflictScore = computeFileConflictScore(
+    assignment,
+    tasks2
+  );
+  const confidenceSignals = computeConfidenceSignals(
+    parallelizationScore,
+    fileConflictScore
+  );
+  return {
+    parallelizationScore,
+    maxParallelism,
+    waveEfficiency,
+    dependencyDensity,
+    fileConflictScore,
+    confidenceSignals
+  };
+}
+function computeFileConflictScore(assignment, tasks2) {
+  const totalFileRefs = tasks2.reduce(
+    (sum, task) => sum + task.filePaths.length,
+    0
+  );
+  if (totalFileRefs === 0) {
+    return 1;
+  }
+  const fileConflictAdjustments = assignment.adjustments.filter(
+    (adj) => adj.type === "FILE_CONFLICT_BUMP"
+  ).length;
+  const conflictRatio = fileConflictAdjustments / totalFileRefs;
+  const score = Math.max(0, 1 - conflictRatio);
+  return score;
+}
+function computeConfidenceSignals(parallelizationScore, fileConflictScore) {
+  let parallelization;
+  if (parallelizationScore > 0.7) {
+    parallelization = "HIGH";
+  } else if (parallelizationScore > 0.4) {
+    parallelization = "MEDIUM";
+  } else {
+    parallelization = "LOW";
+  }
+  let conflictRisk;
+  if (fileConflictScore > 0.9) {
+    conflictRisk = "LOW";
+  } else if (fileConflictScore > 0.6) {
+    conflictRisk = "MEDIUM";
+  } else {
+    conflictRisk = "HIGH";
+  }
+  return {
+    parallelization,
+    conflictRisk
+  };
 }
 
 // src/integrations/linear/index.ts
@@ -2018,6 +3207,9 @@ var VERSION = "0.1.0";
   conflictingFilesRelations,
   createDatabase,
   databaseConfigSchema,
+  dependencyEdgeTypeValues,
+  dependencyEdges,
+  dependencyEdgesRelations,
   eventTypeValues,
   fileStatusValues,
   getDatabase,
@@ -2043,6 +3235,18 @@ var VERSION = "0.1.0";
   tasksRelations,
   touchedFiles,
   touchedFilesRelations,
+  wavePlanMetrics,
+  wavePlanMetricsRelations,
+  wavePlanStatusValues,
+  wavePlanner,
+  wavePlans,
+  wavePlansRelations,
+  waveStatusValues,
+  waveTaskStatusValues,
+  waveTasks,
+  waveTasksRelations,
+  waves,
+  wavesRelations,
   workstreams,
   workstreamsRelations,
   zoneValues

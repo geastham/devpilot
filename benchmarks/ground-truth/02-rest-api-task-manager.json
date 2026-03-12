@@ -1,0 +1,144 @@
+{
+  "$schema": "../schemas/ground-truth.schema.json",
+  "benchmarkId": "02-rest-api-task-manager",
+  "description": "Taskforge - REST API with JWT Auth and Webhooks",
+  "waves": [
+    {
+      "wave": 1,
+      "name": "Foundation",
+      "tasks": ["scaffold", "db", "error-middleware", "validation-middleware"],
+      "parallel": ["error-middleware", "validation-middleware"],
+      "rationale": "DB is gating for all services. Error and validation middleware are independent leaves."
+    },
+    {
+      "wave": 2,
+      "name": "Auth Stack + Independent Services",
+      "tasks": [
+        "auth-service",
+        "webhook-dispatcher",
+        "label-service",
+        "webhook-service",
+        "association-service"
+      ],
+      "parallel": ["auth-service", "webhook-dispatcher", "label-service", "webhook-service", "association-service"],
+      "dependsOn": [1],
+      "rationale": "Auth service and all independent services (webhook-dispatcher, label, webhook, association) can parallelize - they all only depend on DB."
+    },
+    {
+      "wave": 3,
+      "name": "Auth Middleware + Task Service + Routes",
+      "tasks": [
+        "auth-middleware",
+        "auth-routes",
+        "task-service",
+        "label-routes",
+        "webhook-routes",
+        "association-routes"
+      ],
+      "parallel": ["auth-routes", "task-service", "label-routes", "webhook-routes", "association-routes"],
+      "dependsOn": [2],
+      "rationale": "Auth middleware depends on auth service. Task service needs webhook dispatcher. All routes need auth middleware and their respective services."
+    },
+    {
+      "wave": 4,
+      "name": "Integration",
+      "tasks": ["task-routes", "app"],
+      "parallel": [],
+      "dependsOn": [3],
+      "rationale": "Task routes depend on task service + auth middleware. App bootstrap depends on all routes and middleware."
+    },
+    {
+      "wave": 5,
+      "name": "Testing",
+      "tasks": ["tests"],
+      "parallel": [],
+      "dependsOn": [4],
+      "rationale": "Run curl-based acceptance tests against running server."
+    }
+  ],
+  "criticalPath": ["db", "auth-service", "auth-middleware", "task-routes", "app"],
+  "alternateCriticalPath": ["db", "webhook-dispatcher", "task-service", "task-routes", "app"],
+  "maxParallelism": 5,
+  "taskDetails": {
+    "scaffold": {
+      "files": ["package.json", "directory structure"],
+      "description": "Project scaffold with package.json and directory structure"
+    },
+    "db": {
+      "files": ["src/db.js"],
+      "description": "SQLite database layer with migrations and query helpers"
+    },
+    "error-middleware": {
+      "files": ["src/middleware/error.js"],
+      "description": "Centralized error handler with consistent error format"
+    },
+    "validation-middleware": {
+      "files": ["src/middleware/validate.js", "src/schemas.js"],
+      "description": "Request validation middleware using Zod schemas"
+    },
+    "auth-service": {
+      "files": ["src/services/auth.js"],
+      "description": "Authentication service - password hashing, JWT generation/verification"
+    },
+    "auth-middleware": {
+      "files": ["src/middleware/auth.js"],
+      "description": "JWT token verification and user context injection"
+    },
+    "auth-routes": {
+      "files": ["src/routes/auth.js"],
+      "description": "Auth routes - POST /auth/register, POST /auth/login"
+    },
+    "task-service": {
+      "files": ["src/services/tasks.js"],
+      "description": "Task business logic with state machine transitions and webhook integration"
+    },
+    "task-routes": {
+      "files": ["src/routes/tasks.js"],
+      "description": "Task CRUD endpoints"
+    },
+    "label-service": {
+      "files": ["src/services/labels.js"],
+      "description": "Label business logic"
+    },
+    "label-routes": {
+      "files": ["src/routes/labels.js"],
+      "description": "Label CRUD endpoints"
+    },
+    "association-service": {
+      "files": ["src/services/associations.js"],
+      "description": "Task-Label many-to-many relationship management"
+    },
+    "association-routes": {
+      "files": ["src/routes/associations.js"],
+      "description": "Task-Label linking/unlinking endpoints"
+    },
+    "webhook-service": {
+      "files": ["src/services/webhooks.js"],
+      "description": "Webhook subscription management"
+    },
+    "webhook-routes": {
+      "files": ["src/routes/webhooks.js"],
+      "description": "Webhook CRUD endpoints"
+    },
+    "webhook-dispatcher": {
+      "files": ["src/services/webhook-dispatcher.js"],
+      "description": "Async HTTP dispatch on task state changes"
+    },
+    "app": {
+      "files": ["src/app.js"],
+      "description": "Express app bootstrap - middleware registration, route mounting"
+    },
+    "tests": {
+      "files": ["tests/acceptance.sh"],
+      "description": "Curl-based acceptance tests against running server"
+    }
+  },
+  "keyDecisionPoints": [
+    "Does the planner recognize DB as the universal gating dependency?",
+    "Does the planner build the auth service before auth middleware?",
+    "Does the planner parallelize the independent services?",
+    "Does the planner understand the auth middleware is cross-cutting?",
+    "Does the planner recognize the two converging critical paths?",
+    "How does the planner handle the task service → webhook dispatcher dependency?"
+  ]
+}

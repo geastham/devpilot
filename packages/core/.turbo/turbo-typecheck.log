@@ -1,4 +1,4 @@
 
-> @devpilot/core@0.1.0 typecheck /Users/garretteastham/dev/devpilot/platform/devpilot-core/packages/core
+> @devpilot.sh/core@0.1.0 typecheck /Users/garretteastham/dev/devpilot/platform/devpilot-core/packages/core
 > tsc --noEmit
 

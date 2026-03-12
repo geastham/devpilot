@@ -37,6 +37,9 @@ __export(schema_exports, {
   conductorScoresRelations: () => conductorScoresRelations,
   conflictingFiles: () => conflictingFiles,
   conflictingFilesRelations: () => conflictingFilesRelations,
+  dependencyEdgeTypeValues: () => dependencyEdgeTypeValues,
+  dependencyEdges: () => dependencyEdges,
+  dependencyEdgesRelations: () => dependencyEdgesRelations,
   eventTypeValues: () => eventTypeValues,
   fileStatusValues: () => fileStatusValues,
   horizonItems: () => horizonItems,
@@ -56,6 +59,17 @@ __export(schema_exports, {
   tasksRelations: () => tasksRelations,
   touchedFiles: () => touchedFiles,
   touchedFilesRelations: () => touchedFilesRelations,
+  wavePlanMetrics: () => wavePlanMetrics,
+  wavePlanMetricsRelations: () => wavePlanMetricsRelations,
+  wavePlanStatusValues: () => wavePlanStatusValues,
+  wavePlans: () => wavePlans,
+  wavePlansRelations: () => wavePlansRelations,
+  waveStatusValues: () => waveStatusValues,
+  waveTaskStatusValues: () => waveTaskStatusValues,
+  waveTasks: () => waveTasks,
+  waveTasksRelations: () => waveTasksRelations,
+  waves: () => waves,
+  wavesRelations: () => wavesRelations,
   workstreams: () => workstreams,
   workstreamsRelations: () => workstreamsRelations,
   zoneValues: () => zoneValues
@@ -76,9 +90,47 @@ var eventTypeValues = [
   "ITEM_DISPATCHED",
   "RUNWAY_UPDATE",
   "FILE_UNLOCKED",
-  "SCORE_UPDATE"
+  "SCORE_UPDATE",
+  // Wave Planner events
+  "WAVE_PLAN_CREATED",
+  "WAVE_DISPATCHING",
+  "WAVE_TASK_DISPATCHED",
+  "WAVE_TASK_COMPLETE",
+  "WAVE_TASK_FAILED",
+  "WAVE_COMPLETE",
+  "WAVE_ADVANCE",
+  "WAVE_PLAN_COMPLETE",
+  "WAVE_PLAN_FAILED",
+  "WAVE_PLAN_REOPTIMIZING"
 ];
 var orchestratorModeValues = ["http", "ao-cli", "manual", "disabled"];
+var wavePlanStatusValues = [
+  "draft",
+  "approved",
+  "executing",
+  "paused",
+  "completed",
+  "failed",
+  "re-optimizing"
+];
+var waveStatusValues = [
+  "pending",
+  "dispatching",
+  "active",
+  "completed",
+  "failed",
+  "skipped"
+];
+var waveTaskStatusValues = [
+  "pending",
+  "dispatched",
+  "running",
+  "completed",
+  "failed",
+  "retrying",
+  "skipped"
+];
+var dependencyEdgeTypeValues = ["hard", "soft"];
 
 // src/db/schema/horizon.ts
 import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
@@ -306,6 +358,143 @@ var activityEvents = sqliteTable4("activity_events", {
   createdAt: integer4("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date())
 });
 
+// src/db/schema/wave-planner.ts
+import { sqliteTable as sqliteTable5, text as text5, integer as integer5, real as real2 } from "drizzle-orm/sqlite-core";
+import { relations as relations4 } from "drizzle-orm";
+import { createId as createId5 } from "@paralleldrive/cuid2";
+var wavePlans = sqliteTable5("wave_plans", {
+  id: text5("id").primaryKey().$defaultFn(() => createId5()),
+  planId: text5("plan_id").notNull(),
+  horizonItemId: text5("horizon_item_id").notNull(),
+  totalWaves: integer5("total_waves").notNull(),
+  totalTasks: integer5("total_tasks").notNull(),
+  maxParallelism: integer5("max_parallelism").notNull(),
+  criticalPath: text5("critical_path", { mode: "json" }).$type().notNull(),
+  criticalPathLength: integer5("critical_path_length").notNull(),
+  parallelizationScore: real2("parallelization_score").notNull(),
+  status: text5("status", { enum: wavePlanStatusValues }).notNull().default("draft"),
+  currentWaveIndex: integer5("current_wave_index").notNull().default(0),
+  version: integer5("version").notNull().default(1),
+  previousWavePlanId: text5("previous_wave_plan_id"),
+  rawMarkdown: text5("raw_markdown"),
+  startedAt: integer5("started_at", { mode: "timestamp" }),
+  completedAt: integer5("completed_at", { mode: "timestamp" }),
+  createdAt: integer5("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date()),
+  updatedAt: integer5("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date())
+});
+var wavePlansRelations = relations4(wavePlans, ({ one, many }) => ({
+  plan: one(plans, {
+    fields: [wavePlans.planId],
+    references: [plans.id]
+  }),
+  horizonItem: one(horizonItems, {
+    fields: [wavePlans.horizonItemId],
+    references: [horizonItems.id]
+  }),
+  previousWavePlan: one(wavePlans, {
+    fields: [wavePlans.previousWavePlanId],
+    references: [wavePlans.id],
+    relationName: "wavePlanHistory"
+  }),
+  waves: many(waves),
+  waveTasks: many(waveTasks),
+  dependencyEdges: many(dependencyEdges),
+  metrics: one(wavePlanMetrics, {
+    fields: [wavePlans.id],
+    references: [wavePlanMetrics.wavePlanId]
+  })
+}));
+var waves = sqliteTable5("waves", {
+  id: text5("id").primaryKey().$defaultFn(() => createId5()),
+  wavePlanId: text5("wave_plan_id").notNull(),
+  waveIndex: integer5("wave_index").notNull(),
+  label: text5("label").notNull(),
+  maxParallelTasks: integer5("max_parallel_tasks").notNull(),
+  status: text5("status", { enum: waveStatusValues }).notNull().default("pending"),
+  startedAt: integer5("started_at", { mode: "timestamp" }),
+  completedAt: integer5("completed_at", { mode: "timestamp" })
+});
+var wavesRelations = relations4(waves, ({ one, many }) => ({
+  wavePlan: one(wavePlans, {
+    fields: [waves.wavePlanId],
+    references: [wavePlans.id]
+  }),
+  tasks: many(waveTasks)
+}));
+var waveTasks = sqliteTable5("wave_tasks", {
+  id: text5("id").primaryKey().$defaultFn(() => createId5()),
+  waveId: text5("wave_id").notNull(),
+  wavePlanId: text5("wave_plan_id").notNull(),
+  taskId: text5("task_id"),
+  // FK to existing tasks table (nullable)
+  waveIndex: integer5("wave_index").notNull(),
+  taskCode: text5("task_code").notNull(),
+  // e.g., "1.1", "4.3"
+  label: text5("label").notNull(),
+  description: text5("description").notNull().default(""),
+  filePaths: text5("file_paths", { mode: "json" }).$type().notNull().default([]),
+  dependencies: text5("dependencies", { mode: "json" }).$type().notNull().default([]),
+  recommendedModel: text5("recommended_model", { enum: modelValues }),
+  complexity: text5("complexity", { enum: complexityValues }),
+  isOnCriticalPath: integer5("is_on_critical_path", { mode: "boolean" }).notNull().default(false),
+  canRunInParallel: integer5("can_run_in_parallel", { mode: "boolean" }).notNull().default(true),
+  status: text5("status", { enum: waveTaskStatusValues }).notNull().default("pending"),
+  assignedSessionId: text5("assigned_session_id"),
+  startedAt: integer5("started_at", { mode: "timestamp" }),
+  completedAt: integer5("completed_at", { mode: "timestamp" }),
+  errorMessage: text5("error_message"),
+  retryCount: integer5("retry_count").notNull().default(0)
+});
+var waveTasksRelations = relations4(waveTasks, ({ one }) => ({
+  wave: one(waves, {
+    fields: [waveTasks.waveId],
+    references: [waves.id]
+  }),
+  wavePlan: one(wavePlans, {
+    fields: [waveTasks.wavePlanId],
+    references: [wavePlans.id]
+  }),
+  task: one(tasks, {
+    fields: [waveTasks.taskId],
+    references: [tasks.id]
+  })
+}));
+var dependencyEdges = sqliteTable5("dependency_edges", {
+  id: text5("id").primaryKey().$defaultFn(() => createId5()),
+  wavePlanId: text5("wave_plan_id").notNull(),
+  fromTaskCode: text5("from_task_code").notNull(),
+  toTaskCode: text5("to_task_code").notNull(),
+  edgeType: text5("edge_type", { enum: dependencyEdgeTypeValues }).notNull().default("hard")
+});
+var dependencyEdgesRelations = relations4(dependencyEdges, ({ one }) => ({
+  wavePlan: one(wavePlans, {
+    fields: [dependencyEdges.wavePlanId],
+    references: [wavePlans.id]
+  })
+}));
+var wavePlanMetrics = sqliteTable5("wave_plan_metrics", {
+  id: text5("id").primaryKey().$defaultFn(() => createId5()),
+  wavePlanId: text5("wave_plan_id").notNull().unique(),
+  totalWallClockMs: integer5("total_wall_clock_ms"),
+  theoreticalMinMs: integer5("theoretical_min_ms"),
+  parallelizationEfficiency: real2("parallelization_efficiency"),
+  wavesExecuted: integer5("waves_executed").notNull().default(0),
+  tasksCompleted: integer5("tasks_completed").notNull().default(0),
+  tasksFailed: integer5("tasks_failed").notNull().default(0),
+  tasksRetried: integer5("tasks_retried").notNull().default(0),
+  avgTaskDurationMs: integer5("avg_task_duration_ms"),
+  maxWaveWaitMs: integer5("max_wave_wait_ms"),
+  fileConflictsAvoided: integer5("file_conflicts_avoided").notNull().default(0),
+  reOptimizationCount: integer5("re_optimization_count").notNull().default(0),
+  recordedAt: integer5("recorded_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date())
+});
+var wavePlanMetricsRelations = relations4(wavePlanMetrics, ({ one }) => ({
+  wavePlan: one(wavePlans, {
+    fields: [wavePlanMetrics.wavePlanId],
+    references: [wavePlans.id]
+  })
+}));
+
 // src/db/adapters/sqlite.ts
 import { existsSync, mkdirSync } from "fs";
 import { dirname } from "path";
@@ -454,12 +643,97 @@ CREATE TABLE IF NOT EXISTS score_history (
 -- Activity Events
 CREATE TABLE IF NOT EXISTS activity_events (
   id TEXT PRIMARY KEY,
-  type TEXT NOT NULL CHECK(type IN ('SESSION_PROGRESS', 'SESSION_COMPLETE', 'PLAN_GENERATED', 'PLAN_APPROVED', 'ITEM_CREATED', 'ITEM_DISPATCHED', 'RUNWAY_UPDATE', 'FILE_UNLOCKED', 'SCORE_UPDATE')),
+  type TEXT NOT NULL CHECK(type IN ('SESSION_PROGRESS', 'SESSION_COMPLETE', 'PLAN_GENERATED', 'PLAN_APPROVED', 'ITEM_CREATED', 'ITEM_DISPATCHED', 'RUNWAY_UPDATE', 'FILE_UNLOCKED', 'SCORE_UPDATE', 'WAVE_PLAN_CREATED', 'WAVE_DISPATCHING', 'WAVE_TASK_DISPATCHED', 'WAVE_TASK_COMPLETE', 'WAVE_TASK_FAILED', 'WAVE_COMPLETE', 'WAVE_ADVANCE', 'WAVE_PLAN_COMPLETE', 'WAVE_PLAN_FAILED', 'WAVE_PLAN_REOPTIMIZING')),
   message TEXT NOT NULL,
   repo TEXT,
   ticket_id TEXT,
   metadata TEXT,
   created_at INTEGER NOT NULL
+);
+
+-- Wave Plans
+CREATE TABLE IF NOT EXISTS wave_plans (
+  id TEXT PRIMARY KEY,
+  plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+  horizon_item_id TEXT NOT NULL REFERENCES horizon_items(id) ON DELETE CASCADE,
+  total_waves INTEGER NOT NULL,
+  total_tasks INTEGER NOT NULL,
+  max_parallelism INTEGER NOT NULL,
+  critical_path TEXT NOT NULL,
+  critical_path_length INTEGER NOT NULL,
+  parallelization_score REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'approved', 'executing', 'paused', 'completed', 'failed', 're-optimizing')),
+  current_wave_index INTEGER NOT NULL DEFAULT 0,
+  version INTEGER NOT NULL DEFAULT 1,
+  previous_wave_plan_id TEXT REFERENCES wave_plans(id),
+  raw_markdown TEXT,
+  started_at INTEGER,
+  completed_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- Waves
+CREATE TABLE IF NOT EXISTS waves (
+  id TEXT PRIMARY KEY,
+  wave_plan_id TEXT NOT NULL REFERENCES wave_plans(id) ON DELETE CASCADE,
+  wave_index INTEGER NOT NULL,
+  label TEXT NOT NULL,
+  max_parallel_tasks INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'dispatching', 'active', 'completed', 'failed', 'skipped')),
+  started_at INTEGER,
+  completed_at INTEGER
+);
+
+-- Wave Tasks
+CREATE TABLE IF NOT EXISTS wave_tasks (
+  id TEXT PRIMARY KEY,
+  wave_id TEXT NOT NULL REFERENCES waves(id) ON DELETE CASCADE,
+  wave_plan_id TEXT NOT NULL REFERENCES wave_plans(id) ON DELETE CASCADE,
+  task_id TEXT REFERENCES tasks(id),
+  wave_index INTEGER NOT NULL,
+  task_code TEXT NOT NULL,
+  label TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  file_paths TEXT NOT NULL DEFAULT '[]',
+  dependencies TEXT NOT NULL DEFAULT '[]',
+  recommended_model TEXT CHECK(recommended_model IN ('HAIKU', 'SONNET', 'OPUS')),
+  complexity TEXT CHECK(complexity IN ('S', 'M', 'L', 'XL')),
+  is_on_critical_path INTEGER NOT NULL DEFAULT 0,
+  can_run_in_parallel INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'dispatched', 'running', 'completed', 'failed', 'retrying', 'skipped')),
+  assigned_session_id TEXT,
+  started_at INTEGER,
+  completed_at INTEGER,
+  error_message TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0
+);
+
+-- Dependency Edges
+CREATE TABLE IF NOT EXISTS dependency_edges (
+  id TEXT PRIMARY KEY,
+  wave_plan_id TEXT NOT NULL REFERENCES wave_plans(id) ON DELETE CASCADE,
+  from_task_code TEXT NOT NULL,
+  to_task_code TEXT NOT NULL,
+  edge_type TEXT NOT NULL DEFAULT 'hard' CHECK(edge_type IN ('hard', 'soft'))
+);
+
+-- Wave Plan Metrics
+CREATE TABLE IF NOT EXISTS wave_plan_metrics (
+  id TEXT PRIMARY KEY,
+  wave_plan_id TEXT NOT NULL UNIQUE REFERENCES wave_plans(id) ON DELETE CASCADE,
+  total_wall_clock_ms INTEGER,
+  theoretical_min_ms INTEGER,
+  parallelization_efficiency REAL,
+  waves_executed INTEGER NOT NULL DEFAULT 0,
+  tasks_completed INTEGER NOT NULL DEFAULT 0,
+  tasks_failed INTEGER NOT NULL DEFAULT 0,
+  tasks_retried INTEGER NOT NULL DEFAULT 0,
+  avg_task_duration_ms INTEGER,
+  max_wave_wait_ms INTEGER,
+  file_conflicts_avoided INTEGER NOT NULL DEFAULT 0,
+  re_optimization_count INTEGER NOT NULL DEFAULT 0,
+  recorded_at INTEGER NOT NULL
 );
 
 -- Create indexes
@@ -469,6 +743,16 @@ CREATE INDEX IF NOT EXISTS idx_ruflo_sessions_status ON ruflo_sessions(status);
 CREATE INDEX IF NOT EXISTS idx_ruflo_sessions_repo ON ruflo_sessions(repo);
 CREATE INDEX IF NOT EXISTS idx_activity_events_type ON activity_events(type);
 CREATE INDEX IF NOT EXISTS idx_activity_events_created_at ON activity_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_wave_plans_plan_id ON wave_plans(plan_id);
+CREATE INDEX IF NOT EXISTS idx_wave_plans_horizon_item_id ON wave_plans(horizon_item_id);
+CREATE INDEX IF NOT EXISTS idx_wave_plans_status ON wave_plans(status);
+CREATE INDEX IF NOT EXISTS idx_waves_wave_plan_id ON waves(wave_plan_id);
+CREATE INDEX IF NOT EXISTS idx_waves_status ON waves(status);
+CREATE INDEX IF NOT EXISTS idx_wave_tasks_wave_id ON wave_tasks(wave_id);
+CREATE INDEX IF NOT EXISTS idx_wave_tasks_wave_plan_id ON wave_tasks(wave_plan_id);
+CREATE INDEX IF NOT EXISTS idx_wave_tasks_status ON wave_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_wave_tasks_task_code ON wave_tasks(task_code);
+CREATE INDEX IF NOT EXISTS idx_dependency_edges_wave_plan_id ON dependency_edges(wave_plan_id);
 `;
 function createSQLiteAdapter(path) {
   if (sqliteDb) {
@@ -576,6 +860,9 @@ export {
   conflictingFilesRelations,
   createDatabase,
   databaseConfigSchema,
+  dependencyEdgeTypeValues,
+  dependencyEdges,
+  dependencyEdgesRelations,
   eventTypeValues,
   fileStatusValues,
   getDatabase,
@@ -599,6 +886,17 @@ export {
   tasksRelations,
   touchedFiles,
   touchedFilesRelations,
+  wavePlanMetrics,
+  wavePlanMetricsRelations,
+  wavePlanStatusValues,
+  wavePlans,
+  wavePlansRelations,
+  waveStatusValues,
+  waveTaskStatusValues,
+  waveTasks,
+  waveTasksRelations,
+  waves,
+  wavesRelations,
   workstreams,
   workstreamsRelations,
   zoneValues

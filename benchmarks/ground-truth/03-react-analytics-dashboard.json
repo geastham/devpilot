@@ -1,0 +1,177 @@
+{
+  "$schema": "../schemas/ground-truth.schema.json",
+  "benchmarkId": "03-react-analytics-dashboard",
+  "description": "InsightBoard - Full-stack Analytics Dashboard with Data Pipeline, API, and React Frontend",
+  "waves": [
+    {
+      "wave": 1,
+      "name": "Shared Foundation + Data Pipeline",
+      "tasks": ["scaffold", "db", "csv-parser", "transformer", "fixtures"],
+      "parallel": ["db", "csv-parser", "transformer", "fixtures"],
+      "rationale": "DB, parser, transformer, and fixtures are all independent. Full parallel execution possible."
+    },
+    {
+      "wave": 2,
+      "name": "Complete Pipeline + API Foundation",
+      "tasks": ["loader", "pipeline-orchestrator", "run-pipeline", "query-engine"],
+      "parallel": ["loader", "query-engine"],
+      "dependsOn": [1],
+      "rationale": "Loader and query engine can build in parallel (both need db.js). Pipeline orchestrator waits for loader. Running the pipeline is sequential."
+    },
+    {
+      "wave": 3,
+      "name": "API Endpoints",
+      "tasks": ["endpoint-revenue", "endpoint-products", "endpoint-customers", "endpoint-channels", "endpoint-summary", "api-server"],
+      "parallel": ["endpoint-revenue", "endpoint-products", "endpoint-customers", "endpoint-channels", "endpoint-summary"],
+      "dependsOn": [2],
+      "rationale": "All 5 endpoints can build simultaneously. Server waits for all endpoints."
+    },
+    {
+      "wave": 4,
+      "name": "Frontend Components",
+      "tasks": ["useAnalytics", "DateFilter", "KPICards", "RevenueChart", "ProductChart", "CustomerChart", "ChannelChart"],
+      "parallel": ["KPICards", "RevenueChart", "ProductChart", "CustomerChart", "ChannelChart"],
+      "dependsOn": [3],
+      "rationale": "Hook and DateFilter first, then all 5 chart/card components in parallel."
+    },
+    {
+      "wave": 5,
+      "name": "Integration Shell + Testing",
+      "tasks": ["App", "index-html", "main-jsx", "tests"],
+      "parallel": ["index-html", "main-jsx"],
+      "dependsOn": [4],
+      "rationale": "App.jsx depends on all components. Entry files can be parallel. Tests validate everything end-to-end."
+    }
+  ],
+  "criticalPath": ["db", "loader", "run-pipeline", "query-engine", "endpoint-revenue", "api-server"],
+  "alternateCriticalPath": ["scaffold", "vite-config", "useAnalytics", "RevenueChart", "App"],
+  "maxParallelism": 5,
+  "recommendedStrategy": "horizontal",
+  "alternativeStrategy": {
+    "name": "vertical",
+    "description": "Build one full vertical slice at a time (e.g., Revenue feature E2E: query → endpoint → chart). Valid but typically slower because it misses parallelism of independent endpoints.",
+    "waves": [
+      "Wave 1: Foundation (db, scaffold, pipeline, fixtures, ingest)",
+      "Wave 2: Revenue feature E2E (query → endpoint → chart component)",
+      "Wave 3: Products feature E2E",
+      "Wave 4: Customers + Channels features (parallel vertical slices)",
+      "Wave 5: Summary/KPI + DateFilter + App shell + integration"
+    ]
+  },
+  "taskDetails": {
+    "scaffold": {
+      "files": ["package.json (root + frontend)", "directory structure", "vite.config.js"],
+      "description": "Project scaffold with monorepo structure and Vite configuration"
+    },
+    "db": {
+      "files": ["src/db.js"],
+      "description": "SQLite connection singleton shared by pipeline and API"
+    },
+    "csv-parser": {
+      "files": ["src/pipeline/parser.js"],
+      "description": "CSV file parser using csv-parse"
+    },
+    "transformer": {
+      "files": ["src/pipeline/transformer.js"],
+      "description": "Data transformer - clean, validate, normalize records"
+    },
+    "fixtures": {
+      "files": ["fixtures/products.csv", "fixtures/customers.csv", "fixtures/orders.csv"],
+      "description": "CSV fixture files with test data"
+    },
+    "loader": {
+      "files": ["src/pipeline/loader.js"],
+      "description": "Database loader - create tables, bulk insert records"
+    },
+    "pipeline-orchestrator": {
+      "files": ["src/pipeline/index.js"],
+      "description": "ETL pipeline orchestrator"
+    },
+    "run-pipeline": {
+      "files": [],
+      "description": "Execute pipeline to ingest data into SQLite (runtime dependency for API)"
+    },
+    "query-engine": {
+      "files": ["src/api/queries.js"],
+      "description": "Reusable aggregation query builders"
+    },
+    "endpoint-revenue": {
+      "files": ["src/api/routes/revenue.js"],
+      "description": "Time-series revenue aggregation endpoint"
+    },
+    "endpoint-products": {
+      "files": ["src/api/routes/products.js"],
+      "description": "Product performance metrics endpoint"
+    },
+    "endpoint-customers": {
+      "files": ["src/api/routes/customers.js"],
+      "description": "Customer segment breakdown endpoint"
+    },
+    "endpoint-channels": {
+      "files": ["src/api/routes/channels.js"],
+      "description": "Marketing channel attribution endpoint"
+    },
+    "endpoint-summary": {
+      "files": ["src/api/routes/summary.js"],
+      "description": "KPI summary endpoint (totals, averages)"
+    },
+    "api-server": {
+      "files": ["src/api/server.js"],
+      "description": "Express app bootstrap with route mounting"
+    },
+    "useAnalytics": {
+      "files": ["src/frontend/hooks/useAnalytics.js"],
+      "description": "Shared data fetching hook for API calls"
+    },
+    "DateFilter": {
+      "files": ["src/frontend/components/DateFilter.jsx"],
+      "description": "Date range filter with context provider"
+    },
+    "KPICards": {
+      "files": ["src/frontend/components/KPICards.jsx"],
+      "description": "Summary metric display cards"
+    },
+    "RevenueChart": {
+      "files": ["src/frontend/components/RevenueChart.jsx"],
+      "description": "Line chart - revenue over time using Recharts"
+    },
+    "ProductChart": {
+      "files": ["src/frontend/components/ProductChart.jsx"],
+      "description": "Bar chart - top products by revenue using Recharts"
+    },
+    "CustomerChart": {
+      "files": ["src/frontend/components/CustomerChart.jsx"],
+      "description": "Pie chart - customer segments using Recharts"
+    },
+    "ChannelChart": {
+      "files": ["src/frontend/components/ChannelChart.jsx"],
+      "description": "Stacked bar - channel performance using Recharts"
+    },
+    "App": {
+      "files": ["src/frontend/App.jsx"],
+      "description": "Dashboard layout with CSS Grid"
+    },
+    "index-html": {
+      "files": ["src/frontend/index.html"],
+      "description": "Vite entry HTML file"
+    },
+    "main-jsx": {
+      "files": ["src/frontend/main.jsx"],
+      "description": "React entry point"
+    },
+    "tests": {
+      "files": ["tests/acceptance.sh"],
+      "description": "End-to-end acceptance tests"
+    }
+  },
+  "keyDecisionPoints": [
+    "Does the planner separate the three layers (data, API, frontend)?",
+    "Does the planner run the pipeline (ingest data) before building API routes?",
+    "Does the planner parallelize the 5 API endpoints?",
+    "Does the planner parallelize the chart components?",
+    "Does the planner create the shared data contract (query engine) early?",
+    "Does the planner handle the fixture data edge cases?",
+    "Horizontal vs. vertical - what does the planner choose and why?",
+    "Does the planner recognize the Vite build system as a separate concern?"
+  ]
+}

@@ -26,8 +26,55 @@ export const eventTypeValues = [
   'RUNWAY_UPDATE',
   'FILE_UNLOCKED',
   'SCORE_UPDATE',
+  // Wave Planner events
+  'WAVE_PLAN_CREATED',
+  'WAVE_DISPATCHING',
+  'WAVE_TASK_DISPATCHED',
+  'WAVE_TASK_COMPLETE',
+  'WAVE_TASK_FAILED',
+  'WAVE_COMPLETE',
+  'WAVE_ADVANCE',
+  'WAVE_PLAN_COMPLETE',
+  'WAVE_PLAN_FAILED',
+  'WAVE_PLAN_REOPTIMIZING',
 ] as const;
 export type EventType = (typeof eventTypeValues)[number];
 
 export const orchestratorModeValues = ['http', 'ao-cli', 'manual', 'disabled'] as const;
 export type OrchestratorMode = (typeof orchestratorModeValues)[number];
+
+// Wave Planner enums
+export const wavePlanStatusValues = [
+  'draft',
+  'approved',
+  'executing',
+  'paused',
+  'completed',
+  'failed',
+  're-optimizing',
+] as const;
+export type WavePlanStatus = (typeof wavePlanStatusValues)[number];
+
+export const waveStatusValues = [
+  'pending',
+  'dispatching',
+  'active',
+  'completed',
+  'failed',
+  'skipped',
+] as const;
+export type WaveStatus = (typeof waveStatusValues)[number];
+
+export const waveTaskStatusValues = [
+  'pending',
+  'dispatched',
+  'running',
+  'completed',
+  'failed',
+  'retrying',
+  'skipped',
+] as const;
+export type WaveTaskStatus = (typeof waveTaskStatusValues)[number];
+
+export const dependencyEdgeTypeValues = ['hard', 'soft'] as const;
+export type DependencyEdgeType = (typeof dependencyEdgeTypeValues)[number];

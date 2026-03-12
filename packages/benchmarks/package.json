@@ -1,0 +1,75 @@
+{
+  "name": "@devpilot.sh/benchmarks",
+  "version": "0.1.0",
+  "description": "DevPilot Benchmark Suite - Compare baseline vs orchestrated AI coding performance",
+  "license": "MIT",
+  "author": "DevPilot Team",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/devpilot-sh/devpilot-core.git",
+    "directory": "packages/benchmarks"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./cli": {
+      "types": "./dist/cli/index.d.ts",
+      "import": "./dist/cli/index.mjs",
+      "require": "./dist/cli/index.js"
+    }
+  },
+  "bin": {
+    "devpilot-bench": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "pnpm run build"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "@devpilot.sh/core": "workspace:*",
+    "@paralleldrive/cuid2": "^2.2.2",
+    "chalk": "^5.3.0",
+    "commander": "^12.0.0",
+    "tar": "^7.0.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.0.0"
+  },
+  "peerDependencies": {
+    "@devpilot.sh/cli": "workspace:*"
+  },
+  "peerDependenciesMeta": {
+    "@devpilot.sh/cli": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "devpilot",
+    "benchmark",
+    "ai",
+    "testing",
+    "comparison"
+  ]
+}
