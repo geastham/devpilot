@@ -8,6 +8,7 @@ export interface SystemRequirements {
   git: { installed: boolean; version: string | null; meetsMinimum: boolean };
   tmux: { installed: boolean };
   gh: { installed: boolean; authenticated: boolean };
+  rtk: { installed: boolean; version: string | null };
 }
 
 export interface OrchestratorConfig {
@@ -87,11 +88,15 @@ export function checkSystemRequirements(): SystemRequirements {
     }
   }
 
+  // Check RTK
+  const rtk = checkCommand('rtk');
+
   return {
     node: { ...node, meetsMinimum: nodeMeetsMin },
     git: { ...git, meetsMinimum: gitMeetsMin },
     tmux: { installed: tmux.installed },
     gh: { installed: gh.installed, authenticated: ghAuthenticated },
+    rtk: { installed: rtk.installed, version: rtk.version },
   };
 }
 
@@ -135,6 +140,13 @@ export function printRequirementsStatus(reqs: SystemRequirements): void {
   } else {
     console.log(chalk.yellow('  ⚠ GitHub CLI not found (optional, for PR creation)'));
   }
+
+  // RTK
+  if (reqs.rtk.installed) {
+    console.log(chalk.green(`  ✓ RTK ${reqs.rtk.version || ''} (token optimization)`));
+  } else {
+    console.log(chalk.yellow('  ⚠ RTK not found (recommended, for 60-90% token savings)'));
+  }
 }
 
 /**
@@ -164,6 +176,67 @@ export function installOrchestrator(): boolean {
   } catch {
     console.log(chalk.red('✗ Failed to install @composio/ao-cli'));
     console.log(chalk.gray('  Try manually: npm install -g @composio/ao-cli'));
+    return false;
+  }
+}
+
+/**
+ * Check if RTK (Rust Token Killer) is installed
+ */
+export function isRtkInstalled(): boolean {
+  try {
+    const result = spawnSync('rtk', ['--version'], { encoding: 'utf-8', stdio: 'pipe' });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Install RTK via cargo (requires Rust toolchain)
+ */
+export function installRtk(): boolean {
+  // Try cargo install first (most reliable)
+  const hasCargo = spawnSync('cargo', ['--version'], { encoding: 'utf-8', stdio: 'pipe' }).status === 0;
+
+  if (hasCargo) {
+    console.log(chalk.cyan('\n  Installing RTK via cargo (this may take a few minutes)...'));
+    try {
+      execSync('cargo install --git https://github.com/rtk-ai/rtk', { stdio: 'inherit' });
+      console.log(chalk.green('  ✓ RTK installed successfully'));
+      return true;
+    } catch {
+      console.log(chalk.red('  ✗ Failed to install RTK via cargo'));
+    }
+  }
+
+  // Try curl install script as fallback
+  console.log(chalk.cyan('\n  Installing RTK via install script...'));
+  try {
+    execSync('curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh', {
+      stdio: 'inherit',
+    });
+    console.log(chalk.green('  ✓ RTK installed successfully'));
+    return true;
+  } catch {
+    console.log(chalk.red('  ✗ Failed to install RTK'));
+    console.log(chalk.gray('  Install manually: cargo install --git https://github.com/rtk-ai/rtk'));
+    console.log(chalk.gray('  Or: brew install rtk'));
+    return false;
+  }
+}
+
+/**
+ * Initialize RTK Claude Code hook for automatic command rewriting
+ */
+export function initRtkHook(): boolean {
+  console.log(chalk.cyan('\n  Initializing RTK hook for Claude Code...'));
+  try {
+    execSync('rtk init -g', { encoding: 'utf-8', stdio: 'pipe' });
+    console.log(chalk.green('  ✓ RTK hook initialized'));
+    return true;
+  } catch {
+    console.log(chalk.yellow('  ⚠ RTK hook init requires manual step: rtk init -g'));
     return false;
   }
 }
@@ -297,6 +370,10 @@ export function getInstallInstructions(reqs: SystemRequirements): string[] {
     instructions.push('GitHub CLI: brew install gh (macOS) or https://cli.github.com');
   } else if (!reqs.gh.authenticated) {
     instructions.push('GitHub CLI auth: gh auth login');
+  }
+
+  if (!reqs.rtk.installed) {
+    instructions.push('RTK (token savings): cargo install --git https://github.com/rtk-ai/rtk');
   }
 
   return instructions;

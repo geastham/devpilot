@@ -10,6 +10,7 @@ This guide covers setting up DevPilot for local development and usage.
 
 Optional:
 - **@composio/ao-cli** - Agent orchestrator for automated task dispatch
+- **RTK** - Token-optimized CLI proxy for 60-90% savings on agent operations (`cargo install --git https://github.com/rtk-ai/rtk`)
 
 ## Installation
 
@@ -201,6 +202,15 @@ devpilot serve  # Recreates the database
 Use a different port:
 ```bash
 devpilot serve --port 4000
+```
+
+### RTK Not Rewriting Commands
+
+Ensure RTK is installed and the hook is initialized:
+```bash
+rtk --version       # Verify installation
+rtk init -g         # Reinstall Claude Code hook
+rtk gain            # Check token savings
 ```
 
 ### Check System Requirements
