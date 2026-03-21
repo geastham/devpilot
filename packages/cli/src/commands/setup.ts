@@ -14,6 +14,9 @@ import {
   generateOrchestratorConfig,
   writeOrchestratorConfig,
   orchestratorConfigExists,
+  isRtkInstalled,
+  installRtk,
+  initRtkHook,
 } from '../utils/orchestrator';
 
 /**
@@ -176,12 +179,45 @@ export const setupCommand = new Command('setup')
       }
     }
 
+    // Step 4: RTK Token Optimization
+    if (!options.linearOnly && !options.orchestratorOnly) {
+      console.log(chalk.bold('Step 4: RTK Token Optimization'));
+      console.log(chalk.gray('RTK reduces LLM token consumption by 60-90% across fleet agents.\n'));
+
+      const rtkInstalled = isRtkInstalled();
+      if (rtkInstalled) {
+        console.log(chalk.green('  RTK is already installed.'));
+        console.log(chalk.gray('  Ensuring Claude Code hook is configured...'));
+        initRtkHook();
+      } else if (nonInteractive) {
+        console.log(chalk.gray('  Installing RTK (non-interactive mode)...'));
+        const success = installRtk();
+        if (success) {
+          initRtkHook();
+        }
+      } else {
+        const install = await confirm('  Install RTK for token-optimized agent sessions?');
+        if (install) {
+          const success = installRtk();
+          if (success) {
+            initRtkHook();
+          }
+        } else {
+          console.log(chalk.gray('  Skipping RTK installation. Install later with:'));
+          console.log(chalk.cyan('    cargo install --git https://github.com/rtk-ai/rtk'));
+          console.log(chalk.cyan('    rtk init -g\n'));
+        }
+      }
+      console.log('');
+    }
+
     // Summary
     console.log(chalk.bold.green('\nSetup Complete!\n'));
     console.log(chalk.white('Next steps:'));
     console.log(chalk.gray('  1. Run ') + chalk.cyan('devpilot serve') + chalk.gray(' to start the UI'));
     console.log(chalk.gray('  2. Run ') + chalk.cyan('ao start') + chalk.gray(' to start agent orchestrator'));
-    console.log(chalk.gray('  3. Use the UI to create items and dispatch to the fleet\n'));
+    console.log(chalk.gray('  3. Use the UI to create items and dispatch to the fleet'));
+    console.log(chalk.gray('  4. Run ') + chalk.cyan('rtk gain') + chalk.gray(' to monitor token savings\n'));
   });
 
 /**
