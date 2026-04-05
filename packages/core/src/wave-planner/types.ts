@@ -238,7 +238,34 @@ export interface MemoryContextBlock {
     ticketId: string;
     summary: string;
     constraintApplied?: string;
+    /** Similarity score from memory search (0-1) */
+    relevanceScore?: number;
+    /** Files touched in this past session */
+    filesTouched?: string[];
+    /** Model used and duration for cost/time estimation */
+    executionMeta?: {
+      model?: string;
+      durationMinutes?: number;
+      status?: 'COMPLETE' | 'ERROR';
+    };
   }[];
+  /** Computed confidence signals derived from memory */
+  memorySignals?: MemorySignals;
+}
+
+export interface MemorySignals {
+  /** Whether any relevant memory was found */
+  hasMemory: boolean;
+  /** Number of similar tasks found in history */
+  similarTasksCompleted: number;
+  /** Success rate of similar past tasks (0-1) */
+  historicalSuccessRate: number;
+  /** Average duration of similar past tasks in minutes */
+  averageDurationMinutes: number;
+  /** Overall confidence score derived from memory (0-1) */
+  overallConfidence: number;
+  /** Files with high conflict frequency in past sessions */
+  highConflictFiles: string[];
 }
 
 export interface CompletedWorkBlock {

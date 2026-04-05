@@ -31,6 +31,7 @@ export * from './fallback';
 // Context services
 export * from './fleet-context';
 export * from './codebase-context';
+export * from './memory-context';
 
 // Prompt construction
 export * from './prompt-constructor';

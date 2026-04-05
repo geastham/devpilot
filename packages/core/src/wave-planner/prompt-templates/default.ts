@@ -292,7 +292,7 @@ function renderConstraints(context: PromptContext): string {
 }
 
 /**
- * Renders the memory context block with relevant past sessions.
+ * Renders the memory context block with relevant past sessions and signals.
  */
 function renderMemoryContext(context: PromptContext): string {
   if (!context.memoryContext || context.memoryContext.relevantSessions.length === 0) {
@@ -300,16 +300,50 @@ function renderMemoryContext(context: PromptContext): string {
   }
 
   let output = '### Memory Context\n\n';
+
+  // Render memory-derived signals
+  const signals = context.memoryContext.memorySignals;
+  if (signals && signals.hasMemory) {
+    output += '**Historical Insights:**\n';
+    output += `- Similar tasks completed before: ${signals.similarTasksCompleted}\n`;
+    output += `- Historical success rate: ${Math.round(signals.historicalSuccessRate * 100)}%\n`;
+    if (signals.averageDurationMinutes > 0) {
+      output += `- Average duration of similar work: ${signals.averageDurationMinutes} minutes\n`;
+    }
+    output += `- Memory confidence: ${Math.round(signals.overallConfidence * 100)}%\n`;
+
+    if (signals.highConflictFiles.length > 0) {
+      output += `- **High-conflict files** (appeared in multiple past sessions): ${signals.highConflictFiles.map((f) => '`' + f + '`').join(', ')}\n`;
+    }
+    output += '\n';
+  }
+
   output += '**Relevant Past Sessions:**\n';
 
   context.memoryContext.relevantSessions.forEach((session) => {
-    output += `- **${session.date}** (${session.ticketId}): ${session.summary}\n`;
+    const relevance = session.relevanceScore != null
+      ? ` [relevance: ${Math.round(session.relevanceScore * 100)}%]`
+      : '';
+    output += `- **${session.date}** (${session.ticketId})${relevance}: ${session.summary}\n`;
     if (session.constraintApplied) {
       output += `  *Constraint*: ${session.constraintApplied}\n`;
     }
+    if (session.executionMeta) {
+      const meta = session.executionMeta;
+      const parts: string[] = [];
+      if (meta.model) parts.push(`model: ${meta.model}`);
+      if (meta.durationMinutes) parts.push(`${meta.durationMinutes}min`);
+      if (meta.status) parts.push(meta.status);
+      if (parts.length > 0) {
+        output += `  *Execution*: ${parts.join(', ')}\n`;
+      }
+    }
+    if (session.filesTouched && session.filesTouched.length > 0) {
+      output += `  *Files*: ${session.filesTouched.slice(0, 10).join(', ')}${session.filesTouched.length > 10 ? ` (+${session.filesTouched.length - 10} more)` : ''}\n`;
+    }
   });
 
-  output += '\nUse these insights to inform your planning decisions.\n\n';
+  output += '\nUse these insights to inform your planning decisions — prefer models and task decompositions that succeeded historically.\n\n';
   return output;
 }
 

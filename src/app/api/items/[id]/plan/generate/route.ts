@@ -12,6 +12,7 @@ import {
   eq,
 } from '@/lib/db';
 import type { Model, Complexity, FileStatus } from '@/lib/db';
+import { MemoryContextService } from '@devpilot.sh/core/wave-planner';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -52,6 +53,14 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     // Check for file conflicts with in-flight work
     const conflictingPaths = allInFlightFiles.map((f) => f.path);
 
+    // Query memory for relevant past sessions
+    const memoryService = new MemoryContextService();
+    const memoryContext = await memoryService.assembleContext(
+      item.title,
+      item.repo
+    );
+    const memorySignals = memoryContext.memorySignals;
+
     // Simulated plan generation - in production, this would call an AI service
     const generatedWorkstreams = generateMockWorkstreams(item.title, item.repo);
     const estimatedCostUsd = generatedWorkstreams.reduce(
@@ -86,13 +95,18 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
         'Code review approved',
       ],
       confidenceSignals: {
-        hasMemory: true,
-        recentlyModifiedFiles: 2,
-        similarTasksCompleted: 5,
-        overallConfidence: 0.85,
+        hasMemory: memorySignals?.hasMemory ?? false,
+        recentlyModifiedFiles: allInFlightFiles.length,
+        similarTasksCompleted: memorySignals?.similarTasksCompleted ?? 0,
+        overallConfidence: memorySignals?.overallConfidence ?? 0.5,
       },
       fleetContextSnapshot,
-      memorySessionsUsed: [],
+      memorySessionsUsed: memoryContext.relevantSessions.map((s) => ({
+        date: s.date,
+        ticketId: s.ticketId,
+        summary: s.summary,
+        constraintApplied: s.constraintApplied || '',
+      })),
     }).returning();
 
     // Create workstreams and tasks

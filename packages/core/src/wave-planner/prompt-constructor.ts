@@ -1,6 +1,7 @@
 import type { PromptContext, FleetContextBlock, CodebaseContextBlock, ConstraintBlock } from './types';
 import { FleetContextService } from './fleet-context';
 import { CodebaseContextService } from './codebase-context';
+import { MemoryContextService, type MemoryContextServiceConfig } from './memory-context';
 import { defaultTemplate } from './prompt-templates/default';
 import { simplifiedTemplate } from './prompt-templates/simplified';
 import { refinementTemplate } from './prompt-templates/refinement';
@@ -23,6 +24,8 @@ export interface PromptConstructorConfig {
   customConstraints?: string[];
   /** Which template to use */
   template?: 'default' | 'simplified' | 'refinement';
+  /** Memory provider configuration */
+  memory?: MemoryContextServiceConfig;
 }
 
 // ============================================================================
@@ -42,11 +45,13 @@ export interface PromptConstructorConfig {
 export class PromptConstructor {
   private fleetContextService: FleetContextService;
   private codebaseContextService: CodebaseContextService;
+  private memoryContextService: MemoryContextService;
   private templates: Map<string, PromptTemplate>;
 
-  constructor() {
+  constructor(memoryConfig?: MemoryContextServiceConfig) {
     this.fleetContextService = new FleetContextService();
     this.codebaseContextService = new CodebaseContextService();
+    this.memoryContextService = new MemoryContextService(memoryConfig);
 
     // Register available templates
     this.templates = new Map<string, PromptTemplate>([
@@ -73,17 +78,26 @@ export class PromptConstructor {
     repo: string,
     config: PromptConstructorConfig
   ): Promise<PromptContext> {
-    // Gather fleet context
-    const fleetContext = await this.fleetContextService.assembleContext(repo);
-
-    // Gather codebase context
-    const codebaseContext = await this.codebaseContextService.assembleContext(
-      repo,
-      config.workingDir
-    );
+    // Gather fleet context, codebase context, and memory context in parallel
+    const [fleetContext, codebaseContext, memoryContext] = await Promise.all([
+      this.fleetContextService.assembleContext(repo),
+      this.codebaseContextService.assembleContext(repo, config.workingDir),
+      this.memoryContextService.assembleContext(specContent, repo),
+    ]);
 
     // Assemble constraints
     const constraints = this.assembleConstraints(config, fleetContext);
+
+    // Add high-conflict files from memory to avoid list
+    if (memoryContext.memorySignals?.highConflictFiles.length) {
+      for (const file of memoryContext.memorySignals.highConflictFiles) {
+        if (!constraints.avoidFiles.includes(file)) {
+          constraints.customConstraints.push(
+            `File \`${file}\` has high conflict frequency in past sessions — prefer isolating changes to this file in its own wave`
+          );
+        }
+      }
+    }
 
     return {
       specContent,
@@ -93,6 +107,7 @@ export class PromptConstructor {
       fleetContext,
       codebaseContext,
       constraints,
+      memoryContext,
     };
   }
 
@@ -257,7 +272,13 @@ export class PromptConstructor {
 /**
  * Create a prompt constructor instance.
  * Convenience factory function.
+ *
+ * @param memoryConfig - Optional memory provider configuration.
+ *   Default uses SQLite provider (queries existing completedTasks).
+ *   Set { provider: 'memvid' } to use Memvid .mv2 file-based memory.
  */
-export function createPromptConstructor(): PromptConstructor {
-  return new PromptConstructor();
+export function createPromptConstructor(
+  memoryConfig?: MemoryContextServiceConfig
+): PromptConstructor {
+  return new PromptConstructor(memoryConfig);
 }
