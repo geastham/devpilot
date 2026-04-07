@@ -27,6 +27,11 @@
       "types": "./dist/orchestrator/index.d.ts",
       "import": "./dist/orchestrator/index.mjs",
       "require": "./dist/orchestrator/index.js"
+    },
+    "./wiki": {
+      "types": "./dist/wiki/index.d.ts",
+      "import": "./dist/wiki/index.mjs",
+      "require": "./dist/wiki/index.js"
     }
   },
   "files": [
