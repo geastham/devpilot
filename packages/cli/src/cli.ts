@@ -10,6 +10,7 @@ import { configCommand } from './commands/config';
 import { setupCommand } from './commands/setup';
 import { bridgeCommand } from './commands/bridge';
 import { updateCommand } from './commands/update';
+import { wikiCommand } from './commands/wiki';
 import { benchCommand } from '@devpilot.sh/benchmarks/cli';
 
 // Package info for update-notifier
@@ -33,6 +34,7 @@ cli.addCommand(statusCommand);
 cli.addCommand(configCommand);
 cli.addCommand(bridgeCommand);
 cli.addCommand(updateCommand);
+cli.addCommand(wikiCommand);
 cli.addCommand(benchCommand);
 
 export function runCli(args: string[] = process.argv): void {

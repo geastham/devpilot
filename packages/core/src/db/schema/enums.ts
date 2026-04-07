@@ -78,3 +78,25 @@ export type WaveTaskStatus = (typeof waveTaskStatusValues)[number];
 
 export const dependencyEdgeTypeValues = ['hard', 'soft'] as const;
 export type DependencyEdgeType = (typeof dependencyEdgeTypeValues)[number];
+
+// Wiki enums
+export const wikiSourceTypeValues = [
+  'session_log',
+  'commit',
+  'spec',
+  'decision',
+  'manual',
+] as const;
+export type WikiSourceType = (typeof wikiSourceTypeValues)[number];
+
+export const wikiArticleStatusValues = ['active', 'stale', 'archived'] as const;
+export type WikiArticleStatus = (typeof wikiArticleStatusValues)[number];
+
+export const wikiLogActionValues = [
+  'ingest',
+  'compile',
+  'query',
+  'lint',
+  'update',
+] as const;
+export type WikiLogAction = (typeof wikiLogActionValues)[number];
