@@ -239,6 +239,29 @@ export interface MemoryContextBlock {
     summary: string;
     constraintApplied?: string;
   }[];
+  /**
+   * Optional MemPalace context — the L0-L3 tiered loading stack.
+   *
+   * When present, this augments `relevantSessions` with:
+   *   - identity (L0): always-loaded project/persona identity
+   *   - criticalFacts (L1): always-loaded critical facts
+   *   - topicalClosets (L2): on-demand topical recall
+   *
+   * The wave planner template renders both blocks when available.
+   * This field is strictly additive — the Wiki and legacy memory
+   * flows continue to work if MemPalace is disabled.
+   */
+  palace?: {
+    identity: string;
+    criticalFacts: string[];
+    topicalClosets: {
+      topic: string;
+      summary: string;
+      citations: string[];
+    }[];
+    tokenEstimate: number;
+    wingSlug: string;
+  };
 }
 
 export interface CompletedWorkBlock {
