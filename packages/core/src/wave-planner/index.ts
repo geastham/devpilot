@@ -41,6 +41,9 @@ export * from './plan-refinement-service';
 // Wave plan generation
 export * from './generator';
 
+// Async job runner (borrowed from ULTRAPLAN pattern)
+export * from './job-runner';
+
 // Prompt templates
 export * from './prompt-templates';
 

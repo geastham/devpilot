@@ -1,15 +1,31 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, horizonItems, plans, wavePlans, activityEvents, eq } from '@/lib/db';
-import { generateWavePlan } from '@devpilot.sh/core/wave-planner';
+import { db, horizonItems, eq } from '@/lib/db';
+import { startPlanJob } from '@devpilot.sh/core/wave-planner';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
-// POST /api/items/[id]/wave-plan/generate - Generate a wave plan for a horizon item
+interface GenerateRequestBody {
+  /** Force the ultra (Opus + extended thinking) tier from the start. */
+  forceUltra?: boolean;
+}
+
+/**
+ * POST /api/items/[id]/wave-plan/generate
+ *
+ * Enqueues an async wave plan generation job and returns the job id
+ * immediately. The client then polls `GET .../wave-plan/jobs/[jobId]` until
+ * the job reaches `ready`.
+ *
+ * This replaces the previous synchronous behavior where the HTTP request
+ * blocked on the full planner run (which can take 10+ seconds on Opus with
+ * extended thinking).
+ */
 export async function POST(request: NextRequest, { params }: RouteParams) {
   try {
     const { id } = await params;
+    const body: GenerateRequestBody = await request.json().catch(() => ({}));
 
     // Fetch the horizon item with its plan
     const item = await db.query.horizonItems.findFirst({
@@ -30,7 +46,6 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    // Get API key from environment
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
       return NextResponse.json(
@@ -39,68 +54,34 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    // Get working directory from environment or use default
     const workingDir = process.env.WORKING_DIR || process.cwd();
-
-    // Build specification content from the item and plan
     const specContent = buildSpecContent(item);
 
-    // Generate wave plan using the wave planner system
-    const result = await generateWavePlan(
-      id,
-      item.plan.id,
+    const { jobId, status } = await startPlanJob({
+      horizonItemId: id,
+      planId: item.plan.id,
       specContent,
-      item.title,
-      item.repo,
-      workingDir,
-      apiKey
-    );
-
-    if (!result.success) {
-      return NextResponse.json(
-        {
-          error: 'Wave plan generation failed',
-          message: result.message,
-          wavePlan: result.wavePlan,
-          metrics: result.metrics,
-        },
-        { status: 500 }
-      );
-    }
-
-    // Create activity event
-    await db.insert(activityEvents).values({
-      type: 'WAVE_PLAN_CREATED',
-      message: `Wave plan generated for "${item.title}" (${result.wavePlan.statistics.totalTasks} tasks, ${result.waveAssignment.totalWaves} waves)`,
+      itemTitle: item.title,
       repo: item.repo,
-      ticketId: item.linearTicketId,
-      metadata: {
-        wavePlanId: result.wavePlanId,
-        totalWaves: result.waveAssignment.totalWaves,
-        totalTasks: result.wavePlan.statistics.totalTasks,
-        maxParallelism: result.waveAssignment.maxParallelism,
-        parallelizationScore: result.score.parallelizationScore,
-        criticalPathLength: result.criticalPath.length,
-      },
+      workingDir,
+      apiKey,
+      forceUltra: Boolean(body.forceUltra),
     });
 
     return NextResponse.json(
       {
         success: true,
-        wavePlanId: result.wavePlanId,
-        wavePlan: result.wavePlan,
-        criticalPath: result.criticalPath,
-        waveAssignment: result.waveAssignment,
-        score: result.score,
-        metrics: result.metrics,
+        jobId,
+        status,
+        pollUrl: `/api/items/${id}/wave-plan/jobs/${jobId}`,
       },
-      { status: 201 }
+      { status: 202 }
     );
   } catch (error) {
-    console.error('Failed to generate wave plan:', error);
+    console.error('Failed to start wave plan job:', error);
     return NextResponse.json(
       {
-        error: 'Failed to generate wave plan',
+        error: 'Failed to start wave plan job',
         details: error instanceof Error ? error.message : String(error),
       },
       { status: 500 }
@@ -108,10 +89,6 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   }
 }
 
-/**
- * Build specification content from horizon item and plan.
- * This converts the plan into a format suitable for wave plan generation.
- */
 function buildSpecContent(item: any): string {
   const lines: string[] = [];
 

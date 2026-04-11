@@ -271,6 +271,8 @@ export interface GenerationResult {
   cacheWriteTokens: number;
   durationMs: number;
   model: string;
+  /** Extended-thinking tokens consumed (0 for standard tier). */
+  thinkingTokens: number;
 }
 
 // ============================================================================

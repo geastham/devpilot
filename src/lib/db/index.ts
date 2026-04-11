@@ -47,6 +47,7 @@ export const {
   waveTasks,
   dependencyEdges,
   wavePlanMetrics,
+  wavePlanJobs,
 } = schema;
 
 // Re-export enums for API routes
@@ -63,6 +64,8 @@ export {
   waveStatusValues,
   waveTaskStatusValues,
   dependencyEdgeTypeValues,
+  wavePlanJobStatusValues,
+  wavePlanModelTierValues,
 } from '@devpilot.sh/core/db';
 
 // Re-export types
@@ -111,6 +114,10 @@ export type {
   WaveStatus,
   WaveTaskStatus,
   DependencyEdgeType,
+  WavePlanJob,
+  NewWavePlanJob,
+  WavePlanJobStatus,
+  WavePlanModelTier,
 } from '@devpilot.sh/core/db';
 
 // Re-export query operators for building queries

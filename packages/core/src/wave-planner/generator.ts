@@ -14,7 +14,11 @@ import type {
   OptimizationResult,
   ParsedTask,
 } from './types';
-import { PlanRefinementService, PlanRefinementConfig } from './plan-refinement-service';
+import {
+  PlanRefinementService,
+  PlanRefinementConfig,
+  RefinementRuntimeOptions,
+} from './plan-refinement-service';
 import { PromptConstructorConfig } from './prompt-constructor';
 import { AIClientConfig } from './ai-client';
 import { computeCriticalPath } from './critical-path';
@@ -57,8 +61,13 @@ export interface WavePlanGenerationResult {
   /** Generation metrics */
   metrics: {
     totalTokensUsed: number;
+    thinkingTokensUsed: number;
     refinementIterations: number;
     generationDurationMs: number;
+    modelTierUsed: 'standard' | 'ultra';
+    modelUsed: string;
+    escalated: boolean;
+    escalationReason?: string;
   };
   /** Whether generation was successful */
   success: boolean;
@@ -110,7 +119,8 @@ export class WavePlanGenerator {
     specContent: string,
     itemTitle: string,
     repo: string,
-    constructorConfig: PromptConstructorConfig
+    constructorConfig: PromptConstructorConfig,
+    runtime?: RefinementRuntimeOptions
   ): Promise<WavePlanGenerationResult> {
     const startTime = Date.now();
 
@@ -121,7 +131,8 @@ export class WavePlanGenerator {
         itemTitle,
         horizonItemId,
         repo,
-        constructorConfig
+        constructorConfig,
+        runtime
       );
 
       // Step 2: Extract all tasks and edges
@@ -157,14 +168,24 @@ export class WavePlanGenerator {
         score: refinementResult.score,
         metrics: {
           totalTokensUsed: refinementResult.totalTokensUsed,
+          thinkingTokensUsed: refinementResult.thinkingTokensUsed,
           refinementIterations: refinementResult.iterationsPerformed,
           generationDurationMs,
+          modelTierUsed: refinementResult.modelTierUsed,
+          modelUsed: refinementResult.modelUsed,
+          escalated: refinementResult.escalated,
+          escalationReason: refinementResult.escalationReason,
         },
         success: refinementResult.success,
         message: refinementResult.error,
       };
     } catch (error) {
       const generationDurationMs = Date.now() - startTime;
+
+      // If cancelled, surface the cancellation — don't swallow into a fallback.
+      if (runtime?.signal?.aborted) {
+        throw error;
+      }
 
       // Try fallback plan
       const fallbackResult = await this.generateFallbackPlan(
@@ -178,8 +199,12 @@ export class WavePlanGenerator {
           ...fallbackResult,
           metrics: {
             totalTokensUsed: 0,
+            thinkingTokensUsed: 0,
             refinementIterations: 0,
             generationDurationMs,
+            modelTierUsed: 'standard',
+            modelUsed: 'fallback',
+            escalated: false,
           },
           success: false,
           message: `AI generation failed, using fallback: ${error instanceof Error ? error.message : String(error)}`,
@@ -484,19 +509,29 @@ export function createWavePlanGenerator(
 }
 
 /**
- * Generate a wave plan with default configuration.
- * Convenience function for simple use cases.
+ * Build a WavePlanGenerator from environment variables.
+ *
+ * This is the canonical entrypoint used by both the legacy synchronous API
+ * route and the new async job runner. It reads the standard tier config from
+ * `WAVE_PLANNER_*` and, when present, the ultra tier config from
+ * `WAVE_PLANNER_ULTRA_*`.
  */
-export async function generateWavePlan(
-  horizonItemId: string,
-  planId: string,
-  specContent: string,
-  itemTitle: string,
-  repo: string,
-  workingDir: string,
-  apiKey: string
-): Promise<WavePlanGenerationResult> {
-  const generator = createWavePlanGenerator({
+export function createWavePlanGeneratorFromEnv(
+  apiKey: string,
+  options?: { forceUltra?: boolean }
+): WavePlanGenerator {
+  const ultraModel = process.env.WAVE_PLANNER_ULTRA_MODEL;
+  const escalate = process.env.WAVE_PLANNER_ESCALATE_ON_FAILURE === 'true';
+  const thinkingBudget = parseInt(
+    process.env.WAVE_PLANNER_ULTRA_THINKING_BUDGET || '16000',
+    10
+  );
+  const ultraMaxTokens = parseInt(
+    process.env.WAVE_PLANNER_ULTRA_MAX_TOKENS || '20000',
+    10
+  );
+
+  return createWavePlanGenerator({
     aiClient: {
       apiKey,
       model: process.env.WAVE_PLANNER_MODEL || 'claude-sonnet-4-20250514',
@@ -507,8 +542,38 @@ export async function generateWavePlan(
         process.env.WAVE_PLANNER_MIN_PARALLELIZATION || '0.3'
       ),
       maxRefinementIterations: 2,
+      escalateOnFailure: escalate && Boolean(ultraModel),
+      forceUltra: Boolean(options?.forceUltra) && Boolean(ultraModel),
+      ultraAiClient: ultraModel
+        ? {
+            apiKey,
+            model: ultraModel,
+            maxTokens: ultraMaxTokens,
+            thinkingBudget,
+          }
+        : undefined,
     },
     autoPersist: true,
+  });
+}
+
+/**
+ * Generate a wave plan with default configuration.
+ * Convenience function for simple use cases.
+ */
+export async function generateWavePlan(
+  horizonItemId: string,
+  planId: string,
+  specContent: string,
+  itemTitle: string,
+  repo: string,
+  workingDir: string,
+  apiKey: string,
+  runtime?: RefinementRuntimeOptions,
+  options?: { forceUltra?: boolean }
+): Promise<WavePlanGenerationResult> {
+  const generator = createWavePlanGeneratorFromEnv(apiKey, {
+    forceUltra: options?.forceUltra,
   });
 
   return generator.generate(
@@ -517,6 +582,7 @@ export async function generateWavePlan(
     specContent,
     itemTitle,
     repo,
-    { workingDir }
+    { workingDir },
+    runtime
   );
 }

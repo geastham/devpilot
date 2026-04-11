@@ -8,6 +8,8 @@ import {
   dependencyEdgeTypeValues,
   modelValues,
   complexityValues,
+  wavePlanJobStatusValues,
+  wavePlanModelTierValues,
 } from './enums';
 import { plans, horizonItems, tasks } from './horizon';
 
@@ -195,3 +197,83 @@ export type NewDependencyEdge = typeof dependencyEdges.$inferInsert;
 
 export type WavePlanMetric = typeof wavePlanMetrics.$inferSelect;
 export type NewWavePlanMetric = typeof wavePlanMetrics.$inferInsert;
+
+// ============================================================================
+// Wave Plan Jobs (async planning)
+// ============================================================================
+//
+// Tracks a single asynchronous plan-generation run. Borrows the ULTRAPLAN
+// pattern of "generate in the background, poll for status, approve/reject":
+//
+//   queued -> thinking -> drafting -> validating -> refining -> ready
+//                                                            -> escalating -> (thinking -> ...)
+//   ready  -> approved | rejected
+//   any    -> failed | cancelled
+//
+// Once the job reaches `ready`, `resultWavePlanId` points at the persisted
+// (draft) wave plan that PlanReviewCard renders. Rejection reasons are fed
+// back into a replan request; the draft is retained for audit.
+
+export const wavePlanJobs = sqliteTable('wave_plan_jobs', {
+  id: text('id').primaryKey().$defaultFn(() => createId()),
+  horizonItemId: text('horizon_item_id').notNull(),
+  planId: text('plan_id').notNull(),
+  status: text('status', { enum: wavePlanJobStatusValues }).notNull().default('queued'),
+  modelTier: text('model_tier', { enum: wavePlanModelTierValues }).notNull().default('standard'),
+  /** Short human-readable step label displayed in the progress UI */
+  currentStep: text('current_step'),
+  /** 0-100 best-effort progress estimate */
+  progressPercent: integer('progress_percent').notNull().default(0),
+  /** Input/output token counters (running totals, updated as the job progresses) */
+  tokensInput: integer('tokens_input').notNull().default(0),
+  tokensOutput: integer('tokens_output').notNull().default(0),
+  /** Extended-thinking tokens consumed (ultra tier) */
+  thinkingTokens: integer('thinking_tokens').notNull().default(0),
+  cacheReadTokens: integer('cache_read_tokens').notNull().default(0),
+  cacheWriteTokens: integer('cache_write_tokens').notNull().default(0),
+  /** Thinking budget allocated for this job (ultra tier only) */
+  thinkingBudget: integer('thinking_budget'),
+  /** Rolling cost estimate in USD (stored as real) */
+  costUsd: real('cost_usd').notNull().default(0),
+  /** Number of refinement iterations performed so far */
+  iterations: integer('iterations').notNull().default(0),
+  /** Parallelization score of the best plan seen so far (0-1) */
+  bestParallelizationScore: real('best_parallelization_score'),
+  /** Which model name was last invoked (e.g. claude-opus-4-6) */
+  lastModel: text('last_model'),
+  /** Escalation bookkeeping */
+  escalated: integer('escalated', { mode: 'boolean' }).notNull().default(false),
+  escalationReason: text('escalation_reason'),
+  /** If the user explicitly rejects the draft, the reason is captured here and fed to replan */
+  rejectionReason: text('rejection_reason'),
+  /** Draft wave plan produced by this job (populated when status=ready) */
+  resultWavePlanId: text('result_wave_plan_id'),
+  /** Fatal error message if status=failed */
+  errorMessage: text('error_message'),
+  startedAt: integer('started_at', { mode: 'timestamp' }),
+  completedAt: integer('completed_at', { mode: 'timestamp' }),
+  createdAt: integer('created_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer('updated_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const wavePlanJobsRelations = relations(wavePlanJobs, ({ one }) => ({
+  horizonItem: one(horizonItems, {
+    fields: [wavePlanJobs.horizonItemId],
+    references: [horizonItems.id],
+  }),
+  plan: one(plans, {
+    fields: [wavePlanJobs.planId],
+    references: [plans.id],
+  }),
+  resultWavePlan: one(wavePlans, {
+    fields: [wavePlanJobs.resultWavePlanId],
+    references: [wavePlans.id],
+  }),
+}));
+
+export type WavePlanJob = typeof wavePlanJobs.$inferSelect;
+export type NewWavePlanJob = typeof wavePlanJobs.$inferInsert;

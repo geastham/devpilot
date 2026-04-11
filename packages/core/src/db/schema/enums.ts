@@ -79,6 +79,25 @@ export type WaveTaskStatus = (typeof waveTaskStatusValues)[number];
 export const dependencyEdgeTypeValues = ['hard', 'soft'] as const;
 export type DependencyEdgeType = (typeof dependencyEdgeTypeValues)[number];
 
+// Wave plan job (async planning) enums
+export const wavePlanJobStatusValues = [
+  'queued',
+  'thinking',
+  'drafting',
+  'validating',
+  'refining',
+  'escalating',
+  'ready',
+  'approved',
+  'rejected',
+  'failed',
+  'cancelled',
+] as const;
+export type WavePlanJobStatus = (typeof wavePlanJobStatusValues)[number];
+
+export const wavePlanModelTierValues = ['standard', 'ultra'] as const;
+export type WavePlanModelTier = (typeof wavePlanModelTierValues)[number];
+
 // Wiki enums
 export const wikiSourceTypeValues = [
   'session_log',

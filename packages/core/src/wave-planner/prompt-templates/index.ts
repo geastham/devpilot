@@ -15,3 +15,4 @@ export * from './types';
 export { defaultTemplate } from './default';
 export { simplifiedTemplate } from './simplified';
 export { refinementTemplate } from './refinement';
+export { ultraTemplate } from './ultra';

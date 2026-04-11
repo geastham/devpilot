@@ -4,6 +4,7 @@ import { CodebaseContextService } from './codebase-context';
 import { defaultTemplate } from './prompt-templates/default';
 import { simplifiedTemplate } from './prompt-templates/simplified';
 import { refinementTemplate } from './prompt-templates/refinement';
+import { ultraTemplate } from './prompt-templates/ultra';
 import type { PromptTemplate, RefinementPromptTemplate } from './prompt-templates/types';
 
 // ============================================================================
@@ -22,7 +23,7 @@ export interface PromptConstructorConfig {
   /** Custom constraints to include in prompt */
   customConstraints?: string[];
   /** Which template to use */
-  template?: 'default' | 'simplified' | 'refinement';
+  template?: 'default' | 'simplified' | 'refinement' | 'ultra';
 }
 
 // ============================================================================
@@ -53,6 +54,7 @@ export class PromptConstructor {
       ['default', defaultTemplate],
       ['simplified', simplifiedTemplate],
       ['refinement', refinementTemplate],
+      ['ultra', ultraTemplate],
     ]);
   }
 
