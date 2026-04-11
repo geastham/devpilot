@@ -292,24 +292,61 @@ function renderConstraints(context: PromptContext): string {
 }
 
 /**
- * Renders the memory context block with relevant past sessions.
+ * Renders the memory context block with relevant past sessions
+ * and/or MemPalace tiered recall.
  */
 function renderMemoryContext(context: PromptContext): string {
-  if (!context.memoryContext || context.memoryContext.relevantSessions.length === 0) {
-    return '';
-  }
+  if (!context.memoryContext) return '';
+
+  const { relevantSessions, palace } = context.memoryContext;
+  const hasSessions = relevantSessions && relevantSessions.length > 0;
+  const hasPalace =
+    palace &&
+    (palace.identity ||
+      palace.criticalFacts.length > 0 ||
+      palace.topicalClosets.length > 0);
+
+  if (!hasSessions && !hasPalace) return '';
 
   let output = '### Memory Context\n\n';
-  output += '**Relevant Past Sessions:**\n';
 
-  context.memoryContext.relevantSessions.forEach((session) => {
-    output += `- **${session.date}** (${session.ticketId}): ${session.summary}\n`;
-    if (session.constraintApplied) {
-      output += `  *Constraint*: ${session.constraintApplied}\n`;
+  // MemPalace tiered stack (L0 identity, L1 critical facts, L2 topical recall).
+  if (hasPalace && palace) {
+    if (palace.identity) {
+      output += '**Identity (L0):**\n';
+      output += palace.identity + '\n\n';
     }
-  });
+    if (palace.criticalFacts.length > 0) {
+      output += '**Critical Facts (L1):**\n';
+      palace.criticalFacts.forEach((fact) => {
+        output += `- ${fact}\n`;
+      });
+      output += '\n';
+    }
+    if (palace.topicalClosets.length > 0) {
+      output += '**Topical Recall (L2):**\n';
+      palace.topicalClosets.forEach((closet) => {
+        output += `- *[${closet.topic}]* ${closet.summary}\n`;
+      });
+      output += '\n';
+    }
+    output += `_Palace context: ~${palace.tokenEstimate} tokens · wing \`${palace.wingSlug}\`_\n\n`;
+  }
 
-  output += '\nUse these insights to inform your planning decisions.\n\n';
+  // Legacy relevant-sessions list (still populated by callers that pass
+  // session summaries directly, e.g. the plan refinement service).
+  if (hasSessions) {
+    output += '**Relevant Past Sessions:**\n';
+    relevantSessions.forEach((session) => {
+      output += `- **${session.date}** (${session.ticketId}): ${session.summary}\n`;
+      if (session.constraintApplied) {
+        output += `  *Constraint*: ${session.constraintApplied}\n`;
+      }
+    });
+    output += '\n';
+  }
+
+  output += 'Use these insights to inform your planning decisions.\n\n';
   return output;
 }
 

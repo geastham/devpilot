@@ -6,3 +6,4 @@ export * from './score';
 export * from './events';
 export * from './wave-planner';
 export * from './wiki';
+export * from './mempalace';
