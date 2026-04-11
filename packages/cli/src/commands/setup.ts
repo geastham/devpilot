@@ -17,6 +17,8 @@ import {
   isRtkInstalled,
   installRtk,
   initRtkHook,
+  isCavemanInstalled,
+  installCaveman,
 } from '../utils/orchestrator';
 
 /**
@@ -211,13 +213,38 @@ export const setupCommand = new Command('setup')
       console.log('');
     }
 
+    // Step 5: Caveman Plugin
+    if (!options.linearOnly && !options.orchestratorOnly) {
+      console.log(chalk.bold('Step 5: Caveman Output Compression'));
+      console.log(chalk.gray('Caveman reduces output token usage by ~65-75% across fleet agents.\n'));
+
+      const cavemanInstalled = isCavemanInstalled();
+      if (cavemanInstalled) {
+        console.log(chalk.green('  Caveman plugin is already installed.'));
+        console.log(chalk.gray('  Activate in any session with /caveman (modes: lite, full, ultra)'));
+      } else if (nonInteractive) {
+        console.log(chalk.gray('  Installing Caveman plugin (non-interactive mode)...'));
+        installCaveman();
+      } else {
+        const install = await confirm('  Install Caveman plugin for compressed agent output?');
+        if (install) {
+          installCaveman();
+        } else {
+          console.log(chalk.gray('  Skipping Caveman installation. Install later with:'));
+          console.log(chalk.cyan('    npx skills add JuliusBrussee/caveman\n'));
+        }
+      }
+      console.log('');
+    }
+
     // Summary
     console.log(chalk.bold.green('\nSetup Complete!\n'));
     console.log(chalk.white('Next steps:'));
     console.log(chalk.gray('  1. Run ') + chalk.cyan('devpilot serve') + chalk.gray(' to start the UI'));
     console.log(chalk.gray('  2. Run ') + chalk.cyan('ao start') + chalk.gray(' to start agent orchestrator'));
     console.log(chalk.gray('  3. Use the UI to create items and dispatch to the fleet'));
-    console.log(chalk.gray('  4. Run ') + chalk.cyan('rtk gain') + chalk.gray(' to monitor token savings\n'));
+    console.log(chalk.gray('  4. Run ') + chalk.cyan('rtk gain') + chalk.gray(' to monitor token savings'));
+    console.log(chalk.gray('  5. Use ') + chalk.cyan('/caveman') + chalk.gray(' in sessions for compressed output\n'));
   });
 
 /**
