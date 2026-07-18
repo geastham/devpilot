@@ -62,6 +62,9 @@ export class StatusPoller {
   private handleOrchestratorEvent(event: OrchestratorEvent): void {
     switch (event.type) {
       case 'job:started':
+        // Push-based adapters (e.g. claude-session) report progress via
+        // callbacks; polling them would be redundant and racy.
+        if (this.orchestrator.isPushBased) break;
         this.trackSession(event.sessionId, event.externalJobId);
         break;
       case 'job:complete':
