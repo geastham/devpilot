@@ -7,5 +7,6 @@ export * from './adapter';
 export * from './client';
 export * from './ao-cli-adapter';
 export * from './claude-session-adapter';
+export * from './session-prompt';
 export * from './service';
 export * from './status-poller';

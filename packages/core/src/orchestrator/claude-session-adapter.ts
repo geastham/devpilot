@@ -8,15 +8,12 @@
  * (`/api/orchestrator/status`, `/api/orchestrator/complete`). There is no poll
  * loop and no stdout scraping.
  *
- * SCAFFOLD NOTE
- * -------------
- * The concrete mechanism for *creating* and *steering* a session (remote
- * session API, trigger/routine, hosted bridge, etc.) is environment-specific
- * and intentionally not hardcoded here. It lives behind the `SessionTransport`
- * interface so it can be wired to whatever dispatch surface DevPilot targets.
- * `HttpSessionTransport` is a reasonable default that POSTs to a configurable
- * session API; its routes are placeholders (marked TODO) pending the real
- * dispatch contract.
+ * The dispatcher/callback wire contract this transport implements is defined
+ * normatively in spec/trd/01-TIER1-EXECUTION-LOOP.md §7. The concrete session
+ * runner behind `DEVPILOT_SESSION_API_URL` (hosted DevPilot bridge, local
+ * session-runner daemon, etc.) is environment-specific and lives behind the
+ * `SessionTransport` interface; `HttpSessionTransport` is the default that
+ * speaks the §7.1 `/v1` HTTP API.
  */
 
 import type {
@@ -50,6 +47,8 @@ export interface CreateSessionParams {
   linearTicketId?: string;
   /** URL base the session should POST status/completion to. */
   callbackUrl: string;
+  /** Shared secret the session echoes as X-DevPilot-Callback-Token (§7.2). */
+  callbackToken?: string;
   /** Managed environment the session should run in, if applicable. */
   environmentId?: string;
   metadata?: Record<string, unknown>;
@@ -82,11 +81,8 @@ export interface SessionTransport {
 }
 
 /**
- * Default transport: POSTs to a configurable session dispatcher over HTTP.
- *
- * TODO(session-native): the endpoint paths below are placeholders. Replace
- * with the real DevPilot bridge / Claude Code remote-session contract once
- * defined, and thread through auth (workspace token, environment id).
+ * Default transport speaking the §7.1 dispatcher API over HTTP. All routes are
+ * versioned under `/v1`; auth is `Authorization: Bearer <sessionApiKey>`.
  */
 export class HttpSessionTransport implements SessionTransport {
   constructor(
@@ -95,20 +91,42 @@ export class HttpSessionTransport implements SessionTransport {
     private readonly timeoutMs = 30000
   ) {}
 
+  /** Extract the runner's session id from a create/idempotent response body. */
+  private static readExternalId(json: unknown): string | undefined {
+    const j = (json ?? {}) as { externalSessionId?: string; sessionId?: string; id?: string };
+    return j.externalSessionId ?? j.sessionId ?? j.id;
+  }
+
   async createSession(params: CreateSessionParams): Promise<CreateSessionResult> {
     try {
-      const res = await this.fetch('/sessions', {
+      const res = await this.fetch('/v1/sessions', {
         method: 'POST',
         body: JSON.stringify(params),
       });
-      if (!res.ok) {
-        return { accepted: false, error: `Session create failed: ${res.status} ${await res.text()}` };
+
+      // 201 create / 200 idempotent re-post → accepted with the runner's id.
+      if (res.status === 201 || res.status === 200) {
+        const json = await res.json().catch(() => ({}));
+        return { accepted: true, externalSessionId: HttpSessionTransport.readExternalId(json) };
       }
-      const json = (await res.json()) as { sessionId?: string; externalSessionId?: string; id?: string };
-      return {
-        accepted: true,
-        externalSessionId: json.externalSessionId ?? json.sessionId ?? json.id,
-      };
+
+      // 409 → sessionId already dispatched: idempotent, body carries the
+      // existing externalSessionId (§7.1). Treat as success.
+      if (res.status === 409) {
+        const json = await res.json().catch(() => ({}));
+        const existing = HttpSessionTransport.readExternalId(json);
+        if (existing) {
+          return { accepted: true, externalSessionId: existing };
+        }
+        return { accepted: false, error: 'CONFLICT: session already dispatched without an id in response' };
+      }
+
+      // 429 → capacity: caller must queue the task, not fail it (§9.2).
+      if (res.status === 429) {
+        return { accepted: false, error: 'CAPACITY' };
+      }
+
+      return { accepted: false, error: `Session create failed: ${res.status} ${await res.text().catch(() => '')}` };
     } catch (error) {
       return { accepted: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -116,10 +134,14 @@ export class HttpSessionTransport implements SessionTransport {
 
   async sendMessage(externalSessionId: string, message: string) {
     try {
-      const res = await this.fetch(`/sessions/${externalSessionId}/messages`, {
+      const res = await this.fetch(`/v1/sessions/${externalSessionId}/messages`, {
         method: 'POST',
         body: JSON.stringify({ message }),
       });
+      // 410 → session already terminal; steering is not possible.
+      if (res.status === 410) {
+        return { success: false, error: 'session already terminal' };
+      }
       return res.ok
         ? { success: true }
         : { success: false, error: `send failed: ${res.status}` };
@@ -130,10 +152,12 @@ export class HttpSessionTransport implements SessionTransport {
 
   async stopSession(externalSessionId: string) {
     try {
-      const res = await this.fetch(`/sessions/${externalSessionId}/stop`, { method: 'POST' });
-      return res.ok
-        ? { success: true, message: `Session ${externalSessionId} stopped` }
-        : { success: false, message: `stop failed: ${res.status}` };
+      const res = await this.fetch(`/v1/sessions/${externalSessionId}/stop`, { method: 'POST' });
+      // 410 → already stopped: idempotent success.
+      if (res.ok || res.status === 410) {
+        return { success: true, message: `Session ${externalSessionId} stopped` };
+      }
+      return { success: false, message: `stop failed: ${res.status}` };
     } catch (error) {
       return { success: false, message: error instanceof Error ? error.message : String(error) };
     }
@@ -141,7 +165,7 @@ export class HttpSessionTransport implements SessionTransport {
 
   async getSession(externalSessionId: string): Promise<Partial<JobStatus> | null> {
     try {
-      const res = await this.fetch(`/sessions/${externalSessionId}`);
+      const res = await this.fetch(`/v1/sessions/${externalSessionId}`);
       if (!res.ok) return null;
       return (await res.json()) as Partial<JobStatus>;
     } catch {
@@ -151,7 +175,7 @@ export class HttpSessionTransport implements SessionTransport {
 
   async health() {
     try {
-      const res = await this.fetch('/health');
+      const res = await this.fetch('/v1/health');
       if (!res.ok) return { status: 'down' as const, version: 'unknown' };
       const json = (await res.json()) as { version?: string };
       return { status: 'healthy' as const, version: json.version ?? 'unknown' };
@@ -209,7 +233,7 @@ export class ClaudeSessionAdapter
       }
       this.transport = new HttpSessionTransport(
         config.sessionApiUrl,
-        config.apiKey,
+        config.sessionApiKey ?? config.apiKey,
         config.timeout
       );
     }
@@ -241,6 +265,7 @@ export class ClaudeSessionAdapter
       constraints: request.taskSpec.constraints,
       linearTicketId: request.linearTicketId,
       callbackUrl: request.callbackUrl,
+      callbackToken: this.config.callbackToken,
       environmentId: this.config.sessionEnvironmentId,
       metadata: request.metadata,
     });

@@ -48,8 +48,13 @@ export interface OrchestratorAdapterConfig {
   // Base URL of the session dispatcher (hosted DevPilot bridge / Claude Code
   // remote-session API) that creates and manages sessions.
   sessionApiUrl?: string;
+  // Bearer token for the session dispatcher API (DEVPILOT_SESSION_API_KEY).
+  sessionApiKey?: string;
   // Managed environment the session should run in, if applicable.
   sessionEnvironmentId?: string;
+  // Shared secret echoed to the session as X-DevPilot-Callback-Token so the
+  // session's callback POSTs authenticate against DEVPILOT_CALLBACK_TOKEN.
+  callbackToken?: string;
 }
 
 /**

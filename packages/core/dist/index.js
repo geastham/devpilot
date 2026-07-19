@@ -5122,6 +5122,7 @@ __export(orchestrator_exports, {
   OrchestratorService: () => OrchestratorService,
   StatusPoller: () => StatusPoller,
   buildDispatchRequest: () => buildDispatchRequest,
+  buildSessionPrompt: () => buildSessionPrompt,
   createAoCliAdapter: () => createAoCliAdapter,
   createClaudeSessionAdapter: () => createClaudeSessionAdapter,
   getOrchestratorClient: () => getOrchestratorClient,
@@ -5581,36 +5582,52 @@ function createAoCliAdapter(config) {
 }
 
 // src/orchestrator/claude-session-adapter.ts
-var HttpSessionTransport = class {
+var HttpSessionTransport = class _HttpSessionTransport {
   constructor(baseUrl, apiKey, timeoutMs = 3e4) {
     this.baseUrl = baseUrl;
     this.apiKey = apiKey;
     this.timeoutMs = timeoutMs;
   }
+  /** Extract the runner's session id from a create/idempotent response body. */
+  static readExternalId(json) {
+    const j = json ?? {};
+    return j.externalSessionId ?? j.sessionId ?? j.id;
+  }
   async createSession(params) {
     try {
-      const res = await this.fetch("/sessions", {
+      const res = await this.fetch("/v1/sessions", {
         method: "POST",
         body: JSON.stringify(params)
       });
-      if (!res.ok) {
-        return { accepted: false, error: `Session create failed: ${res.status} ${await res.text()}` };
+      if (res.status === 201 || res.status === 200) {
+        const json = await res.json().catch(() => ({}));
+        return { accepted: true, externalSessionId: _HttpSessionTransport.readExternalId(json) };
       }
-      const json = await res.json();
-      return {
-        accepted: true,
-        externalSessionId: json.externalSessionId ?? json.sessionId ?? json.id
-      };
+      if (res.status === 409) {
+        const json = await res.json().catch(() => ({}));
+        const existing = _HttpSessionTransport.readExternalId(json);
+        if (existing) {
+          return { accepted: true, externalSessionId: existing };
+        }
+        return { accepted: false, error: "CONFLICT: session already dispatched without an id in response" };
+      }
+      if (res.status === 429) {
+        return { accepted: false, error: "CAPACITY" };
+      }
+      return { accepted: false, error: `Session create failed: ${res.status} ${await res.text().catch(() => "")}` };
     } catch (error) {
       return { accepted: false, error: error instanceof Error ? error.message : String(error) };
     }
   }
   async sendMessage(externalSessionId, message) {
     try {
-      const res = await this.fetch(`/sessions/${externalSessionId}/messages`, {
+      const res = await this.fetch(`/v1/sessions/${externalSessionId}/messages`, {
         method: "POST",
         body: JSON.stringify({ message })
       });
+      if (res.status === 410) {
+        return { success: false, error: "session already terminal" };
+      }
       return res.ok ? { success: true } : { success: false, error: `send failed: ${res.status}` };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) };
@@ -5618,15 +5635,18 @@ var HttpSessionTransport = class {
   }
   async stopSession(externalSessionId) {
     try {
-      const res = await this.fetch(`/sessions/${externalSessionId}/stop`, { method: "POST" });
-      return res.ok ? { success: true, message: `Session ${externalSessionId} stopped` } : { success: false, message: `stop failed: ${res.status}` };
+      const res = await this.fetch(`/v1/sessions/${externalSessionId}/stop`, { method: "POST" });
+      if (res.ok || res.status === 410) {
+        return { success: true, message: `Session ${externalSessionId} stopped` };
+      }
+      return { success: false, message: `stop failed: ${res.status}` };
     } catch (error) {
       return { success: false, message: error instanceof Error ? error.message : String(error) };
     }
   }
   async getSession(externalSessionId) {
     try {
-      const res = await this.fetch(`/sessions/${externalSessionId}`);
+      const res = await this.fetch(`/v1/sessions/${externalSessionId}`);
       if (!res.ok) return null;
       return await res.json();
     } catch {
@@ -5635,7 +5655,7 @@ var HttpSessionTransport = class {
   }
   async health() {
     try {
-      const res = await this.fetch("/health");
+      const res = await this.fetch("/v1/health");
       if (!res.ok) return { status: "down", version: "unknown" };
       const json = await res.json();
       return { status: "healthy", version: json.version ?? "unknown" };
@@ -5675,7 +5695,7 @@ var ClaudeSessionAdapter = class {
       }
       this.transport = new HttpSessionTransport(
         config.sessionApiUrl,
-        config.apiKey,
+        config.sessionApiKey ?? config.apiKey,
         config.timeout
       );
     }
@@ -5705,6 +5725,7 @@ var ClaudeSessionAdapter = class {
       constraints: request.taskSpec.constraints,
       linearTicketId: request.linearTicketId,
       callbackUrl: request.callbackUrl,
+      callbackToken: this.config.callbackToken,
       environmentId: this.config.sessionEnvironmentId,
       metadata: request.metadata
     });
@@ -5817,6 +5838,113 @@ var ClaudeSessionAdapter = class {
 };
 function createClaudeSessionAdapter(config, transport) {
   return new ClaudeSessionAdapter(config, transport);
+}
+
+// src/orchestrator/session-prompt.ts
+function buildSessionPrompt(input) {
+  const {
+    taskDescription,
+    repo,
+    fileScope,
+    predecessorContext,
+    acceptanceCriteria,
+    constraints,
+    callbackUrl,
+    sessionId
+  } = input;
+  const sections = [];
+  sections.push(`# Task
+
+${taskDescription}
+
+**Repository:** \`${repo}\``);
+  if (fileScope.length > 0) {
+    sections.push(
+      `# File Scope
+
+You hold an **exclusive lock** on the following files for the duration of this task. Do not modify files outside this set \u2014 other agents are working in parallel and edits outside your scope will conflict:
+
+` + fileScope.map((f) => `- \`${f}\``).join("\n")
+    );
+  }
+  if (predecessorContext.length > 0) {
+    const blocks = predecessorContext.map((p) => {
+      const files = p.filesModified.length > 0 ? p.filesModified.map((f) => `\`${f}\``).join(", ") : "(none recorded)";
+      const summary = p.completionSummary?.trim() || "(no summary provided)";
+      return `## ${p.taskCode} \u2014 ${p.description}
+
+- Files modified: ${files}
+- Summary: ${summary}`;
+    }).join("\n\n");
+    sections.push(
+      `# Context From Predecessors
+
+These upstream tasks completed before yours; build on their work:
+
+${blocks}`
+    );
+  }
+  if (acceptanceCriteria && acceptanceCriteria.length > 0) {
+    sections.push(
+      `# Acceptance Criteria
+
+` + acceptanceCriteria.map((c) => `- ${c}`).join("\n")
+    );
+  }
+  if (constraints && constraints.length > 0) {
+    sections.push(
+      `# Constraints
+
+` + constraints.map((c) => `- ${c}`).join("\n")
+    );
+  }
+  const statusUrl = `${callbackUrl}/status`;
+  const completeUrl = `${callbackUrl}/complete`;
+  sections.push(
+    `# Reporting Protocol
+
+You MUST report progress back to DevPilot so it can track this task. Your DevPilot session id is \`${sessionId}\` \u2014 use it as \`sessionId\` in every callback body.
+
+**On each meaningful milestone** (and at least every 2 minutes while working), POST a status update:
+
+\`\`\`bash
+curl -sS -X POST '${statusUrl}' \\
+  -H 'Content-Type: application/json' \\
+  -H 'X-DevPilot-Callback-Token: <callback-token>' \\
+  -d '{
+    "sessionId": "${sessionId}",
+    "status": "running",
+    "progressPercent": 40,
+    "currentStep": "implementing X",
+    "message": "\u2026",
+    "filesModified": ["src/lib/foo.ts"],
+    "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"
+  }'
+\`\`\`
+
+**Exactly once, when the task is done** (success or failure), POST the final completion report:
+
+\`\`\`bash
+curl -sS -X POST '${completeUrl}' \\
+  -H 'Content-Type: application/json' \\
+  -H 'X-DevPilot-Callback-Token: <callback-token>' \\
+  -d '{
+    "sessionId": "${sessionId}",
+    "success": true,
+    "filesModified": ["src/lib/foo.ts"],
+    "filesCreated": [],
+    "filesDeleted": [],
+    "summary": "One-paragraph summary of what you did.",
+    "tokensUsed": 0,
+    "costUsd": 0,
+    "durationMinutes": 0,
+    "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"
+  }'
+\`\`\`
+
+Replace \`<callback-token>\` with the token provided by your runner. Send the completion callback even if the task failed \u2014 set \`"success": false\` and include an \`"error"\` field describing what went wrong.`
+  );
+  return sections.join("\n\n");
 }
 
 // src/orchestrator/service.ts
