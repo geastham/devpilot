@@ -75,7 +75,9 @@ export const useUIStore = create<UIState>()(
 
         // Panels
         isAssistPanelOpen: false,
-        isFleetPanelOpen: false,
+        // Default open — DESIGN.md §15 "Fleet Awareness": session status must
+        // be visible without a context switch.
+        isFleetPanelOpen: true,
         isConfidencePanelOpen: false,
         confidencePanelItemId: null,
         isDiffViewOpen: false,

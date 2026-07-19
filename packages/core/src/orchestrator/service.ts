@@ -14,14 +14,17 @@ import type {
   OrchestratorEvent,
   OrchestratorEventCallback,
 } from './adapter';
+import { isPushCapableAdapter } from './adapter';
 import type {
   DispatchRequest,
   DispatchResponse,
   OrchestratorHealth,
+  StatusUpdate,
   CompletionReport,
 } from './types';
 import { OrchestratorClient } from './client';
 import { AoCliAdapter } from './ao-cli-adapter';
+import { ClaudeSessionAdapter, type SessionTransport } from './claude-session-adapter';
 
 /**
  * HTTP adapter that wraps the existing OrchestratorClient
@@ -142,8 +145,14 @@ export class OrchestratorService {
   private sessionMappings: Map<string, SessionMapping> = new Map();
   private eventCallbacks: Set<OrchestratorEventCallback> = new Set();
 
-  constructor(config: OrchestratorAdapterConfig) {
+  // Optional transport override for the claude-session adapter (tests / custom
+  // dispatch surfaces). When set, it is passed through to the adapter instead
+  // of building an HttpSessionTransport from config.
+  private sessionTransport?: SessionTransport;
+
+  constructor(config: OrchestratorAdapterConfig, sessionTransport?: SessionTransport) {
     this.config = config;
+    this.sessionTransport = sessionTransport;
     this.adapter = this.createAdapter(config);
   }
 
@@ -152,6 +161,8 @@ export class OrchestratorService {
    */
   private createAdapter(config: OrchestratorAdapterConfig): IOrchestratorAdapter {
     switch (config.mode) {
+      case 'claude-session':
+        return new ClaudeSessionAdapter(config, this.sessionTransport);
       case 'http':
         return new HttpAdapter(config);
       case 'ao-cli':
@@ -160,6 +171,14 @@ export class OrchestratorService {
       default:
         return new DisabledAdapter();
     }
+  }
+
+  /**
+   * Whether the active adapter receives progress via pushed callbacks. When
+   * true, the StatusPoller should not track its sessions.
+   */
+  get isPushBased(): boolean {
+    return this.adapter.pushBased ?? false;
   }
 
   /**
@@ -361,6 +380,42 @@ export class OrchestratorService {
   }
 
   /**
+   * Ingest a pushed status update from a session callback
+   * (`/api/orchestrator/status`). For push-based adapters this replaces the
+   * poll loop: the payload is cached on the adapter and re-emitted as a
+   * `job:progress` event to SSE subscribers. No-op mapping if the session is
+   * unknown. Safe to call for non-push adapters (falls through to event only).
+   */
+  ingestStatusUpdate(update: StatusUpdate): void {
+    const mapping = this.sessionMappings.get(update.sessionId);
+    if (mapping && isPushCapableAdapter(this.adapter)) {
+      this.adapter.ingestStatus(mapping.externalJobId, update);
+      mapping.lastStatusAt = new Date();
+    }
+
+    this.emitEvent({
+      type: 'job:progress',
+      sessionId: update.sessionId,
+      externalJobId: mapping?.externalJobId ?? update.sessionId,
+      timestamp: update.timestamp,
+      data: update,
+    });
+  }
+
+  /**
+   * Ingest a pushed completion report from a session callback
+   * (`/api/orchestrator/complete`). Caches it on the adapter (so
+   * getCompletionReport can serve it) and finalizes the session.
+   */
+  ingestCompletionReport(report: CompletionReport): void {
+    const mapping = this.sessionMappings.get(report.sessionId);
+    if (mapping && isPushCapableAdapter(this.adapter)) {
+      this.adapter.ingestCompletion(mapping.externalJobId, report);
+    }
+    this.markSessionComplete(report.sessionId, report);
+  }
+
+  /**
    * Mark a session as complete (for external completion notifications)
    */
   markSessionComplete(sessionId: string, report: CompletionReport): void {
@@ -411,12 +466,15 @@ let serviceInstance: OrchestratorService | null = null;
 /**
  * Initialize the orchestrator service with configuration
  */
-export function initOrchestratorService(config: OrchestratorAdapterConfig): OrchestratorService {
+export function initOrchestratorService(
+  config: OrchestratorAdapterConfig,
+  sessionTransport?: SessionTransport
+): OrchestratorService {
   if (serviceInstance) {
     // Shutdown existing instance before creating new one
     serviceInstance.shutdown();
   }
-  serviceInstance = new OrchestratorService(config);
+  serviceInstance = new OrchestratorService(config, sessionTransport);
   return serviceInstance;
 }
 
