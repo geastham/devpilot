@@ -26,6 +26,7 @@ const DEFAULT_CONFIG: WaveExecutionConfig = {
   retryLimit: 1,
   failurePolicy: 'halt',
   autoAdvance: false, // Manual dispatch doesn't auto-advance
+  callbackUrl: process.env.DEVPILOT_CALLBACK_URL ?? 'http://127.0.0.1:3000/api/orchestrator',
 };
 
 // POST /api/wave-plans/[planId]/dispatch - Manually dispatch the next wave

@@ -1281,6 +1281,7 @@ __export(wave_planner_exports, {
   scorePlan: () => scorePlan,
   simplifiedTemplate: () => simplifiedTemplate,
   sleep: () => sleep,
+  toActivityEventType: () => toActivityEventType,
   topologicalSort: () => topologicalSort,
   validateDAG: () => validateDAG
 });
@@ -3890,6 +3891,23 @@ async function generateWavePlan(horizonItemId, planId, specContent, itemTitle, r
   );
 }
 
+// src/wave-planner/execution/types.ts
+var WAVE_SSE_TO_EVENT_TYPE = {
+  wave_plan_created: "WAVE_PLAN_CREATED",
+  wave_dispatching: "WAVE_DISPATCHING",
+  wave_task_dispatched: "WAVE_TASK_DISPATCHED",
+  wave_task_complete: "WAVE_TASK_COMPLETE",
+  wave_task_failed: "WAVE_TASK_FAILED",
+  wave_complete: "WAVE_COMPLETE",
+  wave_advance: "WAVE_ADVANCE",
+  wave_plan_complete: "WAVE_PLAN_COMPLETE",
+  wave_plan_failed: "WAVE_PLAN_FAILED",
+  wave_plan_reoptimizing: "WAVE_PLAN_REOPTIMIZING"
+};
+function toActivityEventType(t) {
+  return WAVE_SSE_TO_EVENT_TYPE[t];
+}
+
 // src/wave-planner/execution/concurrency-manager.ts
 var ConcurrencyManager = class {
   constructor(config) {
@@ -4288,7 +4306,9 @@ var WaveExecutionController = class {
   /**
    * Resume execution of a paused wave plan
    * Transitions: paused → executing
-   * Dispatches current wave if not complete
+   * Dispatches current wave if not complete.
+   * @returns the DispatchResult of the re-dispatched current wave, or null if
+   *          the current wave was already complete (nothing re-dispatched).
    */
   async resume(wavePlanId) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
@@ -4313,8 +4333,9 @@ var WaveExecutionController = class {
     }).where((0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId));
     const currentWave = wavePlan.waves.find((w) => w.waveIndex === wavePlan.currentWaveIndex);
     if (currentWave && currentWave.status !== "completed") {
-      await this.dispatchWave(wavePlanId, wavePlan.currentWaveIndex);
+      return this.dispatchWave(wavePlanId, wavePlan.currentWaveIndex);
     }
+    return null;
   }
   /**
    * Abort a wave plan execution

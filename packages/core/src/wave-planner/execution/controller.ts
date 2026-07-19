@@ -92,9 +92,11 @@ export class WaveExecutionController {
   /**
    * Resume execution of a paused wave plan
    * Transitions: paused → executing
-   * Dispatches current wave if not complete
+   * Dispatches current wave if not complete.
+   * @returns the DispatchResult of the re-dispatched current wave, or null if
+   *          the current wave was already complete (nothing re-dispatched).
    */
-  async resume(wavePlanId: string): Promise<void> {
+  async resume(wavePlanId: string): Promise<DispatchResult | null> {
     // Validate status is 'paused'
     const wavePlan = await this.db.query.wavePlans.findFirst({
       where: eq(wavePlans.id, wavePlanId),
@@ -126,8 +128,10 @@ export class WaveExecutionController {
     // Dispatch current wave if not complete
     const currentWave = wavePlan.waves.find(w => w.waveIndex === wavePlan.currentWaveIndex);
     if (currentWave && currentWave.status !== 'completed') {
-      await this.dispatchWave(wavePlanId, wavePlan.currentWaveIndex);
+      return this.dispatchWave(wavePlanId, wavePlan.currentWaveIndex);
     }
+
+    return null;
   }
 
   /**
