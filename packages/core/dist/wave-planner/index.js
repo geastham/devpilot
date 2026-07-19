@@ -44,6 +44,7 @@ __export(wave_planner_exports, {
   assignWaves: () => assignWaves,
   autoAdvanceWave: () => autoAdvanceWave,
   buildDAGGraph: () => buildDAGGraph,
+  buildSpecContentForItem: () => buildSpecContentForItem,
   collectFinalMetrics: () => collectFinalMetrics,
   computeCriticalPath: () => computeCriticalPath,
   createFlatPlan: () => createFlatPlan,
@@ -56,6 +57,7 @@ __export(wave_planner_exports, {
   extractWaveFromTaskCode: () => extractWaveFromTaskCode,
   findCommonTheme: () => findCommonTheme,
   findTaskByCode: () => findTaskByCode,
+  generatePlanForItem: () => generatePlanForItem,
   generateWaveLabel: () => generateWaveLabel,
   generateWavePlan: () => generateWavePlan,
   getTasksInWave: () => getTasksInWave,
@@ -66,6 +68,7 @@ __export(wave_planner_exports, {
   parseDependencies: () => parseDependencies,
   parseFilePaths: () => parseFilePaths,
   parseWavePlanResponse: () => parseWavePlanResponse,
+  projectWavePlanToPlan: () => projectWavePlanToPlan,
   refinementTemplate: () => refinementTemplate,
   scorePlan: () => scorePlan,
   simplifiedTemplate: () => simplifiedTemplate,
@@ -3775,6 +3778,152 @@ async function generateWavePlan(horizonItemId, planId, specContent, itemTitle, r
   );
 }
 
+// src/wave-planner/plan-projection.ts
+var import_drizzle_orm9 = require("drizzle-orm");
+var MODEL_BASE_COST_USD = {
+  HAIKU: 0.01,
+  SONNET: 0.05,
+  OPUS: 0.15
+};
+var COMPLEXITY_MULTIPLIER = {
+  S: 1,
+  M: 2,
+  L: 3,
+  XL: 4
+};
+function estimateTaskCostUsd(model, complexity) {
+  return MODEL_BASE_COST_USD[model] * COMPLEXITY_MULTIPLIER[complexity];
+}
+function buildSpecContentForItem(item) {
+  const lines = [];
+  lines.push(`# ${item.title}`);
+  lines.push("");
+  const acceptanceCriteria = item.plan?.acceptanceCriteria;
+  if (acceptanceCriteria && acceptanceCriteria.length > 0) {
+    lines.push("## Acceptance Criteria");
+    for (const criterion of acceptanceCriteria) {
+      lines.push(`- ${criterion}`);
+    }
+    lines.push("");
+  }
+  const planWorkstreams = item.plan?.workstreams;
+  if (planWorkstreams && planWorkstreams.length > 0) {
+    lines.push("## Implementation Plan");
+    for (const workstream of planWorkstreams) {
+      lines.push(`### ${workstream.label}`);
+      if (workstream.tasks && workstream.tasks.length > 0) {
+        for (const task of workstream.tasks) {
+          lines.push(`- ${task.label}`);
+          if (task.filePaths && task.filePaths.length > 0) {
+            lines.push(`  Files: ${task.filePaths.join(", ")}`);
+          }
+        }
+      }
+      lines.push("");
+    }
+  }
+  return lines.join("\n");
+}
+async function generatePlanForItem(params) {
+  const { horizonItemId, title, repo, workingDir, apiKey } = params;
+  const db2 = getDatabase();
+  const specContent = buildSpecContentForItem({ title });
+  const [plan] = await db2.insert(plans).values({
+    horizonItemId,
+    estimatedCostUsd: 0,
+    baselineCostUsd: 0,
+    acceptanceCriteria: [],
+    confidenceSignals: {},
+    fleetContextSnapshot: {},
+    memorySessionsUsed: []
+  }).returning();
+  const planId = plan.id;
+  const generation = await generateWavePlan(
+    horizonItemId,
+    planId,
+    specContent,
+    title,
+    repo,
+    workingDir,
+    apiKey
+  );
+  return { generation, planId };
+}
+async function projectWavePlanToPlan(params) {
+  const { planId, generation, inFlightPaths } = params;
+  const db2 = getDatabase();
+  const [planRow] = await db2.select({ horizonItemId: plans.horizonItemId }).from(plans).where((0, import_drizzle_orm9.eq)(plans.id, planId)).limit(1);
+  if (!planRow) {
+    throw new Error(`Plan not found: ${planId}`);
+  }
+  const [itemRow] = await db2.select({ repo: horizonItems.repo }).from(horizonItems).where((0, import_drizzle_orm9.eq)(horizonItems.id, planRow.horizonItemId)).limit(1);
+  const repo = itemRow?.repo ?? "";
+  const maxParallelism = generation.waveAssignment.maxParallelism;
+  const projectionWaves = generation.waveAssignment.waves;
+  const workstreamIds = [];
+  const taskIds = [];
+  let totalCostUsd = 0;
+  let totalTasks = 0;
+  for (const wave of projectionWaves) {
+    const [workstream] = await db2.insert(workstreams).values({
+      planId,
+      label: wave.label,
+      repo,
+      workerCount: Math.min(wave.tasks.length, maxParallelism),
+      orderIndex: wave.waveIndex
+    }).returning();
+    workstreamIds.push(workstream.id);
+    for (let taskIdx = 0; taskIdx < wave.tasks.length; taskIdx++) {
+      const task = wave.tasks[taskIdx];
+      const model = task.recommendedModel.toUpperCase();
+      const complexity = task.complexity;
+      const estimatedCostUsd = estimateTaskCostUsd(model, complexity);
+      totalCostUsd += estimatedCostUsd;
+      totalTasks += 1;
+      const filePaths = task.filePaths;
+      const conflictWarning = inFlightPaths.some(
+        (cp) => filePaths.some((fp) => fp.includes(cp) || cp.includes(fp))
+      ) ? "File may be modified by in-flight session" : null;
+      const [insertedTask] = await db2.insert(tasks).values({
+        workstreamId: workstream.id,
+        label: task.description.slice(0, 100),
+        model,
+        complexity,
+        estimatedCostUsd,
+        filePaths,
+        conflictWarning,
+        dependsOn: task.dependencies,
+        orderIndex: taskIdx
+      }).returning();
+      taskIds.push(insertedTask.id);
+    }
+  }
+  const uniqueFilePaths = projectionWaves.flatMap((wave) => wave.tasks.flatMap((t) => t.filePaths)).filter((v, i, a) => a.indexOf(v) === i);
+  for (const path of uniqueFilePaths) {
+    const inFlight = inFlightPaths.includes(path);
+    await db2.insert(touchedFiles).values({
+      planId,
+      path,
+      status: inFlight ? "IN_FLIGHT" : "AVAILABLE",
+      inFlightVia: null
+    });
+  }
+  const criticalPathLength = generation.criticalPath.length;
+  const baselineMultiplier = Math.min(totalTasks / Math.max(criticalPathLength, 1), 2);
+  const confidenceSignals = {
+    overallConfidence: generation.score.parallelizationScore,
+    parallelizationScore: generation.score.parallelizationScore,
+    refinementIterations: generation.metrics.refinementIterations,
+    generatedByAI: generation.success
+  };
+  await db2.update(plans).set({
+    estimatedCostUsd: totalCostUsd,
+    baselineCostUsd: totalCostUsd * baselineMultiplier,
+    confidenceSignals
+  }).where((0, import_drizzle_orm9.eq)(plans.id, planId));
+  return { planId, workstreamIds, taskIds };
+}
+
 // src/wave-planner/execution/types.ts
 var WAVE_SSE_TO_EVENT_TYPE = {
   wave_plan_created: "WAVE_PLAN_CREATED",
@@ -3881,7 +4030,7 @@ var ConcurrencyManager = class {
 };
 
 // src/wave-planner/execution/completion-listener.ts
-var import_drizzle_orm9 = require("drizzle-orm");
+var import_drizzle_orm10 = require("drizzle-orm");
 var CompletionListener = class {
   constructor(onWaveComplete) {
     this.onWaveComplete = onWaveComplete;
@@ -3897,9 +4046,9 @@ var CompletionListener = class {
       assignedSessionId: sessionId,
       startedAt: /* @__PURE__ */ new Date()
     }).where(
-      (0, import_drizzle_orm9.and)(
-        (0, import_drizzle_orm9.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm9.eq)(waveTasks.taskCode, taskCode)
+      (0, import_drizzle_orm10.and)(
+        (0, import_drizzle_orm10.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm10.eq)(waveTasks.taskCode, taskCode)
       )
     );
     await this.emitEvent({
@@ -3915,9 +4064,9 @@ var CompletionListener = class {
    */
   async handleTaskComplete(wavePlanId, taskCode, completionSummary) {
     const task = await this.db.query.waveTasks.findFirst({
-      where: (0, import_drizzle_orm9.and)(
-        (0, import_drizzle_orm9.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm9.eq)(waveTasks.taskCode, taskCode)
+      where: (0, import_drizzle_orm10.and)(
+        (0, import_drizzle_orm10.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm10.eq)(waveTasks.taskCode, taskCode)
       )
     });
     if (!task) {
@@ -3928,9 +4077,9 @@ var CompletionListener = class {
       completedAt: /* @__PURE__ */ new Date(),
       errorMessage: completionSummary || null
     }).where(
-      (0, import_drizzle_orm9.and)(
-        (0, import_drizzle_orm9.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm9.eq)(waveTasks.taskCode, taskCode)
+      (0, import_drizzle_orm10.and)(
+        (0, import_drizzle_orm10.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm10.eq)(waveTasks.taskCode, taskCode)
       )
     );
     await this.emitEvent({
@@ -3955,9 +4104,9 @@ var CompletionListener = class {
       errorMessage: error,
       retryCount
     }).where(
-      (0, import_drizzle_orm9.and)(
-        (0, import_drizzle_orm9.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm9.eq)(waveTasks.taskCode, taskCode)
+      (0, import_drizzle_orm10.and)(
+        (0, import_drizzle_orm10.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm10.eq)(waveTasks.taskCode, taskCode)
       )
     );
     await this.emitEvent({
@@ -3973,9 +4122,9 @@ var CompletionListener = class {
    */
   async checkWaveCompletion(wavePlanId, waveIndex) {
     const tasks2 = await this.db.query.waveTasks.findMany({
-      where: (0, import_drizzle_orm9.and)(
-        (0, import_drizzle_orm9.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm9.eq)(waveTasks.waveIndex, waveIndex)
+      where: (0, import_drizzle_orm10.and)(
+        (0, import_drizzle_orm10.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm10.eq)(waveTasks.waveIndex, waveIndex)
       )
     });
     return tasks2.every(
@@ -4009,11 +4158,11 @@ var CompletionListener = class {
 };
 
 // src/wave-planner/execution/auto-advance.ts
-var import_drizzle_orm10 = require("drizzle-orm");
+var import_drizzle_orm11 = require("drizzle-orm");
 async function autoAdvanceWave(wavePlanId, completedWaveIndex, config) {
   const db2 = getDatabase();
   const wavePlan = await db2.query.wavePlans.findFirst({
-    where: (0, import_drizzle_orm10.eq)(wavePlans.id, wavePlanId)
+    where: (0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId)
   });
   if (!wavePlan) {
     throw new Error(`Wave plan ${wavePlanId} not found`);
@@ -4034,7 +4183,7 @@ async function markWavePlanComplete(wavePlanId) {
     status: "completed",
     completedAt: /* @__PURE__ */ new Date(),
     updatedAt: /* @__PURE__ */ new Date()
-  }).where((0, import_drizzle_orm10.eq)(wavePlans.id, wavePlanId));
+  }).where((0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId));
   await emitEvent({
     type: "wave_plan_complete",
     wavePlanId,
@@ -4044,13 +4193,13 @@ async function markWavePlanComplete(wavePlanId) {
 async function collectFinalMetrics(wavePlanId) {
   const db2 = getDatabase();
   const wavePlan = await db2.query.wavePlans.findFirst({
-    where: (0, import_drizzle_orm10.eq)(wavePlans.id, wavePlanId)
+    where: (0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId)
   });
   if (!wavePlan) {
     throw new Error(`Wave plan ${wavePlanId} not found`);
   }
   const tasks2 = await db2.query.waveTasks.findMany({
-    where: (0, import_drizzle_orm10.eq)(waveTasks.wavePlanId, wavePlanId)
+    where: (0, import_drizzle_orm11.eq)(waveTasks.wavePlanId, wavePlanId)
   });
   const tasksCompleted = tasks2.filter((t) => t.status === "completed").length;
   const tasksFailed = tasks2.filter((t) => t.status === "failed").length;
@@ -4075,9 +4224,9 @@ async function collectFinalMetrics(wavePlanId) {
     parallelizationEfficiency = theoreticalMinMs / totalWallClockMs;
   }
   const completedWaves = await db2.query.waves.findMany({
-    where: (0, import_drizzle_orm10.and)(
-      (0, import_drizzle_orm10.eq)(waves.wavePlanId, wavePlanId),
-      (0, import_drizzle_orm10.eq)(waves.status, "completed")
+    where: (0, import_drizzle_orm11.and)(
+      (0, import_drizzle_orm11.eq)(waves.wavePlanId, wavePlanId),
+      (0, import_drizzle_orm11.eq)(waves.status, "completed")
     )
   });
   const wavesExecutedCount = completedWaves.length;
@@ -4103,13 +4252,13 @@ async function advanceToNextWave(wavePlanId, nextWaveIndex) {
   await db2.update(wavePlans).set({
     currentWaveIndex: nextWaveIndex,
     updatedAt: /* @__PURE__ */ new Date()
-  }).where((0, import_drizzle_orm10.eq)(wavePlans.id, wavePlanId));
+  }).where((0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId));
   await db2.update(waves).set({
     status: "pending"
   }).where(
-    (0, import_drizzle_orm10.and)(
-      (0, import_drizzle_orm10.eq)(waves.wavePlanId, wavePlanId),
-      (0, import_drizzle_orm10.eq)(waves.waveIndex, nextWaveIndex)
+    (0, import_drizzle_orm11.and)(
+      (0, import_drizzle_orm11.eq)(waves.wavePlanId, wavePlanId),
+      (0, import_drizzle_orm11.eq)(waves.waveIndex, nextWaveIndex)
     )
   );
   await emitEvent({
@@ -4140,7 +4289,7 @@ async function emitEvent(event) {
 }
 
 // src/wave-planner/execution/controller.ts
-var import_drizzle_orm11 = require("drizzle-orm");
+var import_drizzle_orm12 = require("drizzle-orm");
 var WaveExecutionController = class {
   constructor(config, dispatchCoordinator) {
     this.db = getDatabase();
@@ -4153,7 +4302,7 @@ var WaveExecutionController = class {
    */
   async approve(wavePlanId) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: (0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId)
+      where: (0, import_drizzle_orm12.eq)(wavePlans.id, wavePlanId)
     });
     if (!wavePlan) {
       throw new Error(`Wave plan ${wavePlanId} not found`);
@@ -4164,7 +4313,7 @@ var WaveExecutionController = class {
     await this.db.update(wavePlans).set({
       status: "approved",
       updatedAt: /* @__PURE__ */ new Date()
-    }).where((0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId));
+    }).where((0, import_drizzle_orm12.eq)(wavePlans.id, wavePlanId));
     await this.dispatchWave(wavePlanId, 0);
   }
   /**
@@ -4174,7 +4323,7 @@ var WaveExecutionController = class {
    */
   async pause(wavePlanId) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: (0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId)
+      where: (0, import_drizzle_orm12.eq)(wavePlans.id, wavePlanId)
     });
     if (!wavePlan) {
       throw new Error(`Wave plan ${wavePlanId} not found`);
@@ -4185,7 +4334,7 @@ var WaveExecutionController = class {
     await this.db.update(wavePlans).set({
       status: "paused",
       updatedAt: /* @__PURE__ */ new Date()
-    }).where((0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId));
+    }).where((0, import_drizzle_orm12.eq)(wavePlans.id, wavePlanId));
   }
   /**
    * Resume execution of a paused wave plan
@@ -4196,7 +4345,7 @@ var WaveExecutionController = class {
    */
   async resume(wavePlanId) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: (0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId),
+      where: (0, import_drizzle_orm12.eq)(wavePlans.id, wavePlanId),
       with: {
         waves: {
           with: {
@@ -4214,7 +4363,7 @@ var WaveExecutionController = class {
     await this.db.update(wavePlans).set({
       status: "executing",
       updatedAt: /* @__PURE__ */ new Date()
-    }).where((0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId));
+    }).where((0, import_drizzle_orm12.eq)(wavePlans.id, wavePlanId));
     const currentWave = wavePlan.waves.find((w) => w.waveIndex === wavePlan.currentWaveIndex);
     if (currentWave && currentWave.status !== "completed") {
       return this.dispatchWave(wavePlanId, wavePlan.currentWaveIndex);
@@ -4228,7 +4377,7 @@ var WaveExecutionController = class {
    */
   async abort(wavePlanId) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: (0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId)
+      where: (0, import_drizzle_orm12.eq)(wavePlans.id, wavePlanId)
     });
     if (!wavePlan) {
       throw new Error(`Wave plan ${wavePlanId} not found`);
@@ -4237,13 +4386,13 @@ var WaveExecutionController = class {
       status: "failed",
       completedAt: /* @__PURE__ */ new Date(),
       updatedAt: /* @__PURE__ */ new Date()
-    }).where((0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId));
+    }).where((0, import_drizzle_orm12.eq)(wavePlans.id, wavePlanId));
     await this.db.update(waveTasks).set({
       status: "skipped"
     }).where(
-      (0, import_drizzle_orm11.and)(
-        (0, import_drizzle_orm11.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm11.eq)(waveTasks.status, "pending")
+      (0, import_drizzle_orm12.and)(
+        (0, import_drizzle_orm12.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm12.eq)(waveTasks.status, "pending")
       )
     );
   }
@@ -4254,7 +4403,7 @@ var WaveExecutionController = class {
    */
   async dispatchWave(wavePlanId, waveIndex) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: (0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId),
+      where: (0, import_drizzle_orm12.eq)(wavePlans.id, wavePlanId),
       with: {
         waves: {
           with: {
@@ -4275,12 +4424,12 @@ var WaveExecutionController = class {
         status: "executing",
         startedAt: /* @__PURE__ */ new Date(),
         updatedAt: /* @__PURE__ */ new Date()
-      }).where((0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId));
+      }).where((0, import_drizzle_orm12.eq)(wavePlans.id, wavePlanId));
     }
     await this.db.update(waves).set({
       status: "dispatching",
       startedAt: /* @__PURE__ */ new Date()
-    }).where((0, import_drizzle_orm11.eq)(waves.id, wave.id));
+    }).where((0, import_drizzle_orm12.eq)(waves.id, wave.id));
     const result = await this.dispatchCoordinator.dispatchWave(
       wavePlanId,
       waveIndex,
@@ -4288,7 +4437,7 @@ var WaveExecutionController = class {
     );
     await this.db.update(waves).set({
       status: "active"
-    }).where((0, import_drizzle_orm11.eq)(waves.id, wave.id));
+    }).where((0, import_drizzle_orm12.eq)(waves.id, wave.id));
     return result;
   }
   /**
@@ -4300,15 +4449,15 @@ var WaveExecutionController = class {
       status: "completed",
       completedAt: /* @__PURE__ */ new Date()
     }).where(
-      (0, import_drizzle_orm11.and)(
-        (0, import_drizzle_orm11.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm11.eq)(waveTasks.taskCode, taskCode)
+      (0, import_drizzle_orm12.and)(
+        (0, import_drizzle_orm12.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm12.eq)(waveTasks.taskCode, taskCode)
       )
     );
     const task = await this.db.query.waveTasks.findFirst({
-      where: (0, import_drizzle_orm11.and)(
-        (0, import_drizzle_orm11.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm11.eq)(waveTasks.taskCode, taskCode)
+      where: (0, import_drizzle_orm12.and)(
+        (0, import_drizzle_orm12.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm12.eq)(waveTasks.taskCode, taskCode)
       )
     });
     if (!task) {
@@ -4317,48 +4466,50 @@ var WaveExecutionController = class {
     const waveIndex = task.waveIndex;
     const isWaveComplete = await this.checkWaveComplete(wavePlanId, waveIndex);
     if (isWaveComplete) {
-      await this.db.update(waves).set({
-        status: "completed",
-        completedAt: /* @__PURE__ */ new Date()
-      }).where(
-        (0, import_drizzle_orm11.and)(
-          (0, import_drizzle_orm11.eq)(waves.wavePlanId, wavePlanId),
-          (0, import_drizzle_orm11.eq)(waves.waveIndex, waveIndex)
-        )
-      );
-      const wavePlan = await this.db.query.wavePlans.findFirst({
-        where: (0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId)
-      });
-      if (!wavePlan) {
-        return;
-      }
-      const isLastWave = waveIndex === wavePlan.totalWaves - 1;
-      if (isLastWave) {
-        await this.db.update(wavePlans).set({
-          status: "completed",
-          completedAt: /* @__PURE__ */ new Date(),
-          updatedAt: /* @__PURE__ */ new Date()
-        }).where((0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId));
-      } else if (this.config.autoAdvance) {
-        const nextWaveIndex = waveIndex + 1;
-        await this.db.update(wavePlans).set({
-          currentWaveIndex: nextWaveIndex,
-          updatedAt: /* @__PURE__ */ new Date()
-        }).where((0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId));
-        await this.delay(this.config.waveAdvanceDelayMs);
-        await this.dispatchWave(wavePlanId, nextWaveIndex);
-      }
+      await this.handleWaveComplete(wavePlanId, waveIndex);
     }
   }
   /**
-   * Handle task failure
-   * Implements retry logic or marks as failed based on policy
+   * Handle wave completion: mark the wave complete, then either finish the plan
+   * (last wave) or auto-advance to the next wave. Invoked by the
+   * ExecutionBridge's CompletionListener callback (§6.5) and by onTaskComplete.
+   */
+  async handleWaveComplete(wavePlanId, waveIndex) {
+    await this.db.update(waves).set({ status: "completed", completedAt: /* @__PURE__ */ new Date() }).where(
+      (0, import_drizzle_orm12.and)((0, import_drizzle_orm12.eq)(waves.wavePlanId, wavePlanId), (0, import_drizzle_orm12.eq)(waves.waveIndex, waveIndex))
+    );
+    const wavePlan = await this.db.query.wavePlans.findFirst({
+      where: (0, import_drizzle_orm12.eq)(wavePlans.id, wavePlanId)
+    });
+    if (!wavePlan) {
+      return;
+    }
+    const isLastWave = waveIndex === wavePlan.totalWaves - 1;
+    if (isLastWave) {
+      await this.db.update(wavePlans).set({ status: "completed", completedAt: /* @__PURE__ */ new Date(), updatedAt: /* @__PURE__ */ new Date() }).where((0, import_drizzle_orm12.eq)(wavePlans.id, wavePlanId));
+      return;
+    }
+    if (this.config.autoAdvance) {
+      if (wavePlan.status !== "executing") {
+        return;
+      }
+      const nextWaveIndex = waveIndex + 1;
+      await this.db.update(wavePlans).set({ currentWaveIndex: nextWaveIndex, updatedAt: /* @__PURE__ */ new Date() }).where((0, import_drizzle_orm12.eq)(wavePlans.id, wavePlanId));
+      await this.delay(this.config.waveAdvanceDelayMs);
+      await this.dispatchWave(wavePlanId, nextWaveIndex);
+    }
+  }
+  /**
+   * Handle task failure. Within the retry limit, mark the task 'retrying' and
+   * re-dispatch it immediately if the plan is still executing (a paused plan
+   * re-dispatches the task on resume). Beyond the limit, fail terminally per
+   * policy. This is where the former re-dispatch placeholder was resolved.
    */
   async onTaskFailed(wavePlanId, taskCode, error) {
     const task = await this.db.query.waveTasks.findFirst({
-      where: (0, import_drizzle_orm11.and)(
-        (0, import_drizzle_orm11.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm11.eq)(waveTasks.taskCode, taskCode)
+      where: (0, import_drizzle_orm12.and)(
+        (0, import_drizzle_orm12.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm12.eq)(waveTasks.taskCode, taskCode)
       )
     });
     if (!task) {
@@ -4370,46 +4521,58 @@ var WaveExecutionController = class {
         retryCount: task.retryCount + 1,
         errorMessage: error
       }).where(
-        (0, import_drizzle_orm11.and)(
-          (0, import_drizzle_orm11.eq)(waveTasks.wavePlanId, wavePlanId),
-          (0, import_drizzle_orm11.eq)(waveTasks.taskCode, taskCode)
+        (0, import_drizzle_orm12.and)(
+          (0, import_drizzle_orm12.eq)(waveTasks.wavePlanId, wavePlanId),
+          (0, import_drizzle_orm12.eq)(waveTasks.taskCode, taskCode)
         )
       );
-    } else {
-      await this.db.update(waveTasks).set({
-        status: "failed",
-        completedAt: /* @__PURE__ */ new Date(),
-        errorMessage: error
-      }).where(
-        (0, import_drizzle_orm11.and)(
-          (0, import_drizzle_orm11.eq)(waveTasks.wavePlanId, wavePlanId),
-          (0, import_drizzle_orm11.eq)(waveTasks.taskCode, taskCode)
-        )
-      );
-      if (this.config.failurePolicy === "halt") {
-        await this.db.update(wavePlans).set({
-          status: "failed",
-          completedAt: /* @__PURE__ */ new Date(),
-          updatedAt: /* @__PURE__ */ new Date()
-        }).where((0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId));
-        await this.db.update(waves).set({
-          status: "failed",
-          completedAt: /* @__PURE__ */ new Date()
-        }).where(
-          (0, import_drizzle_orm11.and)(
-            (0, import_drizzle_orm11.eq)(waves.wavePlanId, wavePlanId),
-            (0, import_drizzle_orm11.eq)(waves.waveIndex, task.waveIndex)
-          )
-        );
-        await this.db.update(waveTasks).set({
-          status: "skipped"
-        }).where(
-          (0, import_drizzle_orm11.and)(
-            (0, import_drizzle_orm11.eq)(waveTasks.wavePlanId, wavePlanId),
-            (0, import_drizzle_orm11.eq)(waveTasks.status, "pending")
-          )
-        );
+      const plan = await this.db.query.wavePlans.findFirst({
+        where: (0, import_drizzle_orm12.eq)(wavePlans.id, wavePlanId)
+      });
+      if (plan?.status === "executing") {
+        const result = await this.dispatchCoordinator.redispatchTask(wavePlanId, taskCode);
+        if (result.errors.length > 0) {
+          await this.failTask(wavePlanId, taskCode, result.errors[0].error);
+        }
       }
+      return;
+    }
+    await this.failTask(wavePlanId, taskCode, error);
+  }
+  /**
+   * Terminally fail a task and apply the failure policy: 'halt' fails the plan
+   * and skips remaining pending tasks; 'continue' leaves other tasks running.
+   */
+  async failTask(wavePlanId, taskCode, error) {
+    const task = await this.db.query.waveTasks.findFirst({
+      where: (0, import_drizzle_orm12.and)(
+        (0, import_drizzle_orm12.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm12.eq)(waveTasks.taskCode, taskCode)
+      )
+    });
+    if (!task) {
+      throw new Error(`Task ${taskCode} not found in plan ${wavePlanId}`);
+    }
+    await this.db.update(waveTasks).set({ status: "failed", completedAt: /* @__PURE__ */ new Date(), errorMessage: error }).where(
+      (0, import_drizzle_orm12.and)(
+        (0, import_drizzle_orm12.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm12.eq)(waveTasks.taskCode, taskCode)
+      )
+    );
+    if (this.config.failurePolicy === "halt") {
+      await this.db.update(wavePlans).set({ status: "failed", completedAt: /* @__PURE__ */ new Date(), updatedAt: /* @__PURE__ */ new Date() }).where((0, import_drizzle_orm12.eq)(wavePlans.id, wavePlanId));
+      await this.db.update(waves).set({ status: "failed", completedAt: /* @__PURE__ */ new Date() }).where(
+        (0, import_drizzle_orm12.and)(
+          (0, import_drizzle_orm12.eq)(waves.wavePlanId, wavePlanId),
+          (0, import_drizzle_orm12.eq)(waves.waveIndex, task.waveIndex)
+        )
+      );
+      await this.db.update(waveTasks).set({ status: "skipped" }).where(
+        (0, import_drizzle_orm12.and)(
+          (0, import_drizzle_orm12.eq)(waveTasks.wavePlanId, wavePlanId),
+          (0, import_drizzle_orm12.eq)(waveTasks.status, "pending")
+        )
+      );
     }
   }
   /**
@@ -4417,9 +4580,9 @@ var WaveExecutionController = class {
    */
   async checkWaveComplete(wavePlanId, waveIndex) {
     const tasks2 = await this.db.query.waveTasks.findMany({
-      where: (0, import_drizzle_orm11.and)(
-        (0, import_drizzle_orm11.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm11.eq)(waveTasks.waveIndex, waveIndex)
+      where: (0, import_drizzle_orm12.and)(
+        (0, import_drizzle_orm12.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm12.eq)(waveTasks.waveIndex, waveIndex)
       )
     });
     return tasks2.every(
@@ -4435,23 +4598,147 @@ var WaveExecutionController = class {
 };
 
 // src/wave-planner/execution/dispatch-coordinator.ts
-var import_drizzle_orm12 = require("drizzle-orm");
+var import_drizzle_orm13 = require("drizzle-orm");
+
+// src/orchestrator/ao-cli-adapter.ts
+var import_child_process2 = require("child_process");
+var import_util2 = require("util");
+var execAsync2 = (0, import_util2.promisify)(import_child_process2.exec);
+
+// src/orchestrator/session-prompt.ts
+function buildSessionPrompt(input) {
+  const {
+    taskDescription,
+    repo,
+    fileScope,
+    predecessorContext,
+    acceptanceCriteria,
+    constraints,
+    callbackUrl,
+    sessionId
+  } = input;
+  const sections = [];
+  sections.push(`# Task
+
+${taskDescription}
+
+**Repository:** \`${repo}\``);
+  if (fileScope.length > 0) {
+    sections.push(
+      `# File Scope
+
+You hold an **exclusive lock** on the following files for the duration of this task. Do not modify files outside this set \u2014 other agents are working in parallel and edits outside your scope will conflict:
+
+` + fileScope.map((f) => `- \`${f}\``).join("\n")
+    );
+  }
+  if (predecessorContext.length > 0) {
+    const blocks = predecessorContext.map((p) => {
+      const files = p.filesModified.length > 0 ? p.filesModified.map((f) => `\`${f}\``).join(", ") : "(none recorded)";
+      const summary = p.completionSummary?.trim() || "(no summary provided)";
+      return `## ${p.taskCode} \u2014 ${p.description}
+
+- Files modified: ${files}
+- Summary: ${summary}`;
+    }).join("\n\n");
+    sections.push(
+      `# Context From Predecessors
+
+These upstream tasks completed before yours; build on their work:
+
+${blocks}`
+    );
+  }
+  if (acceptanceCriteria && acceptanceCriteria.length > 0) {
+    sections.push(
+      `# Acceptance Criteria
+
+` + acceptanceCriteria.map((c) => `- ${c}`).join("\n")
+    );
+  }
+  if (constraints && constraints.length > 0) {
+    sections.push(
+      `# Constraints
+
+` + constraints.map((c) => `- ${c}`).join("\n")
+    );
+  }
+  const statusUrl = `${callbackUrl}/status`;
+  const completeUrl = `${callbackUrl}/complete`;
+  sections.push(
+    `# Reporting Protocol
+
+You MUST report progress back to DevPilot so it can track this task. Your DevPilot session id is \`${sessionId}\` \u2014 use it as \`sessionId\` in every callback body.
+
+**On each meaningful milestone** (and at least every 2 minutes while working), POST a status update:
+
+\`\`\`bash
+curl -sS -X POST '${statusUrl}' \\
+  -H 'Content-Type: application/json' \\
+  -H 'X-DevPilot-Callback-Token: <callback-token>' \\
+  -d '{
+    "sessionId": "${sessionId}",
+    "status": "running",
+    "progressPercent": 40,
+    "currentStep": "implementing X",
+    "message": "\u2026",
+    "filesModified": ["src/lib/foo.ts"],
+    "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"
+  }'
+\`\`\`
+
+**Exactly once, when the task is done** (success or failure), POST the final completion report:
+
+\`\`\`bash
+curl -sS -X POST '${completeUrl}' \\
+  -H 'Content-Type: application/json' \\
+  -H 'X-DevPilot-Callback-Token: <callback-token>' \\
+  -d '{
+    "sessionId": "${sessionId}",
+    "success": true,
+    "filesModified": ["src/lib/foo.ts"],
+    "filesCreated": [],
+    "filesDeleted": [],
+    "summary": "One-paragraph summary of what you did.",
+    "tokensUsed": 0,
+    "costUsd": 0,
+    "durationMinutes": 0,
+    "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"
+  }'
+\`\`\`
+
+Replace \`<callback-token>\` with the token provided by your runner. Send the completion callback even if the task failed \u2014 set \`"success": false\` and include an \`"error"\` field describing what went wrong.`
+  );
+  return sections.join("\n\n");
+}
+
+// src/orchestrator/service.ts
+var serviceInstance = null;
+function getOrchestratorServiceOrNull() {
+  return serviceInstance;
+}
+
+// src/wave-planner/execution/dispatch-coordinator.ts
 var WaveDispatchCoordinator = class {
   constructor(config) {
     this.db = getDatabase();
     this.config = config;
   }
   /**
-   * Dispatch a wave of tasks
-   * Checks fleet capacity, builds dispatch requests, and dispatches in batches with staggering
+   * Dispatch a wave of tasks.
+   * Checks fleet capacity, builds dispatch requests, dispatches in batches with
+   * staggering. Tasks that can't reach an orchestrator (unconfigured/disabled)
+   * are left pending and counted as queued — never burned as failures (§9.1).
    */
-  async dispatchWave(wavePlanId, waveIndex, tasks2) {
+  async dispatchWave(wavePlanId, _waveIndex, tasks2) {
     const result = {
       dispatched: 0,
       queued: 0,
       errors: []
     };
-    const pendingTasks = tasks2.filter((t) => t.status === "pending");
+    const pendingTasks = tasks2.filter(
+      (t) => t.status === "pending" || t.status === "retrying"
+    );
     if (pendingTasks.length === 0) {
       return result;
     }
@@ -4465,34 +4752,84 @@ var WaveDispatchCoordinator = class {
       capacity.availableWorkers,
       this.config.maxConcurrentSubagents
     );
+    const ctx = await this.loadDispatchContext(wavePlanId);
     for (let i = 0; i < maxDispatch; i++) {
       const task = pendingTasks[i];
       try {
         const predecessorContext = await this.getPredecessorContext(wavePlanId, task.taskCode);
         const dispatchRequest = this.buildDispatchRequest(task, predecessorContext);
-        await this.dispatchToOrchestrator(dispatchRequest);
+        const outcome = await this.dispatchToOrchestrator(task, dispatchRequest, ctx);
         await this.db.update(waveTasks).set({
           status: "dispatched",
-          startedAt: /* @__PURE__ */ new Date()
-        }).where((0, import_drizzle_orm12.eq)(waveTasks.id, task.id));
+          startedAt: /* @__PURE__ */ new Date(),
+          assignedSessionId: outcome.sessionId
+        }).where((0, import_drizzle_orm13.eq)(waveTasks.id, task.id));
         result.dispatched++;
         if (i < maxDispatch - 1) {
           await this.delay(this.config.subagentDispatchDelayMs);
         }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : "Unknown error";
-        result.errors.push({
-          taskCode: task.taskCode,
-          error: errorMessage
-        });
+        if (errorMessage === "ORCHESTRATOR_UNAVAILABLE") {
+          result.queued++;
+          continue;
+        }
+        result.errors.push({ taskCode: task.taskCode, error: errorMessage });
         await this.db.update(waveTasks).set({
           status: "failed",
           errorMessage,
           completedAt: /* @__PURE__ */ new Date()
-        }).where((0, import_drizzle_orm12.eq)(waveTasks.id, task.id));
+        }).where((0, import_drizzle_orm13.eq)(waveTasks.id, task.id));
       }
     }
-    result.queued = pendingTasks.length - maxDispatch;
+    result.queued += pendingTasks.length - maxDispatch;
+    return result;
+  }
+  /**
+   * Re-dispatch a single task previously marked 'retrying' (controller retry
+   * path). Honours the pause guard: if the plan is no longer executing, the
+   * task stays 'retrying' and is counted as queued.
+   */
+  async redispatchTask(wavePlanId, taskCode) {
+    const result = { dispatched: 0, queued: 0, errors: [] };
+    const task = await this.db.query.waveTasks.findFirst({
+      where: (0, import_drizzle_orm13.and)((0, import_drizzle_orm13.eq)(waveTasks.wavePlanId, wavePlanId), (0, import_drizzle_orm13.eq)(waveTasks.taskCode, taskCode))
+    });
+    if (!task) {
+      result.errors.push({ taskCode, error: "NOT_FOUND" });
+      return result;
+    }
+    if (task.status !== "retrying") {
+      result.errors.push({ taskCode, error: "NOT_RETRYING" });
+      return result;
+    }
+    const plan = await this.db.query.wavePlans.findFirst({
+      where: (0, import_drizzle_orm13.eq)(wavePlans.id, wavePlanId)
+    });
+    if (plan?.status !== "executing") {
+      result.queued++;
+      return result;
+    }
+    const ctx = await this.loadDispatchContext(wavePlanId);
+    try {
+      const predecessorContext = await this.getPredecessorContext(wavePlanId, taskCode);
+      const request = this.buildDispatchRequest(task, predecessorContext);
+      const outcome = await this.dispatchToOrchestrator(task, request, ctx);
+      await this.db.update(waveTasks).set({
+        status: "dispatched",
+        startedAt: /* @__PURE__ */ new Date(),
+        assignedSessionId: outcome.sessionId
+      }).where((0, import_drizzle_orm13.eq)(waveTasks.id, task.id));
+      result.dispatched++;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Unknown error";
+      if (errorMessage === "ORCHESTRATOR_UNAVAILABLE") {
+        result.queued++;
+        return result;
+      }
+      await this.db.update(waveTasks).set({ status: "failed", errorMessage, completedAt: /* @__PURE__ */ new Date() }).where((0, import_drizzle_orm13.eq)(waveTasks.id, task.id));
+      result.errors.push({ taskCode, error: errorMessage });
+    }
     return result;
   }
   /**
@@ -4500,27 +4837,28 @@ var WaveDispatchCoordinator = class {
    * Includes task details, file scope, model, predecessor context, and constraints
    */
   buildDispatchRequest(task, predecessorContext) {
+    const filePaths = task.filePaths || [];
     return {
       wavePlanId: task.wavePlanId,
       waveIndex: task.waveIndex,
       taskCode: task.taskCode,
       taskDescription: task.description,
-      fileScope: task.filePaths || [],
+      fileScope: filePaths,
       model: this.mapModelToDispatchModel(task.recommendedModel),
       predecessorContext,
-      constraints: []
-      // TODO: Add constraints from wave plan or task
+      // File-scope guard rails so the session doesn't touch out-of-scope files.
+      constraints: filePaths.length > 0 ? [`Only modify files within: ${filePaths.join(", ")}`] : []
     };
   }
   /**
    * Get predecessor context for a task
-   * Fetches completion summaries for task's dependencies
+   * Fetches completion summaries for task's completed dependencies.
    */
   async getPredecessorContext(wavePlanId, taskCode) {
     const task = await this.db.query.waveTasks.findFirst({
-      where: (0, import_drizzle_orm12.and)(
-        (0, import_drizzle_orm12.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm12.eq)(waveTasks.taskCode, taskCode)
+      where: (0, import_drizzle_orm13.and)(
+        (0, import_drizzle_orm13.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm13.eq)(waveTasks.taskCode, taskCode)
       )
     });
     if (!task || !task.dependencies || task.dependencies.length === 0) {
@@ -4529,10 +4867,10 @@ var WaveDispatchCoordinator = class {
     const predecessorSummaries = [];
     for (const depTaskCode of task.dependencies) {
       const depTask = await this.db.query.waveTasks.findFirst({
-        where: (0, import_drizzle_orm12.and)(
-          (0, import_drizzle_orm12.eq)(waveTasks.wavePlanId, wavePlanId),
-          (0, import_drizzle_orm12.eq)(waveTasks.taskCode, depTaskCode),
-          (0, import_drizzle_orm12.eq)(waveTasks.status, "completed")
+        where: (0, import_drizzle_orm13.and)(
+          (0, import_drizzle_orm13.eq)(waveTasks.wavePlanId, wavePlanId),
+          (0, import_drizzle_orm13.eq)(waveTasks.taskCode, depTaskCode),
+          (0, import_drizzle_orm13.eq)(waveTasks.status, "completed")
         )
       });
       if (depTask) {
@@ -4540,12 +4878,34 @@ var WaveDispatchCoordinator = class {
           taskCode: depTask.taskCode,
           description: depTask.description,
           filesModified: depTask.filePaths || [],
-          completionSummary: ""
-          // TODO: Fetch from task completion data when available
+          completionSummary: depTask.completionSummary ?? ""
         });
       }
     }
     return predecessorSummaries;
+  }
+  /**
+   * Load repo / item title / linear ticket for a wave plan (wavePlans →
+   * horizonItems). Cached per dispatchWave call by the caller.
+   */
+  async loadDispatchContext(wavePlanId) {
+    const wavePlan = await this.db.query.wavePlans.findFirst({
+      where: (0, import_drizzle_orm13.eq)(wavePlans.id, wavePlanId)
+    });
+    if (!wavePlan) {
+      throw new Error(`Wave plan ${wavePlanId} not found`);
+    }
+    const item = await this.db.query.horizonItems.findFirst({
+      where: (0, import_drizzle_orm13.eq)(horizonItems.id, wavePlan.horizonItemId)
+    });
+    if (!item) {
+      throw new Error(`Horizon item ${wavePlan.horizonItemId} not found`);
+    }
+    return {
+      repo: item.repo,
+      itemTitle: item.title,
+      linearTicketId: item.linearTicketId
+    };
   }
   /**
    * Check fleet capacity
@@ -4553,7 +4913,7 @@ var WaveDispatchCoordinator = class {
    */
   async checkFleetCapacity() {
     const runningTasks = await this.db.query.waveTasks.findMany({
-      where: (0, import_drizzle_orm12.eq)(waveTasks.status, "running")
+      where: (0, import_drizzle_orm13.eq)(waveTasks.status, "running")
     });
     const activeWorkers = runningTasks.length;
     const totalWorkers = this.config.maxTotalActiveTasks;
@@ -4567,12 +4927,74 @@ var WaveDispatchCoordinator = class {
     };
   }
   /**
-   * Dispatch to orchestrator
-   * Placeholder for integration with external orchestrator
-   * TODO: Implement actual dispatch to orchestrator service
+   * Dispatch a single task to the orchestrator service.
+   *
+   * Creates a rufloSessions row, builds the session prompt + DispatchRequest,
+   * dispatches through the active adapter, and records the session ↔ task
+   * correlation on success. Throws 'ORCHESTRATOR_UNAVAILABLE' when no
+   * orchestrator is configured (caller queues rather than fails the task).
    */
-  async dispatchToOrchestrator(request) {
-    console.log(`[WaveDispatchCoordinator] Would dispatch task ${request.taskCode}`);
+  async dispatchToOrchestrator(task, request, ctx) {
+    const service = getOrchestratorServiceOrNull();
+    if (!service || !service.isEnabled) {
+      throw new Error("ORCHESTRATOR_UNAVAILABLE");
+    }
+    const [session] = await this.db.insert(rufloSessions).values({
+      repo: ctx.repo,
+      linearTicketId: ctx.linearTicketId ?? `DP-${task.taskCode}-${Date.now()}`,
+      ticketTitle: `${ctx.itemTitle} \u2014 ${task.taskCode} ${task.label}`,
+      currentWorkstream: `Wave ${task.waveIndex}`,
+      status: "ACTIVE",
+      progressPercent: 0,
+      inFlightFiles: task.filePaths ?? []
+    }).returning();
+    const prompt = buildSessionPrompt({
+      taskDescription: request.taskDescription,
+      repo: ctx.repo,
+      fileScope: request.fileScope,
+      predecessorContext: request.predecessorContext.map((p) => ({
+        taskCode: p.taskCode,
+        description: p.description,
+        filesModified: p.filesModified,
+        completionSummary: p.completionSummary
+      })),
+      constraints: request.constraints,
+      callbackUrl: this.config.callbackUrl,
+      sessionId: session.id
+    });
+    const dispatchReq = {
+      sessionId: session.id,
+      repo: ctx.repo,
+      callbackUrl: this.config.callbackUrl,
+      taskSpec: {
+        prompt,
+        filePaths: request.fileScope,
+        model: request.model,
+        workstream: `wave-${request.waveIndex}`,
+        constraints: request.constraints
+      },
+      linearTicketId: ctx.linearTicketId ?? void 0,
+      metadata: {
+        wavePlanId: request.wavePlanId,
+        waveIndex: request.waveIndex,
+        taskCode: request.taskCode
+      }
+    };
+    const response = await service.dispatch(dispatchReq);
+    if (!response.accepted) {
+      await this.db.delete(rufloSessions).where((0, import_drizzle_orm13.eq)(rufloSessions.id, session.id));
+      throw new Error(response.error ?? "DISPATCH_REJECTED");
+    }
+    await this.db.update(rufloSessions).set({
+      externalSessionId: response.orchestratorJobId ?? null,
+      orchestratorMode: service.mode,
+      updatedAt: /* @__PURE__ */ new Date()
+    }).where((0, import_drizzle_orm13.eq)(rufloSessions.id, session.id));
+    return {
+      sessionId: session.id,
+      externalJobId: response.orchestratorJobId ?? "",
+      mode: service.mode
+    };
   }
   /**
    * Map database model enum to dispatch model format
@@ -4609,6 +5031,7 @@ var WaveDispatchCoordinator = class {
   assignWaves,
   autoAdvanceWave,
   buildDAGGraph,
+  buildSpecContentForItem,
   collectFinalMetrics,
   computeCriticalPath,
   createFlatPlan,
@@ -4621,6 +5044,7 @@ var WaveDispatchCoordinator = class {
   extractWaveFromTaskCode,
   findCommonTheme,
   findTaskByCode,
+  generatePlanForItem,
   generateWaveLabel,
   generateWavePlan,
   getTasksInWave,
@@ -4631,6 +5055,7 @@ var WaveDispatchCoordinator = class {
   parseDependencies,
   parseFilePaths,
   parseWavePlanResponse,
+  projectWavePlanToPlan,
   refinementTemplate,
   scorePlan,
   simplifiedTemplate,

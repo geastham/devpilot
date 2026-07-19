@@ -1148,6 +1148,7 @@ __export(wave_planner_exports, {
   assignWaves: () => assignWaves,
   autoAdvanceWave: () => autoAdvanceWave,
   buildDAGGraph: () => buildDAGGraph,
+  buildSpecContentForItem: () => buildSpecContentForItem,
   collectFinalMetrics: () => collectFinalMetrics,
   computeCriticalPath: () => computeCriticalPath,
   createFlatPlan: () => createFlatPlan,
@@ -1160,6 +1161,7 @@ __export(wave_planner_exports, {
   extractWaveFromTaskCode: () => extractWaveFromTaskCode,
   findCommonTheme: () => findCommonTheme,
   findTaskByCode: () => findTaskByCode,
+  generatePlanForItem: () => generatePlanForItem,
   generateWaveLabel: () => generateWaveLabel,
   generateWavePlan: () => generateWavePlan,
   getTasksInWave: () => getTasksInWave,
@@ -1170,6 +1172,7 @@ __export(wave_planner_exports, {
   parseDependencies: () => parseDependencies,
   parseFilePaths: () => parseFilePaths,
   parseWavePlanResponse: () => parseWavePlanResponse,
+  projectWavePlanToPlan: () => projectWavePlanToPlan,
   refinementTemplate: () => refinementTemplate,
   scorePlan: () => scorePlan,
   simplifiedTemplate: () => simplifiedTemplate,
@@ -3784,6 +3787,152 @@ async function generateWavePlan(horizonItemId, planId, specContent, itemTitle, r
   );
 }
 
+// src/wave-planner/plan-projection.ts
+import { eq as eq3 } from "drizzle-orm";
+var MODEL_BASE_COST_USD = {
+  HAIKU: 0.01,
+  SONNET: 0.05,
+  OPUS: 0.15
+};
+var COMPLEXITY_MULTIPLIER = {
+  S: 1,
+  M: 2,
+  L: 3,
+  XL: 4
+};
+function estimateTaskCostUsd(model, complexity) {
+  return MODEL_BASE_COST_USD[model] * COMPLEXITY_MULTIPLIER[complexity];
+}
+function buildSpecContentForItem(item) {
+  const lines = [];
+  lines.push(`# ${item.title}`);
+  lines.push("");
+  const acceptanceCriteria = item.plan?.acceptanceCriteria;
+  if (acceptanceCriteria && acceptanceCriteria.length > 0) {
+    lines.push("## Acceptance Criteria");
+    for (const criterion of acceptanceCriteria) {
+      lines.push(`- ${criterion}`);
+    }
+    lines.push("");
+  }
+  const planWorkstreams = item.plan?.workstreams;
+  if (planWorkstreams && planWorkstreams.length > 0) {
+    lines.push("## Implementation Plan");
+    for (const workstream of planWorkstreams) {
+      lines.push(`### ${workstream.label}`);
+      if (workstream.tasks && workstream.tasks.length > 0) {
+        for (const task of workstream.tasks) {
+          lines.push(`- ${task.label}`);
+          if (task.filePaths && task.filePaths.length > 0) {
+            lines.push(`  Files: ${task.filePaths.join(", ")}`);
+          }
+        }
+      }
+      lines.push("");
+    }
+  }
+  return lines.join("\n");
+}
+async function generatePlanForItem(params) {
+  const { horizonItemId, title, repo, workingDir, apiKey } = params;
+  const db2 = getDatabase();
+  const specContent = buildSpecContentForItem({ title });
+  const [plan] = await db2.insert(plans).values({
+    horizonItemId,
+    estimatedCostUsd: 0,
+    baselineCostUsd: 0,
+    acceptanceCriteria: [],
+    confidenceSignals: {},
+    fleetContextSnapshot: {},
+    memorySessionsUsed: []
+  }).returning();
+  const planId = plan.id;
+  const generation = await generateWavePlan(
+    horizonItemId,
+    planId,
+    specContent,
+    title,
+    repo,
+    workingDir,
+    apiKey
+  );
+  return { generation, planId };
+}
+async function projectWavePlanToPlan(params) {
+  const { planId, generation, inFlightPaths } = params;
+  const db2 = getDatabase();
+  const [planRow] = await db2.select({ horizonItemId: plans.horizonItemId }).from(plans).where(eq3(plans.id, planId)).limit(1);
+  if (!planRow) {
+    throw new Error(`Plan not found: ${planId}`);
+  }
+  const [itemRow] = await db2.select({ repo: horizonItems.repo }).from(horizonItems).where(eq3(horizonItems.id, planRow.horizonItemId)).limit(1);
+  const repo = itemRow?.repo ?? "";
+  const maxParallelism = generation.waveAssignment.maxParallelism;
+  const projectionWaves = generation.waveAssignment.waves;
+  const workstreamIds = [];
+  const taskIds = [];
+  let totalCostUsd = 0;
+  let totalTasks = 0;
+  for (const wave of projectionWaves) {
+    const [workstream] = await db2.insert(workstreams).values({
+      planId,
+      label: wave.label,
+      repo,
+      workerCount: Math.min(wave.tasks.length, maxParallelism),
+      orderIndex: wave.waveIndex
+    }).returning();
+    workstreamIds.push(workstream.id);
+    for (let taskIdx = 0; taskIdx < wave.tasks.length; taskIdx++) {
+      const task = wave.tasks[taskIdx];
+      const model = task.recommendedModel.toUpperCase();
+      const complexity = task.complexity;
+      const estimatedCostUsd = estimateTaskCostUsd(model, complexity);
+      totalCostUsd += estimatedCostUsd;
+      totalTasks += 1;
+      const filePaths = task.filePaths;
+      const conflictWarning = inFlightPaths.some(
+        (cp) => filePaths.some((fp) => fp.includes(cp) || cp.includes(fp))
+      ) ? "File may be modified by in-flight session" : null;
+      const [insertedTask] = await db2.insert(tasks).values({
+        workstreamId: workstream.id,
+        label: task.description.slice(0, 100),
+        model,
+        complexity,
+        estimatedCostUsd,
+        filePaths,
+        conflictWarning,
+        dependsOn: task.dependencies,
+        orderIndex: taskIdx
+      }).returning();
+      taskIds.push(insertedTask.id);
+    }
+  }
+  const uniqueFilePaths = projectionWaves.flatMap((wave) => wave.tasks.flatMap((t) => t.filePaths)).filter((v, i, a) => a.indexOf(v) === i);
+  for (const path of uniqueFilePaths) {
+    const inFlight = inFlightPaths.includes(path);
+    await db2.insert(touchedFiles).values({
+      planId,
+      path,
+      status: inFlight ? "IN_FLIGHT" : "AVAILABLE",
+      inFlightVia: null
+    });
+  }
+  const criticalPathLength = generation.criticalPath.length;
+  const baselineMultiplier = Math.min(totalTasks / Math.max(criticalPathLength, 1), 2);
+  const confidenceSignals = {
+    overallConfidence: generation.score.parallelizationScore,
+    parallelizationScore: generation.score.parallelizationScore,
+    refinementIterations: generation.metrics.refinementIterations,
+    generatedByAI: generation.success
+  };
+  await db2.update(plans).set({
+    estimatedCostUsd: totalCostUsd,
+    baselineCostUsd: totalCostUsd * baselineMultiplier,
+    confidenceSignals
+  }).where(eq3(plans.id, planId));
+  return { planId, workstreamIds, taskIds };
+}
+
 // src/wave-planner/execution/types.ts
 var WAVE_SSE_TO_EVENT_TYPE = {
   wave_plan_created: "WAVE_PLAN_CREATED",
@@ -3890,7 +4039,7 @@ var ConcurrencyManager = class {
 };
 
 // src/wave-planner/execution/completion-listener.ts
-import { eq as eq3, and } from "drizzle-orm";
+import { eq as eq4, and } from "drizzle-orm";
 var CompletionListener = class {
   constructor(onWaveComplete) {
     this.onWaveComplete = onWaveComplete;
@@ -3907,8 +4056,8 @@ var CompletionListener = class {
       startedAt: /* @__PURE__ */ new Date()
     }).where(
       and(
-        eq3(waveTasks.wavePlanId, wavePlanId),
-        eq3(waveTasks.taskCode, taskCode)
+        eq4(waveTasks.wavePlanId, wavePlanId),
+        eq4(waveTasks.taskCode, taskCode)
       )
     );
     await this.emitEvent({
@@ -3925,8 +4074,8 @@ var CompletionListener = class {
   async handleTaskComplete(wavePlanId, taskCode, completionSummary) {
     const task = await this.db.query.waveTasks.findFirst({
       where: and(
-        eq3(waveTasks.wavePlanId, wavePlanId),
-        eq3(waveTasks.taskCode, taskCode)
+        eq4(waveTasks.wavePlanId, wavePlanId),
+        eq4(waveTasks.taskCode, taskCode)
       )
     });
     if (!task) {
@@ -3938,8 +4087,8 @@ var CompletionListener = class {
       errorMessage: completionSummary || null
     }).where(
       and(
-        eq3(waveTasks.wavePlanId, wavePlanId),
-        eq3(waveTasks.taskCode, taskCode)
+        eq4(waveTasks.wavePlanId, wavePlanId),
+        eq4(waveTasks.taskCode, taskCode)
       )
     );
     await this.emitEvent({
@@ -3965,8 +4114,8 @@ var CompletionListener = class {
       retryCount
     }).where(
       and(
-        eq3(waveTasks.wavePlanId, wavePlanId),
-        eq3(waveTasks.taskCode, taskCode)
+        eq4(waveTasks.wavePlanId, wavePlanId),
+        eq4(waveTasks.taskCode, taskCode)
       )
     );
     await this.emitEvent({
@@ -3983,8 +4132,8 @@ var CompletionListener = class {
   async checkWaveCompletion(wavePlanId, waveIndex) {
     const tasks2 = await this.db.query.waveTasks.findMany({
       where: and(
-        eq3(waveTasks.wavePlanId, wavePlanId),
-        eq3(waveTasks.waveIndex, waveIndex)
+        eq4(waveTasks.wavePlanId, wavePlanId),
+        eq4(waveTasks.waveIndex, waveIndex)
       )
     });
     return tasks2.every(
@@ -4018,11 +4167,11 @@ var CompletionListener = class {
 };
 
 // src/wave-planner/execution/auto-advance.ts
-import { eq as eq4, and as and2 } from "drizzle-orm";
+import { eq as eq5, and as and2 } from "drizzle-orm";
 async function autoAdvanceWave(wavePlanId, completedWaveIndex, config) {
   const db2 = getDatabase();
   const wavePlan = await db2.query.wavePlans.findFirst({
-    where: eq4(wavePlans.id, wavePlanId)
+    where: eq5(wavePlans.id, wavePlanId)
   });
   if (!wavePlan) {
     throw new Error(`Wave plan ${wavePlanId} not found`);
@@ -4043,7 +4192,7 @@ async function markWavePlanComplete(wavePlanId) {
     status: "completed",
     completedAt: /* @__PURE__ */ new Date(),
     updatedAt: /* @__PURE__ */ new Date()
-  }).where(eq4(wavePlans.id, wavePlanId));
+  }).where(eq5(wavePlans.id, wavePlanId));
   await emitEvent({
     type: "wave_plan_complete",
     wavePlanId,
@@ -4053,13 +4202,13 @@ async function markWavePlanComplete(wavePlanId) {
 async function collectFinalMetrics(wavePlanId) {
   const db2 = getDatabase();
   const wavePlan = await db2.query.wavePlans.findFirst({
-    where: eq4(wavePlans.id, wavePlanId)
+    where: eq5(wavePlans.id, wavePlanId)
   });
   if (!wavePlan) {
     throw new Error(`Wave plan ${wavePlanId} not found`);
   }
   const tasks2 = await db2.query.waveTasks.findMany({
-    where: eq4(waveTasks.wavePlanId, wavePlanId)
+    where: eq5(waveTasks.wavePlanId, wavePlanId)
   });
   const tasksCompleted = tasks2.filter((t) => t.status === "completed").length;
   const tasksFailed = tasks2.filter((t) => t.status === "failed").length;
@@ -4085,8 +4234,8 @@ async function collectFinalMetrics(wavePlanId) {
   }
   const completedWaves = await db2.query.waves.findMany({
     where: and2(
-      eq4(waves.wavePlanId, wavePlanId),
-      eq4(waves.status, "completed")
+      eq5(waves.wavePlanId, wavePlanId),
+      eq5(waves.status, "completed")
     )
   });
   const wavesExecutedCount = completedWaves.length;
@@ -4112,13 +4261,13 @@ async function advanceToNextWave(wavePlanId, nextWaveIndex) {
   await db2.update(wavePlans).set({
     currentWaveIndex: nextWaveIndex,
     updatedAt: /* @__PURE__ */ new Date()
-  }).where(eq4(wavePlans.id, wavePlanId));
+  }).where(eq5(wavePlans.id, wavePlanId));
   await db2.update(waves).set({
     status: "pending"
   }).where(
     and2(
-      eq4(waves.wavePlanId, wavePlanId),
-      eq4(waves.waveIndex, nextWaveIndex)
+      eq5(waves.wavePlanId, wavePlanId),
+      eq5(waves.waveIndex, nextWaveIndex)
     )
   );
   await emitEvent({
@@ -4149,7 +4298,7 @@ async function emitEvent(event) {
 }
 
 // src/wave-planner/execution/controller.ts
-import { eq as eq5, and as and3 } from "drizzle-orm";
+import { eq as eq6, and as and3 } from "drizzle-orm";
 var WaveExecutionController = class {
   constructor(config, dispatchCoordinator) {
     this.db = getDatabase();
@@ -4162,7 +4311,7 @@ var WaveExecutionController = class {
    */
   async approve(wavePlanId) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: eq5(wavePlans.id, wavePlanId)
+      where: eq6(wavePlans.id, wavePlanId)
     });
     if (!wavePlan) {
       throw new Error(`Wave plan ${wavePlanId} not found`);
@@ -4173,7 +4322,7 @@ var WaveExecutionController = class {
     await this.db.update(wavePlans).set({
       status: "approved",
       updatedAt: /* @__PURE__ */ new Date()
-    }).where(eq5(wavePlans.id, wavePlanId));
+    }).where(eq6(wavePlans.id, wavePlanId));
     await this.dispatchWave(wavePlanId, 0);
   }
   /**
@@ -4183,7 +4332,7 @@ var WaveExecutionController = class {
    */
   async pause(wavePlanId) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: eq5(wavePlans.id, wavePlanId)
+      where: eq6(wavePlans.id, wavePlanId)
     });
     if (!wavePlan) {
       throw new Error(`Wave plan ${wavePlanId} not found`);
@@ -4194,7 +4343,7 @@ var WaveExecutionController = class {
     await this.db.update(wavePlans).set({
       status: "paused",
       updatedAt: /* @__PURE__ */ new Date()
-    }).where(eq5(wavePlans.id, wavePlanId));
+    }).where(eq6(wavePlans.id, wavePlanId));
   }
   /**
    * Resume execution of a paused wave plan
@@ -4205,7 +4354,7 @@ var WaveExecutionController = class {
    */
   async resume(wavePlanId) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: eq5(wavePlans.id, wavePlanId),
+      where: eq6(wavePlans.id, wavePlanId),
       with: {
         waves: {
           with: {
@@ -4223,7 +4372,7 @@ var WaveExecutionController = class {
     await this.db.update(wavePlans).set({
       status: "executing",
       updatedAt: /* @__PURE__ */ new Date()
-    }).where(eq5(wavePlans.id, wavePlanId));
+    }).where(eq6(wavePlans.id, wavePlanId));
     const currentWave = wavePlan.waves.find((w) => w.waveIndex === wavePlan.currentWaveIndex);
     if (currentWave && currentWave.status !== "completed") {
       return this.dispatchWave(wavePlanId, wavePlan.currentWaveIndex);
@@ -4237,7 +4386,7 @@ var WaveExecutionController = class {
    */
   async abort(wavePlanId) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: eq5(wavePlans.id, wavePlanId)
+      where: eq6(wavePlans.id, wavePlanId)
     });
     if (!wavePlan) {
       throw new Error(`Wave plan ${wavePlanId} not found`);
@@ -4246,13 +4395,13 @@ var WaveExecutionController = class {
       status: "failed",
       completedAt: /* @__PURE__ */ new Date(),
       updatedAt: /* @__PURE__ */ new Date()
-    }).where(eq5(wavePlans.id, wavePlanId));
+    }).where(eq6(wavePlans.id, wavePlanId));
     await this.db.update(waveTasks).set({
       status: "skipped"
     }).where(
       and3(
-        eq5(waveTasks.wavePlanId, wavePlanId),
-        eq5(waveTasks.status, "pending")
+        eq6(waveTasks.wavePlanId, wavePlanId),
+        eq6(waveTasks.status, "pending")
       )
     );
   }
@@ -4263,7 +4412,7 @@ var WaveExecutionController = class {
    */
   async dispatchWave(wavePlanId, waveIndex) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: eq5(wavePlans.id, wavePlanId),
+      where: eq6(wavePlans.id, wavePlanId),
       with: {
         waves: {
           with: {
@@ -4284,12 +4433,12 @@ var WaveExecutionController = class {
         status: "executing",
         startedAt: /* @__PURE__ */ new Date(),
         updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq5(wavePlans.id, wavePlanId));
+      }).where(eq6(wavePlans.id, wavePlanId));
     }
     await this.db.update(waves).set({
       status: "dispatching",
       startedAt: /* @__PURE__ */ new Date()
-    }).where(eq5(waves.id, wave.id));
+    }).where(eq6(waves.id, wave.id));
     const result = await this.dispatchCoordinator.dispatchWave(
       wavePlanId,
       waveIndex,
@@ -4297,7 +4446,7 @@ var WaveExecutionController = class {
     );
     await this.db.update(waves).set({
       status: "active"
-    }).where(eq5(waves.id, wave.id));
+    }).where(eq6(waves.id, wave.id));
     return result;
   }
   /**
@@ -4310,14 +4459,14 @@ var WaveExecutionController = class {
       completedAt: /* @__PURE__ */ new Date()
     }).where(
       and3(
-        eq5(waveTasks.wavePlanId, wavePlanId),
-        eq5(waveTasks.taskCode, taskCode)
+        eq6(waveTasks.wavePlanId, wavePlanId),
+        eq6(waveTasks.taskCode, taskCode)
       )
     );
     const task = await this.db.query.waveTasks.findFirst({
       where: and3(
-        eq5(waveTasks.wavePlanId, wavePlanId),
-        eq5(waveTasks.taskCode, taskCode)
+        eq6(waveTasks.wavePlanId, wavePlanId),
+        eq6(waveTasks.taskCode, taskCode)
       )
     });
     if (!task) {
@@ -4326,48 +4475,50 @@ var WaveExecutionController = class {
     const waveIndex = task.waveIndex;
     const isWaveComplete = await this.checkWaveComplete(wavePlanId, waveIndex);
     if (isWaveComplete) {
-      await this.db.update(waves).set({
-        status: "completed",
-        completedAt: /* @__PURE__ */ new Date()
-      }).where(
-        and3(
-          eq5(waves.wavePlanId, wavePlanId),
-          eq5(waves.waveIndex, waveIndex)
-        )
-      );
-      const wavePlan = await this.db.query.wavePlans.findFirst({
-        where: eq5(wavePlans.id, wavePlanId)
-      });
-      if (!wavePlan) {
-        return;
-      }
-      const isLastWave = waveIndex === wavePlan.totalWaves - 1;
-      if (isLastWave) {
-        await this.db.update(wavePlans).set({
-          status: "completed",
-          completedAt: /* @__PURE__ */ new Date(),
-          updatedAt: /* @__PURE__ */ new Date()
-        }).where(eq5(wavePlans.id, wavePlanId));
-      } else if (this.config.autoAdvance) {
-        const nextWaveIndex = waveIndex + 1;
-        await this.db.update(wavePlans).set({
-          currentWaveIndex: nextWaveIndex,
-          updatedAt: /* @__PURE__ */ new Date()
-        }).where(eq5(wavePlans.id, wavePlanId));
-        await this.delay(this.config.waveAdvanceDelayMs);
-        await this.dispatchWave(wavePlanId, nextWaveIndex);
-      }
+      await this.handleWaveComplete(wavePlanId, waveIndex);
     }
   }
   /**
-   * Handle task failure
-   * Implements retry logic or marks as failed based on policy
+   * Handle wave completion: mark the wave complete, then either finish the plan
+   * (last wave) or auto-advance to the next wave. Invoked by the
+   * ExecutionBridge's CompletionListener callback (§6.5) and by onTaskComplete.
+   */
+  async handleWaveComplete(wavePlanId, waveIndex) {
+    await this.db.update(waves).set({ status: "completed", completedAt: /* @__PURE__ */ new Date() }).where(
+      and3(eq6(waves.wavePlanId, wavePlanId), eq6(waves.waveIndex, waveIndex))
+    );
+    const wavePlan = await this.db.query.wavePlans.findFirst({
+      where: eq6(wavePlans.id, wavePlanId)
+    });
+    if (!wavePlan) {
+      return;
+    }
+    const isLastWave = waveIndex === wavePlan.totalWaves - 1;
+    if (isLastWave) {
+      await this.db.update(wavePlans).set({ status: "completed", completedAt: /* @__PURE__ */ new Date(), updatedAt: /* @__PURE__ */ new Date() }).where(eq6(wavePlans.id, wavePlanId));
+      return;
+    }
+    if (this.config.autoAdvance) {
+      if (wavePlan.status !== "executing") {
+        return;
+      }
+      const nextWaveIndex = waveIndex + 1;
+      await this.db.update(wavePlans).set({ currentWaveIndex: nextWaveIndex, updatedAt: /* @__PURE__ */ new Date() }).where(eq6(wavePlans.id, wavePlanId));
+      await this.delay(this.config.waveAdvanceDelayMs);
+      await this.dispatchWave(wavePlanId, nextWaveIndex);
+    }
+  }
+  /**
+   * Handle task failure. Within the retry limit, mark the task 'retrying' and
+   * re-dispatch it immediately if the plan is still executing (a paused plan
+   * re-dispatches the task on resume). Beyond the limit, fail terminally per
+   * policy. This is where the former re-dispatch placeholder was resolved.
    */
   async onTaskFailed(wavePlanId, taskCode, error) {
     const task = await this.db.query.waveTasks.findFirst({
       where: and3(
-        eq5(waveTasks.wavePlanId, wavePlanId),
-        eq5(waveTasks.taskCode, taskCode)
+        eq6(waveTasks.wavePlanId, wavePlanId),
+        eq6(waveTasks.taskCode, taskCode)
       )
     });
     if (!task) {
@@ -4380,45 +4531,57 @@ var WaveExecutionController = class {
         errorMessage: error
       }).where(
         and3(
-          eq5(waveTasks.wavePlanId, wavePlanId),
-          eq5(waveTasks.taskCode, taskCode)
+          eq6(waveTasks.wavePlanId, wavePlanId),
+          eq6(waveTasks.taskCode, taskCode)
         )
       );
-    } else {
-      await this.db.update(waveTasks).set({
-        status: "failed",
-        completedAt: /* @__PURE__ */ new Date(),
-        errorMessage: error
-      }).where(
-        and3(
-          eq5(waveTasks.wavePlanId, wavePlanId),
-          eq5(waveTasks.taskCode, taskCode)
-        )
-      );
-      if (this.config.failurePolicy === "halt") {
-        await this.db.update(wavePlans).set({
-          status: "failed",
-          completedAt: /* @__PURE__ */ new Date(),
-          updatedAt: /* @__PURE__ */ new Date()
-        }).where(eq5(wavePlans.id, wavePlanId));
-        await this.db.update(waves).set({
-          status: "failed",
-          completedAt: /* @__PURE__ */ new Date()
-        }).where(
-          and3(
-            eq5(waves.wavePlanId, wavePlanId),
-            eq5(waves.waveIndex, task.waveIndex)
-          )
-        );
-        await this.db.update(waveTasks).set({
-          status: "skipped"
-        }).where(
-          and3(
-            eq5(waveTasks.wavePlanId, wavePlanId),
-            eq5(waveTasks.status, "pending")
-          )
-        );
+      const plan = await this.db.query.wavePlans.findFirst({
+        where: eq6(wavePlans.id, wavePlanId)
+      });
+      if (plan?.status === "executing") {
+        const result = await this.dispatchCoordinator.redispatchTask(wavePlanId, taskCode);
+        if (result.errors.length > 0) {
+          await this.failTask(wavePlanId, taskCode, result.errors[0].error);
+        }
       }
+      return;
+    }
+    await this.failTask(wavePlanId, taskCode, error);
+  }
+  /**
+   * Terminally fail a task and apply the failure policy: 'halt' fails the plan
+   * and skips remaining pending tasks; 'continue' leaves other tasks running.
+   */
+  async failTask(wavePlanId, taskCode, error) {
+    const task = await this.db.query.waveTasks.findFirst({
+      where: and3(
+        eq6(waveTasks.wavePlanId, wavePlanId),
+        eq6(waveTasks.taskCode, taskCode)
+      )
+    });
+    if (!task) {
+      throw new Error(`Task ${taskCode} not found in plan ${wavePlanId}`);
+    }
+    await this.db.update(waveTasks).set({ status: "failed", completedAt: /* @__PURE__ */ new Date(), errorMessage: error }).where(
+      and3(
+        eq6(waveTasks.wavePlanId, wavePlanId),
+        eq6(waveTasks.taskCode, taskCode)
+      )
+    );
+    if (this.config.failurePolicy === "halt") {
+      await this.db.update(wavePlans).set({ status: "failed", completedAt: /* @__PURE__ */ new Date(), updatedAt: /* @__PURE__ */ new Date() }).where(eq6(wavePlans.id, wavePlanId));
+      await this.db.update(waves).set({ status: "failed", completedAt: /* @__PURE__ */ new Date() }).where(
+        and3(
+          eq6(waves.wavePlanId, wavePlanId),
+          eq6(waves.waveIndex, task.waveIndex)
+        )
+      );
+      await this.db.update(waveTasks).set({ status: "skipped" }).where(
+        and3(
+          eq6(waveTasks.wavePlanId, wavePlanId),
+          eq6(waveTasks.status, "pending")
+        )
+      );
     }
   }
   /**
@@ -4427,8 +4590,8 @@ var WaveExecutionController = class {
   async checkWaveComplete(wavePlanId, waveIndex) {
     const tasks2 = await this.db.query.waveTasks.findMany({
       where: and3(
-        eq5(waveTasks.wavePlanId, wavePlanId),
-        eq5(waveTasks.waveIndex, waveIndex)
+        eq6(waveTasks.wavePlanId, wavePlanId),
+        eq6(waveTasks.waveIndex, waveIndex)
       )
     });
     return tasks2.every(
@@ -4444,566 +4607,7 @@ var WaveExecutionController = class {
 };
 
 // src/wave-planner/execution/dispatch-coordinator.ts
-import { eq as eq6, and as and4 } from "drizzle-orm";
-var WaveDispatchCoordinator = class {
-  constructor(config) {
-    this.db = getDatabase();
-    this.config = config;
-  }
-  /**
-   * Dispatch a wave of tasks
-   * Checks fleet capacity, builds dispatch requests, and dispatches in batches with staggering
-   */
-  async dispatchWave(wavePlanId, waveIndex, tasks2) {
-    const result = {
-      dispatched: 0,
-      queued: 0,
-      errors: []
-    };
-    const pendingTasks = tasks2.filter((t) => t.status === "pending");
-    if (pendingTasks.length === 0) {
-      return result;
-    }
-    const capacity = await this.checkFleetCapacity();
-    if (!capacity.canDispatch) {
-      result.queued = pendingTasks.length;
-      return result;
-    }
-    const maxDispatch = Math.min(
-      pendingTasks.length,
-      capacity.availableWorkers,
-      this.config.maxConcurrentSubagents
-    );
-    for (let i = 0; i < maxDispatch; i++) {
-      const task = pendingTasks[i];
-      try {
-        const predecessorContext = await this.getPredecessorContext(wavePlanId, task.taskCode);
-        const dispatchRequest = this.buildDispatchRequest(task, predecessorContext);
-        await this.dispatchToOrchestrator(dispatchRequest);
-        await this.db.update(waveTasks).set({
-          status: "dispatched",
-          startedAt: /* @__PURE__ */ new Date()
-        }).where(eq6(waveTasks.id, task.id));
-        result.dispatched++;
-        if (i < maxDispatch - 1) {
-          await this.delay(this.config.subagentDispatchDelayMs);
-        }
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : "Unknown error";
-        result.errors.push({
-          taskCode: task.taskCode,
-          error: errorMessage
-        });
-        await this.db.update(waveTasks).set({
-          status: "failed",
-          errorMessage,
-          completedAt: /* @__PURE__ */ new Date()
-        }).where(eq6(waveTasks.id, task.id));
-      }
-    }
-    result.queued = pendingTasks.length - maxDispatch;
-    return result;
-  }
-  /**
-   * Build a dispatch request for a task
-   * Includes task details, file scope, model, predecessor context, and constraints
-   */
-  buildDispatchRequest(task, predecessorContext) {
-    return {
-      wavePlanId: task.wavePlanId,
-      waveIndex: task.waveIndex,
-      taskCode: task.taskCode,
-      taskDescription: task.description,
-      fileScope: task.filePaths || [],
-      model: this.mapModelToDispatchModel(task.recommendedModel),
-      predecessorContext,
-      constraints: []
-      // TODO: Add constraints from wave plan or task
-    };
-  }
-  /**
-   * Get predecessor context for a task
-   * Fetches completion summaries for task's dependencies
-   */
-  async getPredecessorContext(wavePlanId, taskCode) {
-    const task = await this.db.query.waveTasks.findFirst({
-      where: and4(
-        eq6(waveTasks.wavePlanId, wavePlanId),
-        eq6(waveTasks.taskCode, taskCode)
-      )
-    });
-    if (!task || !task.dependencies || task.dependencies.length === 0) {
-      return [];
-    }
-    const predecessorSummaries = [];
-    for (const depTaskCode of task.dependencies) {
-      const depTask = await this.db.query.waveTasks.findFirst({
-        where: and4(
-          eq6(waveTasks.wavePlanId, wavePlanId),
-          eq6(waveTasks.taskCode, depTaskCode),
-          eq6(waveTasks.status, "completed")
-        )
-      });
-      if (depTask) {
-        predecessorSummaries.push({
-          taskCode: depTask.taskCode,
-          description: depTask.description,
-          filesModified: depTask.filePaths || [],
-          completionSummary: ""
-          // TODO: Fetch from task completion data when available
-        });
-      }
-    }
-    return predecessorSummaries;
-  }
-  /**
-   * Check fleet capacity
-   * Returns available workers and whether new tasks can be dispatched
-   */
-  async checkFleetCapacity() {
-    const runningTasks = await this.db.query.waveTasks.findMany({
-      where: eq6(waveTasks.status, "running")
-    });
-    const activeWorkers = runningTasks.length;
-    const totalWorkers = this.config.maxTotalActiveTasks;
-    const availableWorkers = Math.max(0, totalWorkers - activeWorkers);
-    const canDispatch = availableWorkers > 0;
-    return {
-      totalWorkers,
-      activeWorkers,
-      availableWorkers,
-      canDispatch
-    };
-  }
-  /**
-   * Dispatch to orchestrator
-   * Placeholder for integration with external orchestrator
-   * TODO: Implement actual dispatch to orchestrator service
-   */
-  async dispatchToOrchestrator(request) {
-    console.log(`[WaveDispatchCoordinator] Would dispatch task ${request.taskCode}`);
-  }
-  /**
-   * Map database model enum to dispatch model format
-   */
-  mapModelToDispatchModel(model) {
-    if (!model) {
-      return "sonnet";
-    }
-    const modelLower = model.toLowerCase();
-    if (modelLower === "haiku") return "haiku";
-    if (modelLower === "opus") return "opus";
-    return "sonnet";
-  }
-  /**
-   * Delay helper for staggering dispatches
-   */
-  delay(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-};
-
-// src/integrations/linear/index.ts
-var linear_exports = {};
-__export(linear_exports, {
-  DevPilotLinearClient: () => DevPilotLinearClient,
-  getLinearClient: () => getLinearClient,
-  handleLinearWebhook: () => handleLinearWebhook,
-  initLinearClient: () => initLinearClient,
-  isLinearConfigured: () => isLinearConfigured,
-  syncCompletionToLinear: () => syncCompletionToLinear,
-  syncProgressToLinear: () => syncProgressToLinear,
-  syncSessionToLinear: () => syncSessionToLinear,
-  verifyLinearWebhookSignature: () => verifyLinearWebhookSignature
-});
-
-// src/integrations/linear/client.ts
-import { LinearClient } from "@linear/sdk";
-var DevPilotLinearClient = class {
-  constructor(config) {
-    this.client = new LinearClient({ apiKey: config.apiKey });
-    this.teamId = config.teamId;
-    this.defaultProjectId = config.defaultProjectId;
-  }
-  /**
-   * Get the underlying Linear client for advanced operations
-   */
-  getClient() {
-    return this.client;
-  }
-  /**
-   * Create a new issue in Linear
-   */
-  async createIssue(input) {
-    const result = await this.client.createIssue({
-      teamId: input.teamId || this.teamId,
-      title: input.title,
-      description: input.description,
-      projectId: input.projectId || this.defaultProjectId,
-      priority: input.priority,
-      parentId: input.parentId
-    });
-    const issue = await result.issue;
-    if (!issue) {
-      throw new Error("Failed to create issue");
-    }
-    const state = await issue.state;
-    return {
-      id: issue.id,
-      identifier: issue.identifier,
-      title: issue.title,
-      description: issue.description ?? void 0,
-      state: {
-        id: state?.id ?? "",
-        name: state?.name ?? "",
-        type: state?.type ?? ""
-      },
-      priority: issue.priority,
-      url: issue.url,
-      createdAt: issue.createdAt,
-      updatedAt: issue.updatedAt
-    };
-  }
-  /**
-   * Update an existing issue
-   */
-  async updateIssue(issueId, input) {
-    const result = await this.client.updateIssue(issueId, {
-      stateId: input.stateId,
-      title: input.title,
-      description: input.description,
-      priority: input.priority
-    });
-    const issue = await result.issue;
-    if (!issue) {
-      throw new Error("Failed to update issue");
-    }
-    const state = await issue.state;
-    return {
-      id: issue.id,
-      identifier: issue.identifier,
-      title: issue.title,
-      description: issue.description ?? void 0,
-      state: {
-        id: state?.id ?? "",
-        name: state?.name ?? "",
-        type: state?.type ?? ""
-      },
-      priority: issue.priority,
-      url: issue.url,
-      createdAt: issue.createdAt,
-      updatedAt: issue.updatedAt
-    };
-  }
-  /**
-   * Get an issue by ID
-   */
-  async getIssue(issueId) {
-    try {
-      const issue = await this.client.issue(issueId);
-      if (!issue) return null;
-      const state = await issue.state;
-      return {
-        id: issue.id,
-        identifier: issue.identifier,
-        title: issue.title,
-        description: issue.description ?? void 0,
-        state: {
-          id: state?.id ?? "",
-          name: state?.name ?? "",
-          type: state?.type ?? ""
-        },
-        priority: issue.priority,
-        url: issue.url,
-        createdAt: issue.createdAt,
-        updatedAt: issue.updatedAt
-      };
-    } catch {
-      return null;
-    }
-  }
-  /**
-   * Get workflow states for a team
-   */
-  async getWorkflowStates() {
-    const team = await this.client.team(this.teamId);
-    const states = await team.states();
-    return states.nodes.map((state) => ({
-      id: state.id,
-      name: state.name,
-      type: state.type
-    }));
-  }
-  /**
-   * Move issue to a specific state
-   */
-  async moveIssueToState(issueId, stateName) {
-    const states = await this.getWorkflowStates();
-    const targetState = states.find(
-      (s) => s.name.toLowerCase() === stateName.toLowerCase()
-    );
-    if (!targetState) {
-      throw new Error(`State "${stateName}" not found`);
-    }
-    return this.updateIssue(issueId, { stateId: targetState.id });
-  }
-  /**
-   * Add a comment to an issue
-   */
-  async addComment(issueId, body) {
-    await this.client.createComment({
-      issueId,
-      body
-    });
-  }
-  /**
-   * Get team info
-   */
-  async getTeam() {
-    const team = await this.client.team(this.teamId);
-    return {
-      id: team.id,
-      name: team.name,
-      key: team.key
-    };
-  }
-  /**
-   * Get all teams the user has access to
-   */
-  async getTeams() {
-    const teamsResult = await this.client.teams();
-    return teamsResult.nodes.map((team) => ({
-      id: team.id,
-      name: team.name,
-      key: team.key
-    }));
-  }
-};
-var clientInstance = null;
-function initLinearClient(config) {
-  clientInstance = new DevPilotLinearClient(config);
-  return clientInstance;
-}
-function getLinearClient() {
-  if (!clientInstance) {
-    throw new Error("Linear client not initialized. Call initLinearClient first.");
-  }
-  return clientInstance;
-}
-function isLinearConfigured() {
-  return clientInstance !== null;
-}
-
-// src/integrations/linear/webhook-verify.ts
-import { createHmac, timingSafeEqual } from "crypto";
-function verifyLinearWebhookSignature(payload, signature, secret) {
-  if (!payload) {
-    return { valid: false, error: "Payload is required" };
-  }
-  if (!signature) {
-    return { valid: false, error: "Signature is required" };
-  }
-  if (!secret) {
-    return { valid: false, error: "Secret is required" };
-  }
-  const signatureParts = signature.split("=");
-  if (signatureParts.length !== 2 || signatureParts[0] !== "sha256") {
-    return {
-      valid: false,
-      error: 'Invalid signature format. Expected "sha256=<hash>"'
-    };
-  }
-  const receivedHash = signatureParts[1];
-  const hmac = createHmac("sha256", secret);
-  hmac.update(payload);
-  const expectedHash = hmac.digest("hex");
-  if (receivedHash.length !== expectedHash.length) {
-    return {
-      valid: false,
-      error: "Signature hash length mismatch"
-    };
-  }
-  try {
-    const receivedBuffer = Buffer.from(receivedHash, "hex");
-    const expectedBuffer = Buffer.from(expectedHash, "hex");
-    const isValid = timingSafeEqual(receivedBuffer, expectedBuffer);
-    return isValid ? { valid: true } : { valid: false, error: "Signature verification failed" };
-  } catch (error) {
-    return {
-      valid: false,
-      error: `Signature comparison error: ${error instanceof Error ? error.message : "Unknown error"}`
-    };
-  }
-}
-
-// src/integrations/linear/sync.ts
-async function syncSessionToLinear(input) {
-  if (!isLinearConfigured()) {
-    return { success: false, error: "Linear not configured" };
-  }
-  try {
-    const client = getLinearClient();
-    const team = await client.getTeam();
-    const description = buildSessionDescription(input);
-    const issue = await client.createIssue({
-      teamId: team.id,
-      title: input.ticketTitle,
-      description,
-      priority: 2
-      // Medium priority
-    });
-    return {
-      success: true,
-      issueId: issue.identifier
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    return { success: false, error: message };
-  }
-}
-async function syncProgressToLinear(input) {
-  if (!isLinearConfigured()) {
-    return { success: false, error: "Linear not configured" };
-  }
-  try {
-    const client = getLinearClient();
-    const progressMessage = buildProgressComment(input);
-    await client.addComment(input.linearTicketId, progressMessage);
-    if (input.status === "complete") {
-      await client.moveIssueToState(input.linearTicketId, "In Review");
-    } else if (input.status === "error") {
-      await client.moveIssueToState(input.linearTicketId, "Blocked");
-    }
-    return { success: true, issueId: input.linearTicketId };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    return { success: false, error: message };
-  }
-}
-async function syncCompletionToLinear(input) {
-  if (!isLinearConfigured()) {
-    return { success: false, error: "Linear not configured" };
-  }
-  try {
-    const client = getLinearClient();
-    const completionMessage = buildCompletionComment(input);
-    await client.addComment(input.linearTicketId, completionMessage);
-    const targetState = input.success ? "Done" : "Blocked";
-    await client.moveIssueToState(input.linearTicketId, targetState);
-    return { success: true, issueId: input.linearTicketId };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    return { success: false, error: message };
-  }
-}
-async function handleLinearWebhook(payload, options) {
-  if (options?.webhookSecret && options?.signature && options?.rawBody) {
-    const isValid = verifyLinearWebhookSignature(
-      options.rawBody,
-      options.signature,
-      options.webhookSecret
-    );
-    if (!isValid) {
-      throw new Error("Invalid webhook signature");
-    }
-  }
-  if (payload.type !== "Issue") {
-    return { handled: false };
-  }
-  switch (payload.action) {
-    case "update":
-      if (options?.botUserId && payload.data?.assigneeId === options.botUserId) {
-        const data = payload.data;
-        const dispatch = {
-          linearIssueId: data.id,
-          linearIdentifier: data.identifier,
-          title: data.title,
-          description: data.description,
-          teamId: data.teamId,
-          priority: data.priority,
-          labels: data.labelIds
-        };
-        return {
-          handled: true,
-          action: "bot_assigned",
-          dispatch
-        };
-      }
-      return { handled: true, action: "issue_updated" };
-    case "create":
-      return { handled: true, action: "issue_created" };
-    case "remove":
-      return { handled: true, action: "issue_removed" };
-    default:
-      return { handled: false };
-  }
-}
-function buildSessionDescription(input) {
-  const lines = [
-    "## DevPilot Session",
-    "",
-    `**Repository:** ${input.repo}`
-  ];
-  if (input.workstream) {
-    lines.push(`**Workstream:** ${input.workstream}`);
-  }
-  if (input.estimatedMinutes) {
-    lines.push(`**Estimated Time:** ${input.estimatedMinutes} minutes`);
-  }
-  if (input.planUrl) {
-    lines.push(`**Plan:** [View Plan](${input.planUrl})`);
-  }
-  lines.push("", "---", "*This ticket was created by DevPilot*");
-  return lines.join("\n");
-}
-function buildProgressComment(input) {
-  const statusEmoji = {
-    running: ":hourglass:",
-    waiting: ":pause_button:",
-    complete: ":white_check_mark:",
-    error: ":x:"
-  }[input.status];
-  const lines = [
-    `${statusEmoji} **Progress Update: ${input.progressPercent}%**`,
-    ""
-  ];
-  if (input.currentWorkstream) {
-    lines.push(`Working on: ${input.currentWorkstream}`);
-  }
-  if (input.message) {
-    lines.push("", input.message);
-  }
-  if (input.filesModified && input.filesModified.length > 0) {
-    lines.push("", "**Files modified:**");
-    input.filesModified.slice(0, 5).forEach((f) => lines.push(`- \`${f}\``));
-    if (input.filesModified.length > 5) {
-      lines.push(`- ... and ${input.filesModified.length - 5} more`);
-    }
-  }
-  return lines.join("\n");
-}
-function buildCompletionComment(input) {
-  const emoji = input.success ? ":rocket:" : ":warning:";
-  const status = input.success ? "Completed Successfully" : "Failed";
-  const lines = [
-    `${emoji} **Session ${status}**`,
-    ""
-  ];
-  if (input.prUrl) {
-    lines.push(`**Pull Request:** [View PR](${input.prUrl})`);
-  }
-  if (input.completionMessage) {
-    lines.push("", input.completionMessage);
-  }
-  if (input.filesModified.length > 0) {
-    lines.push("", "**Files modified:**");
-    input.filesModified.slice(0, 10).forEach((f) => lines.push(`- \`${f}\``));
-    if (input.filesModified.length > 10) {
-      lines.push(`- ... and ${input.filesModified.length - 10} more`);
-    }
-  }
-  return lines.join("\n");
-}
+import { eq as eq7, and as and4 } from "drizzle-orm";
 
 // src/orchestrator/index.ts
 var orchestrator_exports = {};
@@ -5117,19 +4721,19 @@ var OrchestratorClient = class {
     }
   }
 };
-var clientInstance2 = null;
+var clientInstance = null;
 function initOrchestratorClient(config) {
-  clientInstance2 = new OrchestratorClient(config);
-  return clientInstance2;
+  clientInstance = new OrchestratorClient(config);
+  return clientInstance;
 }
 function getOrchestratorClient() {
-  if (!clientInstance2) {
+  if (!clientInstance) {
     throw new Error("Orchestrator client not initialized. Call initOrchestratorClient first.");
   }
-  return clientInstance2;
+  return clientInstance;
 }
 function isOrchestratorConfigured() {
-  return clientInstance2 !== null;
+  return clientInstance !== null;
 }
 function buildDispatchRequest(params) {
   return {
@@ -6391,6 +5995,706 @@ function getStatusPollerOrNull() {
   return pollerInstance;
 }
 
+// src/wave-planner/execution/dispatch-coordinator.ts
+var WaveDispatchCoordinator = class {
+  constructor(config) {
+    this.db = getDatabase();
+    this.config = config;
+  }
+  /**
+   * Dispatch a wave of tasks.
+   * Checks fleet capacity, builds dispatch requests, dispatches in batches with
+   * staggering. Tasks that can't reach an orchestrator (unconfigured/disabled)
+   * are left pending and counted as queued — never burned as failures (§9.1).
+   */
+  async dispatchWave(wavePlanId, _waveIndex, tasks2) {
+    const result = {
+      dispatched: 0,
+      queued: 0,
+      errors: []
+    };
+    const pendingTasks = tasks2.filter(
+      (t) => t.status === "pending" || t.status === "retrying"
+    );
+    if (pendingTasks.length === 0) {
+      return result;
+    }
+    const capacity = await this.checkFleetCapacity();
+    if (!capacity.canDispatch) {
+      result.queued = pendingTasks.length;
+      return result;
+    }
+    const maxDispatch = Math.min(
+      pendingTasks.length,
+      capacity.availableWorkers,
+      this.config.maxConcurrentSubagents
+    );
+    const ctx = await this.loadDispatchContext(wavePlanId);
+    for (let i = 0; i < maxDispatch; i++) {
+      const task = pendingTasks[i];
+      try {
+        const predecessorContext = await this.getPredecessorContext(wavePlanId, task.taskCode);
+        const dispatchRequest = this.buildDispatchRequest(task, predecessorContext);
+        const outcome = await this.dispatchToOrchestrator(task, dispatchRequest, ctx);
+        await this.db.update(waveTasks).set({
+          status: "dispatched",
+          startedAt: /* @__PURE__ */ new Date(),
+          assignedSessionId: outcome.sessionId
+        }).where(eq7(waveTasks.id, task.id));
+        result.dispatched++;
+        if (i < maxDispatch - 1) {
+          await this.delay(this.config.subagentDispatchDelayMs);
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : "Unknown error";
+        if (errorMessage === "ORCHESTRATOR_UNAVAILABLE") {
+          result.queued++;
+          continue;
+        }
+        result.errors.push({ taskCode: task.taskCode, error: errorMessage });
+        await this.db.update(waveTasks).set({
+          status: "failed",
+          errorMessage,
+          completedAt: /* @__PURE__ */ new Date()
+        }).where(eq7(waveTasks.id, task.id));
+      }
+    }
+    result.queued += pendingTasks.length - maxDispatch;
+    return result;
+  }
+  /**
+   * Re-dispatch a single task previously marked 'retrying' (controller retry
+   * path). Honours the pause guard: if the plan is no longer executing, the
+   * task stays 'retrying' and is counted as queued.
+   */
+  async redispatchTask(wavePlanId, taskCode) {
+    const result = { dispatched: 0, queued: 0, errors: [] };
+    const task = await this.db.query.waveTasks.findFirst({
+      where: and4(eq7(waveTasks.wavePlanId, wavePlanId), eq7(waveTasks.taskCode, taskCode))
+    });
+    if (!task) {
+      result.errors.push({ taskCode, error: "NOT_FOUND" });
+      return result;
+    }
+    if (task.status !== "retrying") {
+      result.errors.push({ taskCode, error: "NOT_RETRYING" });
+      return result;
+    }
+    const plan = await this.db.query.wavePlans.findFirst({
+      where: eq7(wavePlans.id, wavePlanId)
+    });
+    if (plan?.status !== "executing") {
+      result.queued++;
+      return result;
+    }
+    const ctx = await this.loadDispatchContext(wavePlanId);
+    try {
+      const predecessorContext = await this.getPredecessorContext(wavePlanId, taskCode);
+      const request = this.buildDispatchRequest(task, predecessorContext);
+      const outcome = await this.dispatchToOrchestrator(task, request, ctx);
+      await this.db.update(waveTasks).set({
+        status: "dispatched",
+        startedAt: /* @__PURE__ */ new Date(),
+        assignedSessionId: outcome.sessionId
+      }).where(eq7(waveTasks.id, task.id));
+      result.dispatched++;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Unknown error";
+      if (errorMessage === "ORCHESTRATOR_UNAVAILABLE") {
+        result.queued++;
+        return result;
+      }
+      await this.db.update(waveTasks).set({ status: "failed", errorMessage, completedAt: /* @__PURE__ */ new Date() }).where(eq7(waveTasks.id, task.id));
+      result.errors.push({ taskCode, error: errorMessage });
+    }
+    return result;
+  }
+  /**
+   * Build a dispatch request for a task
+   * Includes task details, file scope, model, predecessor context, and constraints
+   */
+  buildDispatchRequest(task, predecessorContext) {
+    const filePaths = task.filePaths || [];
+    return {
+      wavePlanId: task.wavePlanId,
+      waveIndex: task.waveIndex,
+      taskCode: task.taskCode,
+      taskDescription: task.description,
+      fileScope: filePaths,
+      model: this.mapModelToDispatchModel(task.recommendedModel),
+      predecessorContext,
+      // File-scope guard rails so the session doesn't touch out-of-scope files.
+      constraints: filePaths.length > 0 ? [`Only modify files within: ${filePaths.join(", ")}`] : []
+    };
+  }
+  /**
+   * Get predecessor context for a task
+   * Fetches completion summaries for task's completed dependencies.
+   */
+  async getPredecessorContext(wavePlanId, taskCode) {
+    const task = await this.db.query.waveTasks.findFirst({
+      where: and4(
+        eq7(waveTasks.wavePlanId, wavePlanId),
+        eq7(waveTasks.taskCode, taskCode)
+      )
+    });
+    if (!task || !task.dependencies || task.dependencies.length === 0) {
+      return [];
+    }
+    const predecessorSummaries = [];
+    for (const depTaskCode of task.dependencies) {
+      const depTask = await this.db.query.waveTasks.findFirst({
+        where: and4(
+          eq7(waveTasks.wavePlanId, wavePlanId),
+          eq7(waveTasks.taskCode, depTaskCode),
+          eq7(waveTasks.status, "completed")
+        )
+      });
+      if (depTask) {
+        predecessorSummaries.push({
+          taskCode: depTask.taskCode,
+          description: depTask.description,
+          filesModified: depTask.filePaths || [],
+          completionSummary: depTask.completionSummary ?? ""
+        });
+      }
+    }
+    return predecessorSummaries;
+  }
+  /**
+   * Load repo / item title / linear ticket for a wave plan (wavePlans →
+   * horizonItems). Cached per dispatchWave call by the caller.
+   */
+  async loadDispatchContext(wavePlanId) {
+    const wavePlan = await this.db.query.wavePlans.findFirst({
+      where: eq7(wavePlans.id, wavePlanId)
+    });
+    if (!wavePlan) {
+      throw new Error(`Wave plan ${wavePlanId} not found`);
+    }
+    const item = await this.db.query.horizonItems.findFirst({
+      where: eq7(horizonItems.id, wavePlan.horizonItemId)
+    });
+    if (!item) {
+      throw new Error(`Horizon item ${wavePlan.horizonItemId} not found`);
+    }
+    return {
+      repo: item.repo,
+      itemTitle: item.title,
+      linearTicketId: item.linearTicketId
+    };
+  }
+  /**
+   * Check fleet capacity
+   * Returns available workers and whether new tasks can be dispatched
+   */
+  async checkFleetCapacity() {
+    const runningTasks = await this.db.query.waveTasks.findMany({
+      where: eq7(waveTasks.status, "running")
+    });
+    const activeWorkers = runningTasks.length;
+    const totalWorkers = this.config.maxTotalActiveTasks;
+    const availableWorkers = Math.max(0, totalWorkers - activeWorkers);
+    const canDispatch = availableWorkers > 0;
+    return {
+      totalWorkers,
+      activeWorkers,
+      availableWorkers,
+      canDispatch
+    };
+  }
+  /**
+   * Dispatch a single task to the orchestrator service.
+   *
+   * Creates a rufloSessions row, builds the session prompt + DispatchRequest,
+   * dispatches through the active adapter, and records the session ↔ task
+   * correlation on success. Throws 'ORCHESTRATOR_UNAVAILABLE' when no
+   * orchestrator is configured (caller queues rather than fails the task).
+   */
+  async dispatchToOrchestrator(task, request, ctx) {
+    const service = getOrchestratorServiceOrNull();
+    if (!service || !service.isEnabled) {
+      throw new Error("ORCHESTRATOR_UNAVAILABLE");
+    }
+    const [session] = await this.db.insert(rufloSessions).values({
+      repo: ctx.repo,
+      linearTicketId: ctx.linearTicketId ?? `DP-${task.taskCode}-${Date.now()}`,
+      ticketTitle: `${ctx.itemTitle} \u2014 ${task.taskCode} ${task.label}`,
+      currentWorkstream: `Wave ${task.waveIndex}`,
+      status: "ACTIVE",
+      progressPercent: 0,
+      inFlightFiles: task.filePaths ?? []
+    }).returning();
+    const prompt = buildSessionPrompt({
+      taskDescription: request.taskDescription,
+      repo: ctx.repo,
+      fileScope: request.fileScope,
+      predecessorContext: request.predecessorContext.map((p) => ({
+        taskCode: p.taskCode,
+        description: p.description,
+        filesModified: p.filesModified,
+        completionSummary: p.completionSummary
+      })),
+      constraints: request.constraints,
+      callbackUrl: this.config.callbackUrl,
+      sessionId: session.id
+    });
+    const dispatchReq = {
+      sessionId: session.id,
+      repo: ctx.repo,
+      callbackUrl: this.config.callbackUrl,
+      taskSpec: {
+        prompt,
+        filePaths: request.fileScope,
+        model: request.model,
+        workstream: `wave-${request.waveIndex}`,
+        constraints: request.constraints
+      },
+      linearTicketId: ctx.linearTicketId ?? void 0,
+      metadata: {
+        wavePlanId: request.wavePlanId,
+        waveIndex: request.waveIndex,
+        taskCode: request.taskCode
+      }
+    };
+    const response = await service.dispatch(dispatchReq);
+    if (!response.accepted) {
+      await this.db.delete(rufloSessions).where(eq7(rufloSessions.id, session.id));
+      throw new Error(response.error ?? "DISPATCH_REJECTED");
+    }
+    await this.db.update(rufloSessions).set({
+      externalSessionId: response.orchestratorJobId ?? null,
+      orchestratorMode: service.mode,
+      updatedAt: /* @__PURE__ */ new Date()
+    }).where(eq7(rufloSessions.id, session.id));
+    return {
+      sessionId: session.id,
+      externalJobId: response.orchestratorJobId ?? "",
+      mode: service.mode
+    };
+  }
+  /**
+   * Map database model enum to dispatch model format
+   */
+  mapModelToDispatchModel(model) {
+    if (!model) {
+      return "sonnet";
+    }
+    const modelLower = model.toLowerCase();
+    if (modelLower === "haiku") return "haiku";
+    if (modelLower === "opus") return "opus";
+    return "sonnet";
+  }
+  /**
+   * Delay helper for staggering dispatches
+   */
+  delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+};
+
+// src/integrations/linear/index.ts
+var linear_exports = {};
+__export(linear_exports, {
+  DevPilotLinearClient: () => DevPilotLinearClient,
+  getLinearClient: () => getLinearClient,
+  handleLinearWebhook: () => handleLinearWebhook,
+  initLinearClient: () => initLinearClient,
+  isLinearConfigured: () => isLinearConfigured,
+  syncCompletionToLinear: () => syncCompletionToLinear,
+  syncProgressToLinear: () => syncProgressToLinear,
+  syncSessionToLinear: () => syncSessionToLinear,
+  verifyLinearWebhookSignature: () => verifyLinearWebhookSignature
+});
+
+// src/integrations/linear/client.ts
+import { LinearClient } from "@linear/sdk";
+var DevPilotLinearClient = class {
+  constructor(config) {
+    this.client = new LinearClient({ apiKey: config.apiKey });
+    this.teamId = config.teamId;
+    this.defaultProjectId = config.defaultProjectId;
+  }
+  /**
+   * Get the underlying Linear client for advanced operations
+   */
+  getClient() {
+    return this.client;
+  }
+  /**
+   * Create a new issue in Linear
+   */
+  async createIssue(input) {
+    const result = await this.client.createIssue({
+      teamId: input.teamId || this.teamId,
+      title: input.title,
+      description: input.description,
+      projectId: input.projectId || this.defaultProjectId,
+      priority: input.priority,
+      parentId: input.parentId
+    });
+    const issue = await result.issue;
+    if (!issue) {
+      throw new Error("Failed to create issue");
+    }
+    const state = await issue.state;
+    return {
+      id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      description: issue.description ?? void 0,
+      state: {
+        id: state?.id ?? "",
+        name: state?.name ?? "",
+        type: state?.type ?? ""
+      },
+      priority: issue.priority,
+      url: issue.url,
+      createdAt: issue.createdAt,
+      updatedAt: issue.updatedAt
+    };
+  }
+  /**
+   * Update an existing issue
+   */
+  async updateIssue(issueId, input) {
+    const result = await this.client.updateIssue(issueId, {
+      stateId: input.stateId,
+      title: input.title,
+      description: input.description,
+      priority: input.priority
+    });
+    const issue = await result.issue;
+    if (!issue) {
+      throw new Error("Failed to update issue");
+    }
+    const state = await issue.state;
+    return {
+      id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      description: issue.description ?? void 0,
+      state: {
+        id: state?.id ?? "",
+        name: state?.name ?? "",
+        type: state?.type ?? ""
+      },
+      priority: issue.priority,
+      url: issue.url,
+      createdAt: issue.createdAt,
+      updatedAt: issue.updatedAt
+    };
+  }
+  /**
+   * Get an issue by ID
+   */
+  async getIssue(issueId) {
+    try {
+      const issue = await this.client.issue(issueId);
+      if (!issue) return null;
+      const state = await issue.state;
+      return {
+        id: issue.id,
+        identifier: issue.identifier,
+        title: issue.title,
+        description: issue.description ?? void 0,
+        state: {
+          id: state?.id ?? "",
+          name: state?.name ?? "",
+          type: state?.type ?? ""
+        },
+        priority: issue.priority,
+        url: issue.url,
+        createdAt: issue.createdAt,
+        updatedAt: issue.updatedAt
+      };
+    } catch {
+      return null;
+    }
+  }
+  /**
+   * Get workflow states for a team
+   */
+  async getWorkflowStates() {
+    const team = await this.client.team(this.teamId);
+    const states = await team.states();
+    return states.nodes.map((state) => ({
+      id: state.id,
+      name: state.name,
+      type: state.type
+    }));
+  }
+  /**
+   * Move issue to a specific state
+   */
+  async moveIssueToState(issueId, stateName) {
+    const states = await this.getWorkflowStates();
+    const targetState = states.find(
+      (s) => s.name.toLowerCase() === stateName.toLowerCase()
+    );
+    if (!targetState) {
+      throw new Error(`State "${stateName}" not found`);
+    }
+    return this.updateIssue(issueId, { stateId: targetState.id });
+  }
+  /**
+   * Add a comment to an issue
+   */
+  async addComment(issueId, body) {
+    await this.client.createComment({
+      issueId,
+      body
+    });
+  }
+  /**
+   * Get team info
+   */
+  async getTeam() {
+    const team = await this.client.team(this.teamId);
+    return {
+      id: team.id,
+      name: team.name,
+      key: team.key
+    };
+  }
+  /**
+   * Get all teams the user has access to
+   */
+  async getTeams() {
+    const teamsResult = await this.client.teams();
+    return teamsResult.nodes.map((team) => ({
+      id: team.id,
+      name: team.name,
+      key: team.key
+    }));
+  }
+};
+var clientInstance2 = null;
+function initLinearClient(config) {
+  clientInstance2 = new DevPilotLinearClient(config);
+  return clientInstance2;
+}
+function getLinearClient() {
+  if (!clientInstance2) {
+    throw new Error("Linear client not initialized. Call initLinearClient first.");
+  }
+  return clientInstance2;
+}
+function isLinearConfigured() {
+  return clientInstance2 !== null;
+}
+
+// src/integrations/linear/webhook-verify.ts
+import { createHmac, timingSafeEqual } from "crypto";
+function verifyLinearWebhookSignature(payload, signature, secret) {
+  if (!payload) {
+    return { valid: false, error: "Payload is required" };
+  }
+  if (!signature) {
+    return { valid: false, error: "Signature is required" };
+  }
+  if (!secret) {
+    return { valid: false, error: "Secret is required" };
+  }
+  const signatureParts = signature.split("=");
+  if (signatureParts.length !== 2 || signatureParts[0] !== "sha256") {
+    return {
+      valid: false,
+      error: 'Invalid signature format. Expected "sha256=<hash>"'
+    };
+  }
+  const receivedHash = signatureParts[1];
+  const hmac = createHmac("sha256", secret);
+  hmac.update(payload);
+  const expectedHash = hmac.digest("hex");
+  if (receivedHash.length !== expectedHash.length) {
+    return {
+      valid: false,
+      error: "Signature hash length mismatch"
+    };
+  }
+  try {
+    const receivedBuffer = Buffer.from(receivedHash, "hex");
+    const expectedBuffer = Buffer.from(expectedHash, "hex");
+    const isValid = timingSafeEqual(receivedBuffer, expectedBuffer);
+    return isValid ? { valid: true } : { valid: false, error: "Signature verification failed" };
+  } catch (error) {
+    return {
+      valid: false,
+      error: `Signature comparison error: ${error instanceof Error ? error.message : "Unknown error"}`
+    };
+  }
+}
+
+// src/integrations/linear/sync.ts
+async function syncSessionToLinear(input) {
+  if (!isLinearConfigured()) {
+    return { success: false, error: "Linear not configured" };
+  }
+  try {
+    const client = getLinearClient();
+    const team = await client.getTeam();
+    const description = buildSessionDescription(input);
+    const issue = await client.createIssue({
+      teamId: team.id,
+      title: input.ticketTitle,
+      description,
+      priority: 2
+      // Medium priority
+    });
+    return {
+      success: true,
+      issueId: issue.identifier
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return { success: false, error: message };
+  }
+}
+async function syncProgressToLinear(input) {
+  if (!isLinearConfigured()) {
+    return { success: false, error: "Linear not configured" };
+  }
+  try {
+    const client = getLinearClient();
+    const progressMessage = buildProgressComment(input);
+    await client.addComment(input.linearTicketId, progressMessage);
+    if (input.status === "complete") {
+      await client.moveIssueToState(input.linearTicketId, "In Review");
+    } else if (input.status === "error") {
+      await client.moveIssueToState(input.linearTicketId, "Blocked");
+    }
+    return { success: true, issueId: input.linearTicketId };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return { success: false, error: message };
+  }
+}
+async function syncCompletionToLinear(input) {
+  if (!isLinearConfigured()) {
+    return { success: false, error: "Linear not configured" };
+  }
+  try {
+    const client = getLinearClient();
+    const completionMessage = buildCompletionComment(input);
+    await client.addComment(input.linearTicketId, completionMessage);
+    const targetState = input.success ? "Done" : "Blocked";
+    await client.moveIssueToState(input.linearTicketId, targetState);
+    return { success: true, issueId: input.linearTicketId };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return { success: false, error: message };
+  }
+}
+async function handleLinearWebhook(payload, options) {
+  if (options?.webhookSecret && options?.signature && options?.rawBody) {
+    const isValid = verifyLinearWebhookSignature(
+      options.rawBody,
+      options.signature,
+      options.webhookSecret
+    );
+    if (!isValid) {
+      throw new Error("Invalid webhook signature");
+    }
+  }
+  if (payload.type !== "Issue") {
+    return { handled: false };
+  }
+  switch (payload.action) {
+    case "update":
+      if (options?.botUserId && payload.data?.assigneeId === options.botUserId) {
+        const data = payload.data;
+        const dispatch = {
+          linearIssueId: data.id,
+          linearIdentifier: data.identifier,
+          title: data.title,
+          description: data.description,
+          teamId: data.teamId,
+          priority: data.priority,
+          labels: data.labelIds
+        };
+        return {
+          handled: true,
+          action: "bot_assigned",
+          dispatch
+        };
+      }
+      return { handled: true, action: "issue_updated" };
+    case "create":
+      return { handled: true, action: "issue_created" };
+    case "remove":
+      return { handled: true, action: "issue_removed" };
+    default:
+      return { handled: false };
+  }
+}
+function buildSessionDescription(input) {
+  const lines = [
+    "## DevPilot Session",
+    "",
+    `**Repository:** ${input.repo}`
+  ];
+  if (input.workstream) {
+    lines.push(`**Workstream:** ${input.workstream}`);
+  }
+  if (input.estimatedMinutes) {
+    lines.push(`**Estimated Time:** ${input.estimatedMinutes} minutes`);
+  }
+  if (input.planUrl) {
+    lines.push(`**Plan:** [View Plan](${input.planUrl})`);
+  }
+  lines.push("", "---", "*This ticket was created by DevPilot*");
+  return lines.join("\n");
+}
+function buildProgressComment(input) {
+  const statusEmoji = {
+    running: ":hourglass:",
+    waiting: ":pause_button:",
+    complete: ":white_check_mark:",
+    error: ":x:"
+  }[input.status];
+  const lines = [
+    `${statusEmoji} **Progress Update: ${input.progressPercent}%**`,
+    ""
+  ];
+  if (input.currentWorkstream) {
+    lines.push(`Working on: ${input.currentWorkstream}`);
+  }
+  if (input.message) {
+    lines.push("", input.message);
+  }
+  if (input.filesModified && input.filesModified.length > 0) {
+    lines.push("", "**Files modified:**");
+    input.filesModified.slice(0, 5).forEach((f) => lines.push(`- \`${f}\``));
+    if (input.filesModified.length > 5) {
+      lines.push(`- ... and ${input.filesModified.length - 5} more`);
+    }
+  }
+  return lines.join("\n");
+}
+function buildCompletionComment(input) {
+  const emoji = input.success ? ":rocket:" : ":warning:";
+  const status = input.success ? "Completed Successfully" : "Failed";
+  const lines = [
+    `${emoji} **Session ${status}**`,
+    ""
+  ];
+  if (input.prUrl) {
+    lines.push(`**Pull Request:** [View PR](${input.prUrl})`);
+  }
+  if (input.completionMessage) {
+    lines.push("", input.completionMessage);
+  }
+  if (input.filesModified.length > 0) {
+    lines.push("", "**Files modified:**");
+    input.filesModified.slice(0, 10).forEach((f) => lines.push(`- \`${f}\``));
+    if (input.filesModified.length > 10) {
+      lines.push(`- ... and ${input.filesModified.length - 10} more`);
+    }
+  }
+  return lines.join("\n");
+}
+
 // src/wiki/index.ts
 var wiki_exports = {};
 __export(wiki_exports, {
@@ -6591,7 +6895,7 @@ Return compiled articles as a JSON array with the standard schema.`;
 // src/wiki/compiler.ts
 import Anthropic2 from "@anthropic-ai/sdk";
 import { createHash } from "crypto";
-import { eq as eq7, desc } from "drizzle-orm";
+import { eq as eq8, desc } from "drizzle-orm";
 var WikiCompiler = class {
   constructor(config) {
     this.config = config;
@@ -6609,7 +6913,7 @@ var WikiCompiler = class {
   async ingest(content, sourceType, title, origin) {
     const db2 = getDatabase();
     const contentHash = createHash("sha256").update(content).digest("hex");
-    const existing = await db2.select().from(wikiSources).where(eq7(wikiSources.contentHash, contentHash)).limit(1);
+    const existing = await db2.select().from(wikiSources).where(eq8(wikiSources.contentHash, contentHash)).limit(1);
     if (existing.length > 0) {
       return {
         sourceId: existing[0].id,
@@ -6634,7 +6938,7 @@ var WikiCompiler = class {
     const articlesCreated = [];
     const articlesUpdated = [];
     for (const article of articles) {
-      const existingArticle = await db2.select().from(wikiArticles).where(eq7(wikiArticles.slug, article.slug)).limit(1);
+      const existingArticle = await db2.select().from(wikiArticles).where(eq8(wikiArticles.slug, article.slug)).limit(1);
       if (existingArticle.length > 0) {
         await db2.update(wikiArticles).set({
           content: article.content,
@@ -6646,7 +6950,7 @@ var WikiCompiler = class {
           version: existingArticle[0].version + 1,
           status: "active",
           updatedAt: /* @__PURE__ */ new Date()
-        }).where(eq7(wikiArticles.slug, article.slug));
+        }).where(eq8(wikiArticles.slug, article.slug));
         articlesUpdated.push(article.slug);
       } else {
         await db2.insert(wikiArticles).values({
@@ -6686,7 +6990,7 @@ var WikiCompiler = class {
    */
   async query(question) {
     const db2 = getDatabase();
-    const allArticles = await db2.select().from(wikiArticles).where(eq7(wikiArticles.status, "active"));
+    const allArticles = await db2.select().from(wikiArticles).where(eq8(wikiArticles.status, "active"));
     const keywords = question.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
     const scored = allArticles.map((article) => {
       const text8 = `${article.title} ${article.content}`.toLowerCase();
@@ -6713,7 +7017,7 @@ ${s.article.content}`
     let newArticleSlug;
     if (parsed.suggestedNewArticle) {
       const newArticle = parsed.suggestedNewArticle;
-      const existingArticle = await db2.select().from(wikiArticles).where(eq7(wikiArticles.slug, newArticle.slug)).limit(1);
+      const existingArticle = await db2.select().from(wikiArticles).where(eq8(wikiArticles.slug, newArticle.slug)).limit(1);
       if (existingArticle.length === 0) {
         await db2.insert(wikiArticles).values({
           slug: newArticle.slug,
@@ -6773,7 +7077,7 @@ ${a.content}`
     const articlesMarkedStale = [];
     for (const finding of parsed.findings) {
       if (finding.type === "stale") {
-        await db2.update(wikiArticles).set({ status: "stale", updatedAt: /* @__PURE__ */ new Date() }).where(eq7(wikiArticles.slug, finding.articleSlug));
+        await db2.update(wikiArticles).set({ status: "stale", updatedAt: /* @__PURE__ */ new Date() }).where(eq8(wikiArticles.slug, finding.articleSlug));
         articlesMarkedStale.push(finding.articleSlug);
       }
     }
@@ -6871,7 +7175,7 @@ ${a.content}`
    */
   async getArticle(slug) {
     const db2 = getDatabase();
-    const results = await db2.select().from(wikiArticles).where(eq7(wikiArticles.slug, slug)).limit(1);
+    const results = await db2.select().from(wikiArticles).where(eq8(wikiArticles.slug, slug)).limit(1);
     if (results.length === 0) return null;
     const a = results[0];
     return {
@@ -6936,7 +7240,7 @@ ${a.content}`
         fs2.mkdirSync(categoryDir, { recursive: true });
       }
       for (const entry of catArticles) {
-        const fullArticle = await db2.select().from(wikiArticles).where(eq7(wikiArticles.slug, entry.slug)).limit(1);
+        const fullArticle = await db2.select().from(wikiArticles).where(eq8(wikiArticles.slug, entry.slug)).limit(1);
         if (fullArticle.length > 0) {
           const a = fullArticle[0];
           let fileContent = `# ${a.title}
@@ -7157,7 +7461,7 @@ __export(mempalace_exports, {
 
 // src/mempalace/client.ts
 import { createHash as createHash2 } from "crypto";
-import { and as and6, desc as desc2, eq as eq8, inArray, isNull, like as like2, or as or3 } from "drizzle-orm";
+import { and as and6, desc as desc2, eq as eq9, inArray, isNull, like as like2, or as or3 } from "drizzle-orm";
 var LocalShimClient = class {
   constructor() {
     this.mode = "local";
@@ -7188,7 +7492,7 @@ var LocalShimClient = class {
   }
   async ensureWing(slug, name, repo) {
     const db2 = getDatabase();
-    const existing = await db2.select().from(palaceWings).where(eq8(palaceWings.slug, slug)).limit(1);
+    const existing = await db2.select().from(palaceWings).where(eq9(palaceWings.slug, slug)).limit(1);
     if (existing.length > 0) {
       return this.rowToWing(existing[0]);
     }
@@ -7212,8 +7516,8 @@ var LocalShimClient = class {
     const contentHash = createHash2("sha256").update(input.content).digest("hex");
     const existing = await db2.select().from(palaceDrawers).where(
       and6(
-        eq8(palaceDrawers.contentHash, contentHash),
-        eq8(palaceDrawers.roomId, room.id)
+        eq9(palaceDrawers.contentHash, contentHash),
+        eq9(palaceDrawers.roomId, room.id)
       )
     ).limit(1);
     if (existing.length > 0) {
@@ -7247,11 +7551,11 @@ var LocalShimClient = class {
     const db2 = getDatabase();
     let roomIds;
     if (input.wingSlug) {
-      const wing = await db2.select().from(palaceWings).where(eq8(palaceWings.slug, input.wingSlug)).limit(1);
+      const wing = await db2.select().from(palaceWings).where(eq9(palaceWings.slug, input.wingSlug)).limit(1);
       if (wing.length === 0) {
         return { hits: [], totalScanned: 0 };
       }
-      const rooms = await db2.select().from(palaceRooms).where(eq8(palaceRooms.wingId, wing[0].id));
+      const rooms = await db2.select().from(palaceRooms).where(eq9(palaceRooms.wingId, wing[0].id));
       const ids = rooms.map((r) => r.id);
       if (ids.length === 0) {
         return { hits: [], totalScanned: 0 };
@@ -7280,12 +7584,12 @@ var LocalShimClient = class {
     const wingMap = /* @__PURE__ */ new Map();
     for (const entry of top) {
       if (!roomMap.has(entry.row.roomId)) {
-        const roomRows = await db2.select().from(palaceRooms).where(eq8(palaceRooms.id, entry.row.roomId)).limit(1);
+        const roomRows = await db2.select().from(palaceRooms).where(eq9(palaceRooms.id, entry.row.roomId)).limit(1);
         if (roomRows[0]) {
           const room = this.rowToRoom(roomRows[0]);
           roomMap.set(room.id, room);
           if (!wingMap.has(room.wingId)) {
-            const wingRows = await db2.select().from(palaceWings).where(eq8(palaceWings.id, room.wingId)).limit(1);
+            const wingRows = await db2.select().from(palaceWings).where(eq9(palaceWings.id, room.wingId)).limit(1);
             if (wingRows[0]) {
               wingMap.set(room.wingId, this.rowToWing(wingRows[0]));
             }
@@ -7313,7 +7617,7 @@ var LocalShimClient = class {
     const db2 = getDatabase();
     const wing = await this.ensureWing(input.wingSlug);
     const identity = wing.description ?? `You are assisting with the ${wing.name} project. Follow the project's existing patterns and constraints.`;
-    const rooms = await db2.select().from(palaceRooms).where(eq8(palaceRooms.wingId, wing.id));
+    const rooms = await db2.select().from(palaceRooms).where(eq9(palaceRooms.wingId, wing.id));
     const roomIds = rooms.map((r) => r.id);
     const criticalFacts = [];
     if (roomIds.length > 0) {
@@ -7337,13 +7641,13 @@ var LocalShimClient = class {
   }
   async recall(input) {
     const db2 = getDatabase();
-    const wingRows = await db2.select().from(palaceWings).where(eq8(palaceWings.slug, input.wingSlug)).limit(1);
+    const wingRows = await db2.select().from(palaceWings).where(eq9(palaceWings.slug, input.wingSlug)).limit(1);
     if (wingRows.length === 0) {
       return { topic: input.topic, closets: [], tokenEstimate: 0 };
     }
     const rooms = await db2.select().from(palaceRooms).where(
       and6(
-        eq8(palaceRooms.wingId, wingRows[0].id),
+        eq9(palaceRooms.wingId, wingRows[0].id),
         or3(
           like2(palaceRooms.topic, `%${input.topic}%`),
           like2(palaceRooms.slug, `%${input.topic}%`),
@@ -7358,7 +7662,7 @@ var LocalShimClient = class {
     const closetRows = await db2.select().from(palaceClosets).where(
       and6(
         inArray(palaceClosets.roomId, roomIds),
-        eq8(palaceClosets.tier, 2)
+        eq9(palaceClosets.tier, 2)
       )
     ).limit(input.limit ?? 5);
     const closets = closetRows.map(this.rowToCloset);
@@ -7370,9 +7674,9 @@ var LocalShimClient = class {
     const wing = await this.ensureWing(input.wingSlug);
     const existing = await db2.select().from(palaceKgTriples).where(
       and6(
-        eq8(palaceKgTriples.wingId, wing.id),
-        eq8(palaceKgTriples.subject, input.subject),
-        eq8(palaceKgTriples.predicate, input.predicate),
+        eq9(palaceKgTriples.wingId, wing.id),
+        eq9(palaceKgTriples.subject, input.subject),
+        eq9(palaceKgTriples.predicate, input.predicate),
         isNull(palaceKgTriples.validUntil)
       )
     );
@@ -7380,7 +7684,7 @@ var LocalShimClient = class {
     const now = /* @__PURE__ */ new Date();
     for (const row2 of existing) {
       if (row2.object !== input.object) {
-        await db2.update(palaceKgTriples).set({ validUntil: now }).where(eq8(palaceKgTriples.id, row2.id));
+        await db2.update(palaceKgTriples).set({ validUntil: now }).where(eq9(palaceKgTriples.id, row2.id));
         contradictions.push({
           subject: row2.subject,
           predicate: row2.predicate,
@@ -7405,12 +7709,12 @@ var LocalShimClient = class {
   }
   async kgQuery(input) {
     const db2 = getDatabase();
-    const wingRows = await db2.select().from(palaceWings).where(eq8(palaceWings.slug, input.wingSlug)).limit(1);
+    const wingRows = await db2.select().from(palaceWings).where(eq9(palaceWings.slug, input.wingSlug)).limit(1);
     if (wingRows.length === 0) return [];
-    const filters = [eq8(palaceKgTriples.wingId, wingRows[0].id)];
-    if (input.subject) filters.push(eq8(palaceKgTriples.subject, input.subject));
-    if (input.predicate) filters.push(eq8(palaceKgTriples.predicate, input.predicate));
-    if (input.object) filters.push(eq8(palaceKgTriples.object, input.object));
+    const filters = [eq9(palaceKgTriples.wingId, wingRows[0].id)];
+    if (input.subject) filters.push(eq9(palaceKgTriples.subject, input.subject));
+    if (input.predicate) filters.push(eq9(palaceKgTriples.predicate, input.predicate));
+    if (input.object) filters.push(eq9(palaceKgTriples.object, input.object));
     if (input.currentOnly) filters.push(isNull(palaceKgTriples.validUntil));
     const rows = await db2.select().from(palaceKgTriples).where(and6(...filters));
     return rows.map((r) => ({
@@ -7427,14 +7731,14 @@ var LocalShimClient = class {
   }
   async kgInvalidate(input) {
     const db2 = getDatabase();
-    const wingRows = await db2.select().from(palaceWings).where(eq8(palaceWings.slug, input.wingSlug)).limit(1);
+    const wingRows = await db2.select().from(palaceWings).where(eq9(palaceWings.slug, input.wingSlug)).limit(1);
     if (wingRows.length === 0) return { invalidatedCount: 0 };
     const now = /* @__PURE__ */ new Date();
     const result = await db2.update(palaceKgTriples).set({ validUntil: now }).where(
       and6(
-        eq8(palaceKgTriples.wingId, wingRows[0].id),
-        eq8(palaceKgTriples.subject, input.subject),
-        eq8(palaceKgTriples.predicate, input.predicate),
+        eq9(palaceKgTriples.wingId, wingRows[0].id),
+        eq9(palaceKgTriples.subject, input.subject),
+        eq9(palaceKgTriples.predicate, input.predicate),
         isNull(palaceKgTriples.validUntil)
       )
     ).returning();
@@ -7447,15 +7751,15 @@ var LocalShimClient = class {
   }
   async listRooms(wingSlug) {
     const db2 = getDatabase();
-    const wingRows = await db2.select().from(palaceWings).where(eq8(palaceWings.slug, wingSlug)).limit(1);
+    const wingRows = await db2.select().from(palaceWings).where(eq9(palaceWings.slug, wingSlug)).limit(1);
     if (wingRows.length === 0) return [];
-    const rows = await db2.select().from(palaceRooms).where(eq8(palaceRooms.wingId, wingRows[0].id));
+    const rows = await db2.select().from(palaceRooms).where(eq9(palaceRooms.wingId, wingRows[0].id));
     return rows.map(this.rowToRoom);
   }
   // ----- Internals -----
   async ensureRoom(wingId, slug, name, topic) {
     const db2 = getDatabase();
-    const existing = await db2.select().from(palaceRooms).where(and6(eq8(palaceRooms.wingId, wingId), eq8(palaceRooms.slug, slug))).limit(1);
+    const existing = await db2.select().from(palaceRooms).where(and6(eq9(palaceRooms.wingId, wingId), eq9(palaceRooms.slug, slug))).limit(1);
     if (existing.length > 0) {
       return this.rowToRoom(existing[0]);
     }
