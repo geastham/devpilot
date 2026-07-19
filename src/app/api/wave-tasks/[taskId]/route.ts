@@ -7,8 +7,7 @@ import {
   and,
 } from '@/lib/db';
 import type { Model, Complexity } from '@/lib/db';
-import { validateDAG } from '@devpilot.sh/core/wave-planner/dag-validator';
-import type { ParsedTask, ParsedEdge } from '@devpilot.sh/core/wave-planner/types';
+import { validateDAG, type ParsedTask, type ParsedEdge } from '@devpilot.sh/core/wave-planner';
 
 interface RouteParams {
   params: Promise<{ taskId: string }>;

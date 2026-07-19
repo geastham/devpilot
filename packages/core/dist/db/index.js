@@ -225,7 +225,7 @@ var eventTypeValues = [
   "WAVE_PLAN_FAILED",
   "WAVE_PLAN_REOPTIMIZING"
 ];
-var orchestratorModeValues = ["http", "ao-cli", "manual", "disabled"];
+var orchestratorModeValues = ["claude-session", "http", "ao-cli", "manual", "disabled"];
 var wavePlanStatusValues = [
   "draft",
   "approved",
@@ -580,6 +580,7 @@ var waveTasks = (0, import_sqlite_core5.sqliteTable)("wave_tasks", {
   startedAt: (0, import_sqlite_core5.integer)("started_at", { mode: "timestamp" }),
   completedAt: (0, import_sqlite_core5.integer)("completed_at", { mode: "timestamp" }),
   errorMessage: (0, import_sqlite_core5.text)("error_message"),
+  completionSummary: (0, import_sqlite_core5.text)("completion_summary"),
   retryCount: (0, import_sqlite_core5.integer)("retry_count").notNull().default(0)
 });
 var waveTasksRelations = (0, import_drizzle_orm4.relations)(waveTasks, ({ one }) => ({
@@ -861,6 +862,12 @@ var import_fs = require("fs");
 var import_path = require("path");
 var sqliteDb = null;
 var sqliteConnection = null;
+function ensureColumn(connection, table, column, ddl) {
+  const cols = connection.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) {
+    connection.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+}
 var createTableStatements = `
 -- Horizon Items
 CREATE TABLE IF NOT EXISTS horizon_items (
@@ -948,6 +955,10 @@ CREATE TABLE IF NOT EXISTS ruflo_sessions (
   estimated_remaining_minutes INTEGER NOT NULL DEFAULT 30,
   in_flight_files TEXT NOT NULL DEFAULT '[]',
   pr_url TEXT,
+  external_session_id TEXT,
+  orchestrator_mode TEXT CHECK(orchestrator_mode IN ('claude-session', 'http', 'ao-cli', 'manual', 'disabled')),
+  tokens_used INTEGER,
+  cost_usd INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -1067,6 +1078,7 @@ CREATE TABLE IF NOT EXISTS wave_tasks (
   started_at INTEGER,
   completed_at INTEGER,
   error_message TEXT,
+  completion_summary TEXT,
   retry_count INTEGER NOT NULL DEFAULT 0
 );
 
@@ -1126,6 +1138,16 @@ function createSQLiteAdapter(path) {
   sqliteConnection = new import_better_sqlite3.default(path);
   sqliteConnection.pragma("journal_mode = WAL");
   sqliteConnection.exec(createTableStatements);
+  ensureColumn(sqliteConnection, "wave_tasks", "completion_summary", "completion_summary TEXT");
+  ensureColumn(sqliteConnection, "ruflo_sessions", "external_session_id", "external_session_id TEXT");
+  ensureColumn(
+    sqliteConnection,
+    "ruflo_sessions",
+    "orchestrator_mode",
+    "orchestrator_mode TEXT CHECK(orchestrator_mode IN ('claude-session', 'http', 'ao-cli', 'manual', 'disabled'))"
+  );
+  ensureColumn(sqliteConnection, "ruflo_sessions", "tokens_used", "tokens_used INTEGER");
+  ensureColumn(sqliteConnection, "ruflo_sessions", "cost_usd", "cost_usd INTEGER");
   sqliteDb = (0, import_better_sqlite32.drizzle)(sqliteConnection, { schema: schema_exports });
   return sqliteDb;
 }

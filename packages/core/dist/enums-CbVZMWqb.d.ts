@@ -10,7 +10,7 @@ declare const fileStatusValues: readonly ["AVAILABLE", "IN_FLIGHT", "RECENTLY_MO
 type FileStatus = (typeof fileStatusValues)[number];
 declare const eventTypeValues: readonly ["SESSION_PROGRESS", "SESSION_COMPLETE", "PLAN_GENERATED", "PLAN_APPROVED", "ITEM_CREATED", "ITEM_DISPATCHED", "RUNWAY_UPDATE", "FILE_UNLOCKED", "SCORE_UPDATE", "WAVE_PLAN_CREATED", "WAVE_DISPATCHING", "WAVE_TASK_DISPATCHED", "WAVE_TASK_COMPLETE", "WAVE_TASK_FAILED", "WAVE_COMPLETE", "WAVE_ADVANCE", "WAVE_PLAN_COMPLETE", "WAVE_PLAN_FAILED", "WAVE_PLAN_REOPTIMIZING"];
 type EventType = (typeof eventTypeValues)[number];
-declare const orchestratorModeValues: readonly ["http", "ao-cli", "manual", "disabled"];
+declare const orchestratorModeValues: readonly ["claude-session", "http", "ao-cli", "manual", "disabled"];
 type OrchestratorMode = (typeof orchestratorModeValues)[number];
 declare const wavePlanStatusValues: readonly ["draft", "approved", "executing", "paused", "completed", "failed", "re-optimizing"];
 type WavePlanStatus = (typeof wavePlanStatusValues)[number];

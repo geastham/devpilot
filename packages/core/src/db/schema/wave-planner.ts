@@ -110,6 +110,7 @@ export const waveTasks = sqliteTable('wave_tasks', {
   startedAt: integer('started_at', { mode: 'timestamp' }),
   completedAt: integer('completed_at', { mode: 'timestamp' }),
   errorMessage: text('error_message'),
+  completionSummary: text('completion_summary'),
   retryCount: integer('retry_count').notNull().default(0),
 });
 

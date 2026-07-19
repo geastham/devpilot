@@ -32,6 +32,11 @@
       "types": "./dist/wiki/index.d.ts",
       "import": "./dist/wiki/index.mjs",
       "require": "./dist/wiki/index.js"
+    },
+    "./wave-planner": {
+      "types": "./dist/wave-planner/index.d.ts",
+      "import": "./dist/wave-planner/index.mjs",
+      "require": "./dist/wave-planner/index.js"
     }
   },
   "files": [

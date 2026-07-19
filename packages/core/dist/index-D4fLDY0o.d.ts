@@ -1,4 +1,4 @@
-import { W as WikiArticleStatus, a as WikiSourceType } from './enums-CbO5o4Mt.js';
+import { W as WikiArticleStatus, a as WikiSourceType } from './enums-CbVZMWqb.js';
 
 /** Result of an AI generation call */
 interface WikiGenerationResult {

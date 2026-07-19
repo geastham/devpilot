@@ -7,9 +7,11 @@ import {
   eq,
   and,
 } from '@/lib/db';
-import { WaveExecutionController } from '@devpilot.sh/core/wave-planner/execution/controller';
-import { WaveDispatchCoordinator } from '@devpilot.sh/core/wave-planner/execution/dispatch-coordinator';
-import type { WaveExecutionConfig } from '@devpilot.sh/core/wave-planner/execution/types';
+import {
+  WaveExecutionController,
+  WaveDispatchCoordinator,
+  type WaveExecutionConfig,
+} from '@devpilot.sh/core/wave-planner';
 
 interface RouteParams {
   params: Promise<{ planId: string }>;

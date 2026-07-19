@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { cn } from '@/lib/utils';
-import type { WavePlan, WaveTask, DependencyEdge } from '@devpilot.sh/core/db/schema';
+import type { WavePlan, WaveTask, DependencyEdge } from '@devpilot.sh/core/db';
 
 // ============================================================================
 // Types
