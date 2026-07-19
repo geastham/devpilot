@@ -1,0 +1,33 @@
+
+> @devpilot.sh/benchmarks@0.1.0 build /home/user/devpilot/packages/benchmarks
+> tsup
+
+CLI Building entry: src/index.ts, src/cli/index.ts
+CLI Using tsconfig: tsconfig.json
+CLI tsup v8.5.1
+CLI Using tsup config: /home/user/devpilot/packages/benchmarks/tsup.config.ts
+CLI Target: es2020
+CLI Cleaning output folder
+CJS Build start
+ESM Build start
+CJS dist/index.js         155.92 KB
+CJS dist/cli/index.js     179.09 KB
+CJS dist/index.js.map     293.30 KB
+CJS dist/cli/index.js.map 340.72 KB
+CJS ⚡️ Build success in 299ms
+ESM dist/index.mjs         148.96 KB
+ESM dist/cli/index.mjs     173.89 KB
+ESM dist/index.mjs.map     289.31 KB
+ESM dist/cli/index.mjs.map 340.48 KB
+ESM ⚡️ Build success in 299ms
+DTS Build start
+src/index.ts(43,3): error TS2724: '"./metrics/token-tracker"' has no exported member named 'createTokenTracker'. Did you mean 'TokenTracker'?
+src/index.ts(44,3): error TS2305: Module '"./metrics/token-tracker"' has no exported member 'parseTokenUsage'.
+
+Error: error occurred in dts build
+    at Worker.<anonymous> (/home/user/devpilot/node_modules/.pnpm/tsup@8.5.1_jiti@1.21.7_postcss@8.5.8_tsx@4.21.0_typescript@5.9.3_yaml@2.8.2/node_modules/tsup/dist/index.js:1545:26)
+    at Worker.emit (node:events:519:28)
+    at MessagePort.<anonymous> (node:internal/worker:270:53)
+    at [nodejs.internal.kHybridDispatch] (node:internal/event_target:843:20)
+    at MessagePort.<anonymous> (node:internal/per_context/messageport:23:28)
+DTS Build error
