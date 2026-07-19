@@ -9,7 +9,12 @@ import {
   eq,
   desc,
   type WavePlanStatus,
+  type EventType,
+  type Wave,
+  type WaveTask,
 } from '@/lib/db';
+
+type WaveWithTasks = Wave & { tasks: WaveTask[] };
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -89,7 +94,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
 
     // If approving, start the first wave
     if (action === 'approve' && newStatus === 'executing') {
-      const firstWave = wavePlan.waves.find((w) => w.waveIndex === 0);
+      const firstWave = wavePlan.waves.find((w: WaveWithTasks) => w.waveIndex === 0);
       if (firstWave) {
         await db
           .update(waves)
@@ -104,9 +109,9 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     // If pausing or aborting, update running tasks
     if (action === 'pause' || action === 'abort') {
       const runningTaskIds = wavePlan.waves
-        .flatMap((w) => w.tasks)
-        .filter((t) => t.status === 'running' || t.status === 'dispatched')
-        .map((t) => t.id);
+        .flatMap((w: WaveWithTasks) => w.tasks)
+        .filter((t: WaveTask) => t.status === 'running' || t.status === 'dispatched')
+        .map((t: WaveTask) => t.id);
 
       if (runningTaskIds.length > 0) {
         for (const taskId of runningTaskIds) {
@@ -227,7 +232,7 @@ function getStatusTransition(
 /**
  * Get activity event type based on action
  */
-function getEventType(action: StatusUpdateRequest['action']): string {
+function getEventType(action: StatusUpdateRequest['action']): EventType {
   switch (action) {
     case 'approve':
       return 'PLAN_APPROVED';

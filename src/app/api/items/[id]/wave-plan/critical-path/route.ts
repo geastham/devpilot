@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, horizonItems, wavePlans, eq, desc } from '@/lib/db';
+import type { WaveTask, DependencyEdge } from '@/lib/db';
 import { computeCriticalPath } from '@devpilot.sh/core/wave-planner';
 import type { ParsedTask, ParsedEdge } from '@devpilot.sh/core/wave-planner';
 
@@ -45,7 +46,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     }
 
     // Convert database tasks to ParsedTask format for critical path computation
-    const parsedTasks: ParsedTask[] = wavePlan.waveTasks.map((task) => ({
+    const parsedTasks: ParsedTask[] = wavePlan.waveTasks.map((task: WaveTask) => ({
       taskCode: task.taskCode,
       description: task.description,
       filePaths: task.filePaths || [],
@@ -56,7 +57,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     }));
 
     // Convert dependency edges to ParsedEdge format
-    const parsedEdges: ParsedEdge[] = wavePlan.dependencyEdges.map((edge) => ({
+    const parsedEdges: ParsedEdge[] = wavePlan.dependencyEdges.map((edge: DependencyEdge) => ({
       from: edge.fromTaskCode,
       to: edge.toTaskCode,
       type: edge.edgeType as 'hard' | 'soft',
@@ -67,7 +68,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 
     // Enhance with real-time progress information
     const tasksOnCriticalPath = criticalPath.path.map((taskCode) => {
-      const task = wavePlan.waveTasks.find((t) => t.taskCode === taskCode);
+      const task = wavePlan.waveTasks.find((t: WaveTask) => t.taskCode === taskCode);
       const annotation = criticalPath.annotations.get(taskCode);
 
       return {

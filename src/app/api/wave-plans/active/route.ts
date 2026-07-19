@@ -6,6 +6,9 @@ import {
   waveTasks,
   eq,
 } from '@/lib/db';
+import type { Wave, WaveTask } from '@/lib/db';
+
+type WaveWithTasks = Wave & { tasks: WaveTask[] };
 
 interface ActiveWavePlanSummary {
   id: string;
@@ -52,14 +55,14 @@ export async function GET(request: NextRequest) {
     // Build summary for each active wave plan
     const summaries: ActiveWavePlanSummary[] = activeWavePlans.map(plan => {
       // Calculate task statistics
-      const allTasks = plan.waves.flatMap(w => w.tasks);
-      const completedTasks = allTasks.filter(t => t.status === 'completed').length;
+      const allTasks = plan.waves.flatMap((w: WaveWithTasks) => w.tasks);
+      const completedTasks = allTasks.filter((t: WaveTask) => t.status === 'completed').length;
       const runningTasks = allTasks.filter(
-        t => t.status === 'running' || t.status === 'dispatched'
+        (t: WaveTask) => t.status === 'running' || t.status === 'dispatched'
       ).length;
-      const pendingTasks = allTasks.filter(t => t.status === 'pending').length;
-      const failedTasks = allTasks.filter(t => t.status === 'failed').length;
-      const skippedTasks = allTasks.filter(t => t.status === 'skipped').length;
+      const pendingTasks = allTasks.filter((t: WaveTask) => t.status === 'pending').length;
+      const failedTasks = allTasks.filter((t: WaveTask) => t.status === 'failed').length;
+      const skippedTasks = allTasks.filter((t: WaveTask) => t.status === 'skipped').length;
 
       // Calculate completion percentage
       const completionPercentage =
@@ -71,7 +74,7 @@ export async function GET(request: NextRequest) {
 
       // Get current wave info
       const currentWave = plan.waves.find(
-        w => w.waveIndex === plan.currentWaveIndex
+        (w: WaveWithTasks) => w.waveIndex === plan.currentWaveIndex
       );
 
       let currentWaveInfo: ActiveWavePlanSummary['currentWave'] = null;
@@ -82,9 +85,9 @@ export async function GET(request: NextRequest) {
           label: currentWave.label,
           status: currentWave.status,
           totalTasks: waveTasks.length,
-          completedTasks: waveTasks.filter(t => t.status === 'completed').length,
+          completedTasks: waveTasks.filter((t: WaveTask) => t.status === 'completed').length,
           runningTasks: waveTasks.filter(
-            t => t.status === 'running' || t.status === 'dispatched'
+            (t: WaveTask) => t.status === 'running' || t.status === 'dispatched'
           ).length,
         };
       }

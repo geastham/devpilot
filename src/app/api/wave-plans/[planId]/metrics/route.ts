@@ -7,6 +7,9 @@ import {
   wavePlanMetrics,
   eq,
 } from '@/lib/db';
+import type { Wave, WaveTask } from '@/lib/db';
+
+type WaveWithTasks = Wave & { tasks: WaveTask[] };
 
 interface RouteParams {
   params: Promise<{ planId: string }>;
@@ -55,17 +58,17 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     }
 
     // Calculate per-wave statistics
-    const waveStatistics: WaveStatistics[] = wavePlan.waves.map(wave => {
+    const waveStatistics: WaveStatistics[] = wavePlan.waves.map((wave: WaveWithTasks) => {
       const tasks = wave.tasks;
 
-      const completedTasks = tasks.filter(t => t.status === 'completed');
+      const completedTasks = tasks.filter((t: WaveTask) => t.status === 'completed');
       const runningTasks = tasks.filter(
-        t => t.status === 'running' || t.status === 'dispatched'
+        (t: WaveTask) => t.status === 'running' || t.status === 'dispatched'
       );
-      const failedTasks = tasks.filter(t => t.status === 'failed');
-      const pendingTasks = tasks.filter(t => t.status === 'pending');
-      const skippedTasks = tasks.filter(t => t.status === 'skipped');
-      const retriedTasks = tasks.filter(t => t.retryCount > 0);
+      const failedTasks = tasks.filter((t: WaveTask) => t.status === 'failed');
+      const pendingTasks = tasks.filter((t: WaveTask) => t.status === 'pending');
+      const skippedTasks = tasks.filter((t: WaveTask) => t.status === 'skipped');
+      const retriedTasks = tasks.filter((t: WaveTask) => t.retryCount > 0);
 
       // Calculate wave duration
       let durationMs: number | null = null;
@@ -81,8 +84,8 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       let avgTaskDurationMs: number | null = null;
       if (completedTasks.length > 0) {
         const taskDurations = completedTasks
-          .filter(t => t.startedAt && t.completedAt)
-          .map(t => {
+          .filter((t: WaveTask) => t.startedAt && t.completedAt)
+          .map((t: WaveTask) => {
             const started = t.startedAt as Date;
             const completed = t.completedAt as Date;
             return completed.getTime() - started.getTime();
@@ -90,7 +93,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 
         if (taskDurations.length > 0) {
           avgTaskDurationMs =
-            taskDurations.reduce((sum, d) => sum + d, 0) /
+            taskDurations.reduce((sum: number, d: number) => sum + d, 0) /
             taskDurations.length;
         }
       }
@@ -114,16 +117,16 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     });
 
     // Calculate overall statistics
-    const allTasks = wavePlan.waves.flatMap(w => w.tasks);
+    const allTasks = wavePlan.waves.flatMap((w: WaveWithTasks) => w.tasks);
     const totalTasks = allTasks.length;
-    const completedTasks = allTasks.filter(t => t.status === 'completed').length;
-    const failedTasks = allTasks.filter(t => t.status === 'failed').length;
+    const completedTasks = allTasks.filter((t: WaveTask) => t.status === 'completed').length;
+    const failedTasks = allTasks.filter((t: WaveTask) => t.status === 'failed').length;
     const runningTasks = allTasks.filter(
-      t => t.status === 'running' || t.status === 'dispatched'
+      (t: WaveTask) => t.status === 'running' || t.status === 'dispatched'
     ).length;
-    const pendingTasks = allTasks.filter(t => t.status === 'pending').length;
-    const skippedTasks = allTasks.filter(t => t.status === 'skipped').length;
-    const retriedTasks = allTasks.filter(t => t.retryCount > 0).length;
+    const pendingTasks = allTasks.filter((t: WaveTask) => t.status === 'pending').length;
+    const skippedTasks = allTasks.filter((t: WaveTask) => t.status === 'skipped').length;
+    const retriedTasks = allTasks.filter((t: WaveTask) => t.retryCount > 0).length;
 
     // Calculate overall duration
     let totalWallClockMs: number | null = null;
@@ -145,7 +148,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 
     // Calculate waves completed
     const wavesCompleted = wavePlan.waves.filter(
-      w => w.status === 'completed'
+      (w: WaveWithTasks) => w.status === 'completed'
     ).length;
 
     // Get stored metrics if available

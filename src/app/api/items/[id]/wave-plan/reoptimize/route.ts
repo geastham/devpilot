@@ -7,6 +7,7 @@ import {
   wavePlanMetrics,
   activityEvents,
   eq,
+  type WaveTask,
 } from '@/lib/db';
 import { WavePlanGenerator } from '@devpilot.sh/core/wave-planner';
 
@@ -109,10 +110,10 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
         reason,
         currentWaveIndex: existingWavePlan.currentWaveIndex,
         completedTasks: existingWavePlan.waveTasks.filter(
-          (t) => t.status === 'completed'
+          (t: WaveTask) => t.status === 'completed'
         ).length,
         remainingTasks: existingWavePlan.waveTasks.filter(
-          (t) => t.status !== 'completed' && t.status !== 'skipped'
+          (t: WaveTask) => t.status !== 'completed' && t.status !== 'skipped'
         ).length,
       },
     });
@@ -145,7 +146,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     // Reoptimize the wave plan
     const result = await generator.reoptimize(
       wavePlanId,
-      item.spec || item.title, // Use spec if available, otherwise title
+      item.title, // Horizon items have no separate spec field; use the title
       item.title,
       item.repo,
       {
