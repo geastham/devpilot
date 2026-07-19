@@ -3956,16 +3956,28 @@ var ConcurrencyManager = class {
 
 // src/wave-planner/execution/completion-listener.ts
 import { eq as eq4, and } from "drizzle-orm";
+var TERMINAL_TASK_STATUSES = /* @__PURE__ */ new Set(["completed", "failed", "skipped"]);
 var CompletionListener = class {
-  constructor(onWaveComplete) {
+  constructor(onWaveComplete, options) {
     this.onWaveComplete = onWaveComplete;
     this.db = getDatabase();
+    this.retryLimit = options?.retryLimit ?? 1;
   }
   /**
    * Handle task started event.
-   * Updates the wave task status to 'running' and records start time.
+   * Idempotently marks the wave task 'running'; a task already in a terminal
+   * state is not resurrected (a late job:started after completion is ignored).
    */
   async handleTaskStarted(wavePlanId, taskCode, sessionId) {
+    const task = await this.db.query.waveTasks.findFirst({
+      where: and(
+        eq4(waveTasks.wavePlanId, wavePlanId),
+        eq4(waveTasks.taskCode, taskCode)
+      )
+    });
+    if (!task || TERMINAL_TASK_STATUSES.has(task.status)) {
+      return;
+    }
     await this.db.update(waveTasks).set({
       status: "running",
       assignedSessionId: sessionId,
@@ -3997,10 +4009,13 @@ var CompletionListener = class {
     if (!task) {
       throw new Error(`Task ${taskCode} not found in wave plan ${wavePlanId}`);
     }
+    if (task.status === "completed") {
+      return;
+    }
     await this.db.update(waveTasks).set({
       status: "completed",
       completedAt: /* @__PURE__ */ new Date(),
-      errorMessage: completionSummary || null
+      completionSummary: completionSummary ?? null
     }).where(
       and(
         eq4(waveTasks.wavePlanId, wavePlanId),
@@ -4023,7 +4038,7 @@ var CompletionListener = class {
    * Updates task status based on retry count and emits failure event.
    */
   async handleTaskFailed(wavePlanId, taskCode, error, retryCount) {
-    const status = retryCount < 1 ? "retrying" : "failed";
+    const status = retryCount < this.retryLimit ? "retrying" : "failed";
     await this.db.update(waveTasks).set({
       status,
       errorMessage: error,
@@ -4075,7 +4090,9 @@ var CompletionListener = class {
         message = `Wave event: ${event.type}`;
     }
     await this.db.insert(activityEvents).values({
-      type: event.type,
+      // Map the lowercase SSE type to the uppercase activity_events enum value
+      // (the CHECK constraint only accepts uppercase members).
+      type: toActivityEventType(event.type),
       message,
       metadata: event
     });
@@ -4207,7 +4224,8 @@ async function emitEvent(event) {
       message = `Wave event: ${event.type}`;
   }
   await db2.insert(activityEvents).values({
-    type: event.type,
+    // Uppercase enum value required by the activity_events CHECK constraint.
+    type: toActivityEventType(event.type),
     message,
     metadata: event
   });
