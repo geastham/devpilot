@@ -11,16 +11,18 @@
 
 ## 1. Document Index
 
-| Doc | Scope | Depends on |
-|---|---|---|
-| `01-TIER1-EXECUTION-LOOP.md` | Close the dispatch loop: real wave dispatch, orchestrator in the Next app, claude-session adapter contract, unified AI plan generation, pause/resume routes | — |
-| `02-TIER2-SPEC-COMPLETION.md` | Finish specced items: DAG modal, replan modal, Phase-4 layouts, Conductor Score completion, Conversational Mode | 01 |
-| `03-TIER3-HARDENING.md` | Bridge pipeline completion, Linear config persistence + signature verification, real `devpilot status`, measured runway math, repo hygiene | Partially independent (see doc) |
-| `10-CI-GATED-WAVE-ADVANCE.md` | GitHub PR/CI integration; wave auto-advance gated on green CI | 01–03 |
-| `11-DISPATCH-COST-BUDGETS.md` | Runtime token/cost tracking, budget caps, enforcement | 01–03 |
-| `12-SESSION-TRANSCRIPT-VIEWER.md` | Transcript capture contract, storage, live-tail viewer + replay | 01–03 |
-| `13-BENCHMARKS-IN-CI.md` | Benchmark suite in GitHub Actions, regression thresholds, trend UI | 01 (weakest coupling — may start early) |
-| `14-AI-ASSIST-PANEL.md` | Server-side AI advisor replacing rule-based Assist Panel | 01–03 |
+| Doc | Scope | Waves / Tasks / ACs | Depends on |
+|---|---|---|---|
+| `01-TIER1-EXECUTION-LOOP.md` | Close the dispatch loop: real wave dispatch, orchestrator in the Next app, claude-session adapter contract, unified AI plan generation, pause/resume routes | 4 / 17 / 14 | — |
+| `02-TIER2-SPEC-COMPLETION.md` | Finish specced items: DAG modal, replan modal, Phase-4 layouts, Conductor Score completion, Conversational Mode | 5 / 29 / 16 | 01 |
+| `03-TIER3-HARDENING.md` | Bridge pipeline completion, Linear config persistence + signature verification, real `devpilot status`, measured runway math, repo hygiene | 4 / 24 / 12 | Items 11–14 parallel to 01/02; item 10 soft-depends on 01 (see doc) |
+| `10-CI-GATED-WAVE-ADVANCE.md` | GitHub PR/CI integration; wave auto-advance gated on green CI | 5 / 24 / 17 | 01–03 |
+| `11-DISPATCH-COST-BUDGETS.md` | Runtime token/cost tracking, budget caps, enforcement | 4 / 24 / 18 | 01–03 (score task soft-depends on 02) |
+| `12-SESSION-TRANSCRIPT-VIEWER.md` | Transcript capture contract, storage, live-tail viewer + replay | 5 / 16 / 12 | 01–03 |
+| `13-BENCHMARKS-IN-CI.md` | Benchmark suite in GitHub Actions, regression thresholds, trend UI | 4 / 11 / 12 | 01 only (baseline scenario has zero tier deps — may start early) |
+| `14-AI-ASSIST-PANEL.md` | Server-side AI advisor replacing rule-based Assist Panel | 5 / 15 / 13 | 01–03 |
+
+**Program totals: 36 waves · 160 tasks · 122 acceptance criteria** (+5 program-level).
 
 Source specs these build on: `spec/DESIGN.md` (surface/UX TRD), `spec/WAVE-PLANNER.md`
 (wave model + execution), `spec/BENCHMARK-SUITE.md` (benchmark harness), `design/*`
@@ -71,9 +73,13 @@ Source specs these build on: `spec/DESIGN.md` (surface/UX TRD), `spec/WAVE-PLANN
 ```
 
 Tier 4 TRDs are mutually independent and may run as parallel programs, with one
-exception: 10 and 12 both extend the claude-session dispatch/callback contract from
-01 — if run concurrently, land contract changes in separate files/fields as specced
-(each TRD lists its exact contract extensions) and rebase deliberately.
+caveat: 10, 11, and 12 all extend the claude-session dispatch/callback contract from
+01 (see §3.3) — if run concurrently, land contract changes as the separate optional
+fields specced per TRD and rebase deliberately. Files co-edited by multiple TRDs
+(sequence-sensitive, rebase between programs): `packages/core/src/orchestrator/types.ts`
+(10, 11, 12), `packages/core/src/db/adapters/sqlite.ts` DDL (all schema-adding TRDs),
+`src/app/api/fleet/state/route.ts` (01, 03, 11), `src/components/plan/PlanReviewCard.tsx`
+(02, 10, 11).
 
 ---
 
@@ -88,7 +94,43 @@ exception: 10 and 12 both extend the claude-session dispatch/callback contract f
 | Task-ID prefixes | `T1-`, `T2-`, `T3-`, `CI-`, `CB-`, `TV-`, `BC-`, `AP-` |
 | AC prefixes | `T1-AC-`, `T2-AC-`, `T3-AC-`, `CI-AC-`, `CB-AC-`, `TV-AC-`, `BC-AC-`, `AP-AC-` |
 
-### 3.2 Code conventions
+### 3.2 Binding cross-TRD decisions
+
+Decisions made in one TRD that all others must respect:
+
+- **`ensureColumn` migrations** — TRD 01 introduces a PRAGMA-guarded `ensureColumn`
+  helper in `packages/core/src/db/adapters/sqlite.ts`; it is the sanctioned mechanism
+  for adding columns to live databases (`CREATE TABLE IF NOT EXISTS` cannot alter
+  existing tables). TRD 02+ reuse it, never reinvent it.
+- **Activity-event CHECK constraint is frozen** — new event families that don't fit
+  the existing `activity_events.type` CHECK either widen it explicitly in DDL (TRD 10
+  does) or bypass `activity_events` entirely (TRD 02's `chat:message` polls its own
+  table). Lowercase wire event names map to uppercase DB types via TRD 01's
+  `toActivityEventType()`.
+- **Conductor Score is six-dimensional** after TRD 02: fleetUtilization 250,
+  runwayHealth 250, planAccuracy 200, costEfficiency 200, velocityTrend 100,
+  parallelizationQuality 150; `total = min(1000, sum)`.
+- **`integrationConfigs` is the home for all provider credentials** (TRD 03). TRD
+  10's GitHub connect persists there too — not in a new table or in-memory singleton.
+- **Runway math lives once** in `packages/core/src/fleet/runway.ts` (TRD 03); no
+  route re-implements it.
+- **Pricing/cost logic lives in core** (`packages/core/src/cost/`, TRD 11);
+  `packages/benchmarks` re-exports core's pricing table, never the reverse.
+
+### 3.3 Claude-session contract extension registry
+
+TRD 01 defines the versioned dispatch/callback contract (`/v1/sessions`, `StatusUpdate`,
+`CompletionReport`, callback auth). Later TRDs extend it ONLY via these optional,
+backward-compatible fields:
+
+| TRD | Extension |
+|---|---|
+| 10 | `TaskSpec.git?: GitInstructions` (branchName, baseBranch, openPr, prTitle); `CompletionReport.branchName?`, `prNumber?` |
+| 11 | `StatusUpdate.usage?` / `CompletionReport.usage?` `{inputTokens, outputTokens, cacheReadTokens?, cacheWriteTokens?}` + `model?` |
+| 12 | `CreateSessionParams.transcriptCallbackUrl?`; `CompletionReport.transcript?` |
+| 13 | benchmark harness `ScenarioResult.failureReason?` (not part of the session contract, listed for completeness) |
+
+### 3.4 Code conventions
 
 - **Schema changes**: add the Drizzle definition under `packages/core/src/db/schema/`,
   export it from `schema/index.ts`, AND mirror the DDL in the SQLite adapter if it
@@ -109,7 +151,7 @@ exception: 10 and 12 both extend the claude-session dispatch/callback contract f
 - **Tests**: unit tests colocated per package conventions; e2e in
   `packages/cli/tests/e2e/` style. Every TRD's Testing Strategy section is normative.
 
-### 3.3 Definition of done (per TRD)
+### 3.5 Definition of done (per TRD)
 
 1. All waves complete, all done-checks pass.
 2. All Acceptance Criteria pass (or carry an explicit human waiver).
