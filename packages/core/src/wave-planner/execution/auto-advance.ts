@@ -2,6 +2,7 @@ import { eq, and, sql } from 'drizzle-orm';
 import { getDatabase } from '../../db';
 import { wavePlans, waves, waveTasks, wavePlanMetrics, activityEvents, type WaveTask, type WavePlan } from '../../db/schema';
 import { sleep } from '../utils';
+import { toActivityEventType } from './types';
 import type { WaveExecutionConfig, WaveSSEEvent } from './types';
 
 /**
@@ -209,8 +210,9 @@ async function emitEvent(event: WaveSSEEvent): Promise<void> {
       message = `Wave event: ${event.type}`;
   }
 
-  await (db as any).insert(activityEvents).values({
-    type: event.type,
+  await db.insert(activityEvents).values({
+    // Uppercase enum value required by the activity_events CHECK constraint.
+    type: toActivityEventType(event.type),
     message,
     metadata: event as unknown as Record<string, unknown>,
   });
