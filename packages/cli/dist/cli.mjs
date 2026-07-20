@@ -7,11 +7,11 @@ var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require
 });
 
 // src/cli.ts
-import { Command as Command11 } from "commander";
+import { Command as Command12 } from "commander";
 import updateNotifier from "update-notifier";
 
 // src/version.ts
-var VERSION = "0.1.0";
+var VERSION = "0.1.1";
 
 // src/commands/init.ts
 import { Command } from "commander";
@@ -88,8 +88,10 @@ import Fastify from "fastify";
 import { initDatabase } from "@devpilot.sh/core/db";
 import {
   initOrchestratorService,
-  initStatusPoller
+  initStatusPoller,
+  createDbStatusPollerCallbacks
 } from "@devpilot.sh/core/orchestrator";
+import { initExecutionBridge } from "@devpilot.sh/core/wave-planner";
 
 // src/server/api/items.ts
 import {
@@ -100,6 +102,7 @@ import {
   touchedFiles,
   activityEvents
 } from "@devpilot.sh/core/db";
+import { generatePlanForItem, projectWavePlanToPlan } from "@devpilot.sh/core/wave-planner";
 import { eq, and, desc } from "drizzle-orm";
 async function registerItemRoutes(app) {
   const db2 = getDb();
@@ -245,6 +248,17 @@ async function registerItemRoutes(app) {
       reply.status(404).send({ error: "Item not found" });
       return;
     }
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      reply.status(503).send({
+        error: "PLAN_AI_UNAVAILABLE",
+        detail: "ANTHROPIC_API_KEY is not configured"
+      });
+      return;
+    }
+    const allInFlightFiles = await db2.query.inFlightFiles.findMany();
+    const inFlightPaths = allInFlightFiles.map((f) => f.path);
+    const priorVersion = item.plan?.version ?? 0;
     if (item.plan) {
       await db2.delete(tasks).where(eq(tasks.planId, item.plan.id));
       const existingWorkstreams = await db2.query.workstreams.findMany({
@@ -257,47 +271,23 @@ async function registerItemRoutes(app) {
       await db2.delete(touchedFiles).where(eq(touchedFiles.planId, item.plan.id));
       await db2.delete(plans).where(eq(plans.id, item.plan.id));
     }
-    const [plan] = await db2.insert(plans).values({
+    const workingDir = process.env.WORKING_DIR || process.cwd();
+    const { generation, planId } = await generatePlanForItem({
       horizonItemId: id,
-      version: item.plan ? item.plan.version + 1 : 1,
-      estimatedCostUsd: 0.18,
-      baselineCostUsd: 0.24,
-      acceptanceCriteria: [
-        `All tests pass for ${item.repo}`,
-        "No regressions in existing functionality",
-        "Code review approved"
-      ],
-      confidenceSignals: {
-        hasMemory: true,
-        recentlyModifiedFiles: 2,
-        similarTasksCompleted: 5,
-        overallConfidence: 0.85
-      },
-      fleetContextSnapshot: { activeSessions: 0 },
-      memorySessionsUsed: []
-    }).returning();
-    const [workstream] = await db2.insert(workstreams).values({
-      planId: plan.id,
-      label: "Implementation",
+      title: item.title,
       repo: item.repo,
-      workerCount: 1,
-      orderIndex: 0
-    }).returning();
-    await db2.insert(tasks).values({
-      workstreamId: workstream.id,
-      label: "Complete task",
-      model: "SONNET",
-      complexity: "M",
-      estimatedCostUsd: 0.18,
-      filePaths: ["src/"],
-      dependsOn: [],
-      orderIndex: 0
+      workingDir,
+      apiKey
     });
+    await projectWavePlanToPlan({ planId, generation, inFlightPaths });
+    if (priorVersion > 0) {
+      await db2.update(plans).set({ version: priorVersion + 1 }).where(eq(plans.id, planId));
+    }
     if (item.zone === "SHAPING") {
       await db2.update(horizonItems).set({ zone: "REFINING", updatedAt: /* @__PURE__ */ new Date() }).where(eq(horizonItems.id, id));
     }
     const completePlan = await db2.query.plans.findFirst({
-      where: eq(plans.id, plan.id),
+      where: eq(plans.id, planId),
       with: {
         workstreams: {
           with: { tasks: true }
@@ -308,10 +298,10 @@ async function registerItemRoutes(app) {
     });
     await db2.insert(activityEvents).values({
       type: "PLAN_GENERATED",
-      message: `Plan generated for "${item.title}" ($${plan.estimatedCostUsd.toFixed(2)})`,
+      message: `Plan generated for "${item.title}" ($${(completePlan?.estimatedCostUsd ?? 0).toFixed(2)})`,
       repo: item.repo,
       ticketId: item.linearTicketId,
-      metadata: { planId: plan.id }
+      metadata: { planId }
     });
     reply.status(201).send(completePlan);
   });
@@ -448,7 +438,7 @@ async function registerItemRoutes(app) {
 import {
   horizonItems as horizonItems2,
   rufloSessions,
-  inFlightFiles,
+  inFlightFiles as inFlightFiles2,
   touchedFiles as touchedFiles2,
   activityEvents as activityEvents2,
   conductorScores
@@ -499,7 +489,7 @@ async function registerFleetRoutes(app) {
       inFlightFiles: inFlightFilePaths
     }).returning();
     for (const filePath of inFlightFilePaths) {
-      await db2.insert(inFlightFiles).values({
+      await db2.insert(inFlightFiles2).values({
         path: filePath,
         activeSessionId: session.id,
         linearTicketId,
@@ -686,7 +676,7 @@ async function registerFleetRoutes(app) {
       }
     }
     for (const file of item.plan.filesTouched) {
-      await db2.insert(inFlightFiles).values({
+      await db2.insert(inFlightFiles2).values({
         path: file.path,
         activeSessionId: session.id,
         linearTicketId: session.linearTicketId,
@@ -1015,6 +1005,19 @@ async function registerEventRoutes(app) {
 }
 
 // src/server/index.ts
+function waveExecutionConfigFromEnv(port) {
+  const failurePolicy = process.env.DEVPILOT_WAVE_FAILURE_POLICY === "continue" ? "continue" : "halt";
+  return {
+    maxConcurrentSubagents: Number(process.env.DEVPILOT_WAVE_MAX_CONCURRENT) || 4,
+    maxTotalActiveTasks: Number(process.env.DEVPILOT_WAVE_MAX_TOTAL) || 8,
+    subagentDispatchDelayMs: 500,
+    waveAdvanceDelayMs: 2e3,
+    retryLimit: Number(process.env.DEVPILOT_WAVE_RETRY_LIMIT) || 1,
+    failurePolicy,
+    autoAdvance: process.env.DEVPILOT_WAVE_AUTO_ADVANCE !== "false",
+    callbackUrl: `http://127.0.0.1:${port}/api/orchestrator`
+  };
+}
 var db;
 function getDb() {
   return db;
@@ -1031,52 +1034,20 @@ async function createServer(options) {
       aoPath: options.orchestrator.aoPath,
       url: options.orchestrator.httpUrl,
       apiKey: options.orchestrator.apiKey,
-      callbackUrl: `http://127.0.0.1:${options.port}/api/fleet/callback`
+      sessionApiUrl: options.orchestrator.sessionApiUrl,
+      sessionApiKey: options.orchestrator.sessionApiKey,
+      sessionEnvironmentId: options.orchestrator.sessionEnvironmentId,
+      callbackToken: options.orchestrator.callbackToken,
+      callbackUrl: `http://127.0.0.1:${options.port}/api/orchestrator`
     };
     const orchestrator = initOrchestratorService(orchestratorConfig);
     initStatusPoller(orchestrator, {
       pollIntervalMs: 5e3,
-      onStatusUpdate: async (sessionId, status) => {
-        const { rufloSessions: rufloSessions3 } = await import("@devpilot.sh/core/db");
-        const { eq: eq5 } = await import("drizzle-orm");
-        await db.update(rufloSessions3).set({
-          progressPercent: status.progressPercent,
-          status: status.status === "running" ? "ACTIVE" : status.status === "complete" ? "COMPLETE" : status.status === "error" ? "ERROR" : "ACTIVE",
-          updatedAt: /* @__PURE__ */ new Date()
-        }).where(eq5(rufloSessions3.id, sessionId));
-      },
-      onComplete: async (sessionId, report) => {
-        const { rufloSessions: rufloSessions3, activityEvents: activityEvents4 } = await import("@devpilot.sh/core/db");
-        const { eq: eq5 } = await import("drizzle-orm");
-        await db.update(rufloSessions3).set({
-          status: report.success ? "COMPLETE" : "ERROR",
-          progressPercent: 100,
-          prUrl: report.prUrl,
-          tokensUsed: report.tokensUsed,
-          costUsd: Math.round(report.costUsd * 100),
-          // Store as cents
-          updatedAt: /* @__PURE__ */ new Date()
-        }).where(eq5(rufloSessions3.id, sessionId));
-        await db.insert(activityEvents4).values({
-          type: "SESSION_COMPLETE",
-          message: report.success ? `Session completed: ${report.summary}` : `Session failed: ${report.error?.message || "Unknown error"}`,
-          metadata: { sessionId, prUrl: report.prUrl }
-        });
-      },
-      onError: async (sessionId, error) => {
-        const { rufloSessions: rufloSessions3, activityEvents: activityEvents4 } = await import("@devpilot.sh/core/db");
-        const { eq: eq5 } = await import("drizzle-orm");
-        await db.update(rufloSessions3).set({
-          status: "ERROR",
-          updatedAt: /* @__PURE__ */ new Date()
-        }).where(eq5(rufloSessions3.id, sessionId));
-        await db.insert(activityEvents4).values({
-          type: "SESSION_COMPLETE",
-          message: `Session error: ${error.message}`,
-          metadata: { sessionId, error: error.message }
-        });
-      }
+      ...createDbStatusPollerCallbacks()
     });
+    initExecutionBridge(orchestrator, {
+      execution: waveExecutionConfigFromEnv(options.port)
+    }).start();
     console.log(`Orchestrator initialized in ${options.orchestrator.mode} mode`);
   }
   const app = Fastify({
@@ -1125,8 +1096,23 @@ async function startServer(options) {
 // src/commands/serve.ts
 import { existsSync as existsSync2, mkdirSync as mkdirSync2 } from "fs";
 import { join as join2 } from "path";
-var serveCommand = new Command2("serve").description("Start the local DevPilot Conductor API server").option("-p, --port <port>", "Port to run the server on", "3847").option("--no-open", "Do not open browser automatically").option("--sync", "Enable cloud sync").option("--db <path>", "Path to SQLite database", ".devpilot/data.db").action(async (options) => {
+var serveCommand = new Command2("serve").description("Start the local DevPilot Conductor API server").option("-p, --port <port>", "Port to run the server on", "3847").option("--no-open", "Do not open browser automatically").option("--sync", "Enable cloud sync").option("--db <path>", "Path to SQLite database", ".devpilot/data.db").option(
+  "--orchestrator-mode <mode>",
+  "Orchestrator mode: claude-session | ao-cli | http | disabled"
+).option("--session-api-url <url>", "claude-session dispatcher base URL").option("--session-api-key <key>", "claude-session dispatcher bearer token").option("--ao-project <name>", "ao-cli project name").option("--ao-path <path>", "Path to the ao binary").option("--orchestrator-url <url>", "Remote orchestrator base URL (http mode)").action(async (options) => {
   const port = parseInt(options.port, 10);
+  const orchestratorMode = options.orchestratorMode || process.env.DEVPILOT_ORCHESTRATOR_MODE;
+  const orchestrator = orchestratorMode ? {
+    mode: orchestratorMode,
+    sessionApiUrl: options.sessionApiUrl || process.env.DEVPILOT_SESSION_API_URL,
+    sessionApiKey: options.sessionApiKey || process.env.DEVPILOT_SESSION_API_KEY,
+    sessionEnvironmentId: process.env.DEVPILOT_SESSION_ENVIRONMENT_ID,
+    callbackToken: process.env.DEVPILOT_CALLBACK_TOKEN,
+    aoProjectName: options.aoProject || process.env.DEVPILOT_AO_PROJECT,
+    aoPath: options.aoPath || process.env.DEVPILOT_AO_PATH,
+    httpUrl: options.orchestratorUrl || process.env.DEVPILOT_ORCHESTRATOR_URL,
+    apiKey: process.env.DEVPILOT_ORCHESTRATOR_API_KEY
+  } : void 0;
   console.log(chalk2.cyan("\u{1F680} Starting DevPilot Conductor..."));
   console.log("");
   console.log(chalk2.gray(`   Port: ${port}`));
@@ -1142,7 +1128,8 @@ var serveCommand = new Command2("serve").description("Start the local DevPilot C
     const dbPath = options.db.startsWith("/") ? options.db : join2(process.cwd(), options.db);
     const { url, close } = await startServer({
       port,
-      dbPath
+      dbPath,
+      orchestrator
     });
     console.log(chalk2.green("\u2713 Server started successfully"));
     console.log("");
@@ -1315,7 +1302,7 @@ var configCommand = new Command4("config").description("Manage DevPilot configur
 
 // src/commands/setup.ts
 import { Command as Command5 } from "commander";
-import { existsSync as existsSync5, readFileSync as readFileSync2, writeFileSync as writeFileSync4 } from "fs";
+import { existsSync as existsSync5, readFileSync as readFileSync3, writeFileSync as writeFileSync4 } from "fs";
 import { join as join5 } from "path";
 import chalk6 from "chalk";
 import YAML2 from "yaml";
@@ -1324,8 +1311,9 @@ import { linear as linear2 } from "@devpilot.sh/core";
 
 // src/utils/orchestrator.ts
 import { execSync, spawnSync } from "child_process";
-import { existsSync as existsSync4, writeFileSync as writeFileSync3 } from "fs";
+import { existsSync as existsSync4, readFileSync as readFileSync2, writeFileSync as writeFileSync3 } from "fs";
 import { join as join4, basename } from "path";
+import { homedir } from "os";
 import chalk5 from "chalk";
 function checkCommand(cmd, versionArg = "--version") {
   try {
@@ -1368,11 +1356,15 @@ function checkSystemRequirements() {
       ghAuthenticated = false;
     }
   }
+  const rtk = checkCommand("rtk");
+  const cavemanInstalled = isCavemanInstalled();
   return {
     node: { ...node, meetsMinimum: nodeMeetsMin },
     git: { ...git, meetsMinimum: gitMeetsMin },
     tmux: { installed: tmux.installed },
-    gh: { installed: gh.installed, authenticated: ghAuthenticated }
+    gh: { installed: gh.installed, authenticated: ghAuthenticated },
+    rtk: { installed: rtk.installed, version: rtk.version },
+    caveman: { installed: cavemanInstalled }
   };
 }
 function printRequirementsStatus(reqs) {
@@ -1404,6 +1396,16 @@ function printRequirementsStatus(reqs) {
   } else {
     console.log(chalk5.yellow("  \u26A0 GitHub CLI not found (optional, for PR creation)"));
   }
+  if (reqs.rtk.installed) {
+    console.log(chalk5.green(`  \u2713 RTK ${reqs.rtk.version || ""} (token optimization)`));
+  } else {
+    console.log(chalk5.yellow("  \u26A0 RTK not found (recommended, for 60-90% token savings)"));
+  }
+  if (reqs.caveman.installed) {
+    console.log(chalk5.green("  \u2713 Caveman plugin (output token compression)"));
+  } else {
+    console.log(chalk5.yellow("  \u26A0 Caveman not found (optional, for ~65-75% output token savings)"));
+  }
 }
 function isOrchestratorInstalled() {
   try {
@@ -1426,6 +1428,94 @@ function installOrchestrator() {
     console.log(chalk5.red("\u2717 Failed to install @composio/ao-cli"));
     console.log(chalk5.gray("  Try manually: npm install -g @composio/ao-cli"));
     return false;
+  }
+}
+function isRtkInstalled() {
+  try {
+    const result = spawnSync("rtk", ["--version"], { encoding: "utf-8", stdio: "pipe" });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
+function installRtk() {
+  const hasCargo = spawnSync("cargo", ["--version"], { encoding: "utf-8", stdio: "pipe" }).status === 0;
+  if (hasCargo) {
+    console.log(chalk5.cyan("\n  Installing RTK via cargo (this may take a few minutes)..."));
+    try {
+      execSync("cargo install --git https://github.com/rtk-ai/rtk", { stdio: "inherit" });
+      console.log(chalk5.green("  \u2713 RTK installed successfully"));
+      return true;
+    } catch {
+      console.log(chalk5.red("  \u2717 Failed to install RTK via cargo"));
+    }
+  }
+  console.log(chalk5.cyan("\n  Installing RTK via install script..."));
+  try {
+    execSync("curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh", {
+      stdio: "inherit"
+    });
+    console.log(chalk5.green("  \u2713 RTK installed successfully"));
+    return true;
+  } catch {
+    console.log(chalk5.red("  \u2717 Failed to install RTK"));
+    console.log(chalk5.gray("  Install manually: cargo install --git https://github.com/rtk-ai/rtk"));
+    console.log(chalk5.gray("  Or: brew install rtk"));
+    return false;
+  }
+}
+function initRtkHook() {
+  console.log(chalk5.cyan("\n  Initializing RTK hook for Claude Code..."));
+  try {
+    execSync("rtk init -g", { encoding: "utf-8", stdio: "pipe" });
+    console.log(chalk5.green("  \u2713 RTK hook initialized"));
+    return true;
+  } catch {
+    console.log(chalk5.yellow("  \u26A0 RTK hook init requires manual step: rtk init -g"));
+    return false;
+  }
+}
+function isCavemanInstalled() {
+  const claudeDir = join4(homedir(), ".claude");
+  if (existsSync4(join4(claudeDir, "hooks", "caveman-activate.js"))) {
+    return true;
+  }
+  const settingsPath = join4(claudeDir, "settings.json");
+  if (existsSync4(settingsPath)) {
+    try {
+      const settings = JSON.parse(readFileSync2(settingsPath, "utf-8"));
+      const settingsStr = JSON.stringify(settings);
+      if (settingsStr.includes("caveman")) {
+        return true;
+      }
+    } catch {
+    }
+  }
+  return false;
+}
+function installCaveman() {
+  console.log(chalk5.cyan("\n  Installing Caveman plugin for Claude Code..."));
+  try {
+    execSync("npx -y skills add JuliusBrussee/caveman", {
+      stdio: "inherit",
+      timeout: 12e4
+    });
+    console.log(chalk5.green("  \u2713 Caveman plugin installed successfully"));
+    return true;
+  } catch {
+    console.log(chalk5.yellow("  npx skills add failed, trying hook install script..."));
+    try {
+      execSync(
+        "bash <(curl -fsSL https://raw.githubusercontent.com/JuliusBrussee/caveman/main/hooks/install.sh)",
+        { stdio: "inherit", shell: "/bin/bash", timeout: 6e4 }
+      );
+      console.log(chalk5.green("  \u2713 Caveman hooks installed successfully"));
+      return true;
+    } catch {
+      console.log(chalk5.red("  \u2717 Failed to install Caveman plugin"));
+      console.log(chalk5.gray("  Install manually: npx skills add JuliusBrussee/caveman"));
+      return false;
+    }
   }
 }
 function detectRepoInfo(cwd) {
@@ -1514,6 +1604,12 @@ function getInstallInstructions(reqs) {
   } else if (!reqs.gh.authenticated) {
     instructions.push("GitHub CLI auth: gh auth login");
   }
+  if (!reqs.rtk.installed) {
+    instructions.push("RTK (token savings): cargo install --git https://github.com/rtk-ai/rtk");
+  }
+  if (!reqs.caveman.installed) {
+    instructions.push("Caveman (output compression): npx skills add JuliusBrussee/caveman");
+  }
   return instructions;
 }
 
@@ -1569,7 +1665,7 @@ var setupCommand = new Command5("setup").description("Interactive setup wizard f
   if (!options.orchestratorOnly) {
     console.log(chalk6.bold("Step 2: Linear Integration"));
     console.log(chalk6.gray("Linear integration enables ticket tracking and auto-status updates.\n"));
-    const configContent = readFileSync2(configPath, "utf-8");
+    const configContent = readFileSync3(configPath, "utf-8");
     const config = YAML2.parse(configContent);
     const existingApiKey = config.integrations?.linear?.apiKey;
     const existingTeamId = config.integrations?.linear?.teamId;
@@ -1638,11 +1734,63 @@ var setupCommand = new Command5("setup").description("Interactive setup wizard f
       }
     }
   }
+  if (!options.linearOnly && !options.orchestratorOnly) {
+    console.log(chalk6.bold("Step 4: RTK Token Optimization"));
+    console.log(chalk6.gray("RTK reduces LLM token consumption by 60-90% across fleet agents.\n"));
+    const rtkInstalled = isRtkInstalled();
+    if (rtkInstalled) {
+      console.log(chalk6.green("  RTK is already installed."));
+      console.log(chalk6.gray("  Ensuring Claude Code hook is configured..."));
+      initRtkHook();
+    } else if (nonInteractive) {
+      console.log(chalk6.gray("  Installing RTK (non-interactive mode)..."));
+      const success = installRtk();
+      if (success) {
+        initRtkHook();
+      }
+    } else {
+      const install = await confirm("  Install RTK for token-optimized agent sessions?");
+      if (install) {
+        const success = installRtk();
+        if (success) {
+          initRtkHook();
+        }
+      } else {
+        console.log(chalk6.gray("  Skipping RTK installation. Install later with:"));
+        console.log(chalk6.cyan("    cargo install --git https://github.com/rtk-ai/rtk"));
+        console.log(chalk6.cyan("    rtk init -g\n"));
+      }
+    }
+    console.log("");
+  }
+  if (!options.linearOnly && !options.orchestratorOnly) {
+    console.log(chalk6.bold("Step 5: Caveman Output Compression"));
+    console.log(chalk6.gray("Caveman reduces output token usage by ~65-75% across fleet agents.\n"));
+    const cavemanInstalled = isCavemanInstalled();
+    if (cavemanInstalled) {
+      console.log(chalk6.green("  Caveman plugin is already installed."));
+      console.log(chalk6.gray("  Activate in any session with /caveman (modes: lite, full, ultra)"));
+    } else if (nonInteractive) {
+      console.log(chalk6.gray("  Installing Caveman plugin (non-interactive mode)..."));
+      installCaveman();
+    } else {
+      const install = await confirm("  Install Caveman plugin for compressed agent output?");
+      if (install) {
+        installCaveman();
+      } else {
+        console.log(chalk6.gray("  Skipping Caveman installation. Install later with:"));
+        console.log(chalk6.cyan("    npx skills add JuliusBrussee/caveman\n"));
+      }
+    }
+    console.log("");
+  }
   console.log(chalk6.bold.green("\nSetup Complete!\n"));
   console.log(chalk6.white("Next steps:"));
   console.log(chalk6.gray("  1. Run ") + chalk6.cyan("devpilot serve") + chalk6.gray(" to start the UI"));
   console.log(chalk6.gray("  2. Run ") + chalk6.cyan("ao start") + chalk6.gray(" to start agent orchestrator"));
-  console.log(chalk6.gray("  3. Use the UI to create items and dispatch to the fleet\n"));
+  console.log(chalk6.gray("  3. Use the UI to create items and dispatch to the fleet"));
+  console.log(chalk6.gray("  4. Run ") + chalk6.cyan("rtk gain") + chalk6.gray(" to monitor token savings"));
+  console.log(chalk6.gray("  5. Use ") + chalk6.cyan("/caveman") + chalk6.gray(" in sessions for compressed output\n"));
 });
 async function configureLinear(configPath, config) {
   console.log("");
@@ -1693,7 +1841,7 @@ async function configureLinear(configPath, config) {
   }
 }
 async function configureOrchestrator(cwd, configPath, nonInteractive = false) {
-  const config = YAML2.parse(readFileSync2(configPath, "utf-8"));
+  const config = YAML2.parse(readFileSync3(configPath, "utf-8"));
   const linearTeamId = config.integrations?.linear?.teamId;
   const aoConfig = generateOrchestratorConfig({
     cwd,
@@ -2017,12 +2165,382 @@ var updateCommand = new Command10("update").description("Update DevPilot CLI to 
   }
 });
 
+// src/commands/wiki.ts
+import { Command as Command11 } from "commander";
+import { existsSync as existsSync6, mkdirSync as mkdirSync3, readFileSync as readFileSync4, writeFileSync as writeFileSync5 } from "fs";
+import { join as join6 } from "path";
+import chalk11 from "chalk";
+var wikiCommand = new Command11("wiki").description("LLM-compiled knowledge base \u2014 institutional memory for your codebase");
+wikiCommand.command("init").description("Initialize the wiki system in the current repository").option("--wiki-dir <path>", "Wiki output directory", ".devpilot/wiki").action(async (options) => {
+  const cwd = process.cwd();
+  const devpilotDir = join6(cwd, ".devpilot");
+  const wikiDir = join6(cwd, options.wikiDir);
+  if (!existsSync6(devpilotDir)) {
+    console.log(
+      chalk11.yellow("\u26A0\uFE0F  DevPilot not initialized. Run `devpilot init` first.")
+    );
+    return;
+  }
+  if (!existsSync6(wikiDir)) {
+    mkdirSync3(wikiDir, { recursive: true });
+  }
+  const indexPath = join6(wikiDir, "index.md");
+  if (!existsSync6(indexPath)) {
+    const initialIndex = `# Wiki Index
+
+> Auto-generated wiki \u2014 compiled from session logs, commits, specs, and decisions.
+> This wiki is maintained by DevPilot's wiki compiler following the LLM Knowledge Base pattern.
+
+## Getting Started
+
+This wiki will grow automatically as you work with DevPilot:
+- **Session logs** are compiled into architecture and decision articles
+- **Commits** are analyzed for patterns and architectural changes
+- **Specs** are indexed for requirements and design rationale
+
+Run \`devpilot wiki ingest\` to manually add sources, or let the session hook capture knowledge automatically.
+`;
+    writeFileSync5(indexPath, initialIndex);
+  }
+  const logPath = join6(wikiDir, "log.md");
+  if (!existsSync6(logPath)) {
+    writeFileSync5(
+      logPath,
+      `# Wiki Activity Log
+
+> Append-only chronicle of wiki operations.
+
+- **${(/* @__PURE__ */ new Date()).toISOString().split("T")[0]}** [init] Wiki initialized
+`
+    );
+  }
+  const gitignorePath = join6(cwd, ".gitignore");
+  if (existsSync6(gitignorePath)) {
+    const gitignore = readFileSync4(gitignorePath, "utf-8");
+    if (!gitignore.includes(".devpilot/wiki")) {
+    }
+  }
+  console.log(chalk11.green("\u2705 Wiki initialized!"));
+  console.log("");
+  console.log(chalk11.white("Wiki directory: ") + chalk11.cyan(wikiDir));
+  console.log("");
+  console.log(chalk11.white("Next steps:"));
+  console.log(
+    chalk11.gray("  1. ") + chalk11.cyan("devpilot wiki ingest --file <path>") + chalk11.gray(" to add source material")
+  );
+  console.log(
+    chalk11.gray("  2. ") + chalk11.cyan('devpilot wiki query "How does auth work?"') + chalk11.gray(" to ask questions")
+  );
+  console.log(
+    chalk11.gray("  3. ") + chalk11.cyan("devpilot wiki status") + chalk11.gray(" to check wiki health")
+  );
+  console.log("");
+  console.log(
+    chalk11.gray(
+      "The wiki will grow automatically as agents work \u2014 each session compounds the knowledge base."
+    )
+  );
+});
+wikiCommand.command("ingest").description("Ingest a source document into the wiki").requiredOption("--type <type>", "Source type: session_log, commit, spec, decision, manual").requiredOption("--title <title>", "Human-readable title for the source").option("--file <path>", "Path to source file").option("--stdin", "Read source from stdin").option("--origin <origin>", "Origin identifier (e.g. session ID, commit SHA)").action(async (options) => {
+  let content;
+  if (options.file) {
+    if (!existsSync6(options.file)) {
+      console.log(chalk11.red(`\u274C File not found: ${options.file}`));
+      return;
+    }
+    content = readFileSync4(options.file, "utf-8");
+  } else if (options.stdin) {
+    content = readFileSync4(0, "utf-8");
+  } else {
+    console.log(
+      chalk11.red("\u274C Provide either --file <path> or --stdin")
+    );
+    return;
+  }
+  const validTypes = ["session_log", "commit", "spec", "decision", "manual"];
+  if (!validTypes.includes(options.type)) {
+    console.log(
+      chalk11.red(
+        `\u274C Invalid type "${options.type}". Must be one of: ${validTypes.join(", ")}`
+      )
+    );
+    return;
+  }
+  console.log(chalk11.gray(`Ingesting ${options.type}: "${options.title}"...`));
+  try {
+    const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
+    const config = getWikiConfig();
+    const compiler = createWikiCompiler(config);
+    const result = await compiler.ingest(
+      content,
+      options.type,
+      options.title,
+      options.origin
+    );
+    console.log(chalk11.green("\u2705 Ingested successfully!"));
+    console.log(
+      chalk11.gray(`   Source ID: ${result.sourceId}`)
+    );
+    if (result.articlesCreated.length > 0) {
+      console.log(
+        chalk11.white(`   Articles created: `) + chalk11.cyan(result.articlesCreated.join(", "))
+      );
+    }
+    if (result.articlesUpdated.length > 0) {
+      console.log(
+        chalk11.white(`   Articles updated: `) + chalk11.yellow(result.articlesUpdated.join(", "))
+      );
+    }
+    console.log(
+      chalk11.gray(`   Tokens used: ${result.tokensUsed}`)
+    );
+  } catch (error) {
+    console.log(
+      chalk11.red(
+        `\u274C Ingest failed: ${error instanceof Error ? error.message : String(error)}`
+      )
+    );
+  }
+});
+wikiCommand.command("query <question>").description("Ask a question against the wiki").action(async (question) => {
+  console.log(chalk11.gray(`Searching wiki for: "${question}"...`));
+  try {
+    const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
+    const config = getWikiConfig();
+    const compiler = createWikiCompiler(config);
+    const result = await compiler.query(question);
+    console.log("");
+    console.log(chalk11.white(result.answer));
+    console.log("");
+    if (result.citedArticles.length > 0) {
+      console.log(
+        chalk11.gray("Cited: ") + chalk11.cyan(result.citedArticles.map((s) => `[[${s}]]`).join(", "))
+      );
+    }
+    if (result.newArticleSlug) {
+      console.log(
+        chalk11.green(
+          `\u{1F4DD} New article created from this query: [[${result.newArticleSlug}]]`
+        )
+      );
+    }
+    console.log(chalk11.gray(`Tokens used: ${result.tokensUsed}`));
+  } catch (error) {
+    console.log(
+      chalk11.red(
+        `\u274C Query failed: ${error instanceof Error ? error.message : String(error)}`
+      )
+    );
+  }
+});
+wikiCommand.command("lint").description("Check wiki health \u2014 find stale content, orphans, and gaps").action(async () => {
+  console.log(chalk11.gray("Linting wiki..."));
+  try {
+    const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
+    const config = getWikiConfig();
+    const compiler = createWikiCompiler(config);
+    const result = await compiler.lint();
+    if (result.findings.length === 0) {
+      console.log(chalk11.green("\u2705 Wiki is healthy \u2014 no issues found!"));
+      return;
+    }
+    console.log(
+      chalk11.yellow(`\u26A0\uFE0F  Found ${result.findings.length} issue(s):
+`)
+    );
+    for (const finding of result.findings) {
+      const icon = {
+        stale: "\u{1F550}",
+        orphaned: "\u{1F517}",
+        contradiction: "\u26A1",
+        gap: "\u{1F4ED}",
+        broken_link: "\u{1F494}"
+      }[finding.type];
+      console.log(
+        `  ${icon} ${chalk11.white(`[${finding.type}]`)} ${chalk11.cyan(`[[${finding.articleSlug}]]`)}`
+      );
+      console.log(chalk11.gray(`     ${finding.description}`));
+      console.log(chalk11.gray(`     \u2192 ${finding.suggestion}`));
+      console.log("");
+    }
+    if (result.articlesMarkedStale.length > 0) {
+      console.log(
+        chalk11.yellow(
+          `Marked ${result.articlesMarkedStale.length} article(s) as stale.`
+        )
+      );
+    }
+    console.log(chalk11.gray(`Tokens used: ${result.tokensUsed}`));
+  } catch (error) {
+    console.log(
+      chalk11.red(
+        `\u274C Lint failed: ${error instanceof Error ? error.message : String(error)}`
+      )
+    );
+  }
+});
+wikiCommand.command("status").description("Show wiki statistics").action(async () => {
+  try {
+    const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
+    const config = getWikiConfig();
+    const compiler = createWikiCompiler(config);
+    const status = await compiler.getStatus();
+    console.log(chalk11.white.bold("\n\u{1F4DA} Wiki Status\n"));
+    console.log(
+      chalk11.gray("  Sources:    ") + chalk11.white(String(status.totalSources))
+    );
+    console.log(
+      chalk11.gray("  Articles:   ") + chalk11.white(String(status.totalArticles)) + chalk11.gray(" (") + chalk11.green(`${status.activeArticles} active`) + (status.staleArticles > 0 ? chalk11.yellow(`, ${status.staleArticles} stale`) : "") + (status.archivedArticles > 0 ? chalk11.gray(`, ${status.archivedArticles} archived`) : "") + chalk11.gray(")")
+    );
+    if (Object.keys(status.categories).length > 0) {
+      console.log(chalk11.gray("\n  Categories:"));
+      for (const [category, count] of Object.entries(status.categories).sort()) {
+        console.log(
+          chalk11.gray("    ") + chalk11.cyan(category) + chalk11.gray(": ") + chalk11.white(String(count))
+        );
+      }
+    }
+    if (status.lastActivity) {
+      console.log(
+        chalk11.gray("\n  Last activity: ") + chalk11.white(status.lastActivity.toISOString().split("T")[0])
+      );
+    }
+    console.log("");
+  } catch (error) {
+    console.log(
+      chalk11.red(
+        `\u274C Status failed: ${error instanceof Error ? error.message : String(error)}`
+      )
+    );
+  }
+});
+wikiCommand.command("flush").description("Export wiki to disk as markdown files").action(async () => {
+  console.log(chalk11.gray("Flushing wiki to disk..."));
+  try {
+    const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
+    const config = getWikiConfig();
+    const compiler = createWikiCompiler(config);
+    const result = await compiler.flushToDisk();
+    console.log(chalk11.green(`\u2705 Wrote ${result.filesWritten} files to ${result.wikiDir}`));
+  } catch (error) {
+    console.log(
+      chalk11.red(
+        `\u274C Flush failed: ${error instanceof Error ? error.message : String(error)}`
+      )
+    );
+  }
+});
+wikiCommand.command("index").description("Show the wiki table of contents").option("--category <category>", "Filter by category").action(async (options) => {
+  try {
+    const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
+    const config = getWikiConfig();
+    const compiler = createWikiCompiler(config);
+    let index = await compiler.getIndex();
+    if (options.category) {
+      index = index.filter((e) => e.category === options.category);
+    }
+    if (index.length === 0) {
+      console.log(chalk11.gray("Wiki is empty. Run `devpilot wiki ingest` to add sources."));
+      return;
+    }
+    const byCategory = {};
+    for (const entry of index) {
+      if (!byCategory[entry.category]) {
+        byCategory[entry.category] = [];
+      }
+      byCategory[entry.category].push(entry);
+    }
+    console.log(chalk11.white.bold("\n\u{1F4D6} Wiki Index\n"));
+    for (const [category, entries] of Object.entries(byCategory).sort()) {
+      console.log(
+        chalk11.cyan.bold(
+          `  ${category.charAt(0).toUpperCase() + category.slice(1)}`
+        )
+      );
+      for (const entry of entries) {
+        const statusColor = entry.status === "active" ? chalk11.green : entry.status === "stale" ? chalk11.yellow : chalk11.gray;
+        const badge = statusColor(`[${entry.status}]`);
+        console.log(
+          `    ${badge} ${chalk11.white(entry.title)} ${chalk11.gray(`[[${entry.slug}]]`)}`
+        );
+      }
+      console.log("");
+    }
+  } catch (error) {
+    console.log(
+      chalk11.red(
+        `\u274C Index failed: ${error instanceof Error ? error.message : String(error)}`
+      )
+    );
+  }
+});
+wikiCommand.command("read <slug>").description("Read a specific wiki article").action(async (slug) => {
+  try {
+    const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
+    const config = getWikiConfig();
+    const compiler = createWikiCompiler(config);
+    const article = await compiler.getArticle(slug);
+    if (!article) {
+      console.log(chalk11.red(`\u274C Article not found: [[${slug}]]`));
+      return;
+    }
+    console.log(chalk11.white.bold(`
+# ${article.title}
+`));
+    console.log(
+      chalk11.gray(
+        `Category: ${article.category} | Status: ${article.status} | v${article.version}`
+      )
+    );
+    if (article.backlinks.length > 0) {
+      console.log(
+        chalk11.gray(
+          `Related: ${article.backlinks.map((b) => `[[${b}]]`).join(", ")}`
+        )
+      );
+    }
+    console.log(chalk11.gray("\u2500".repeat(60)));
+    console.log(article.content);
+    console.log("");
+  } catch (error) {
+    console.log(
+      chalk11.red(
+        `\u274C Read failed: ${error instanceof Error ? error.message : String(error)}`
+      )
+    );
+  }
+});
+function getWikiConfig() {
+  const cwd = process.cwd();
+  return {
+    apiKey: process.env.ANTHROPIC_API_KEY || "",
+    model: process.env.WIKI_MODEL || "claude-sonnet-4-20250514",
+    maxTokens: parseInt(process.env.WIKI_MAX_TOKENS || "8192", 10),
+    repo: getRepoName(cwd),
+    wikiDir: join6(cwd, ".devpilot", "wiki")
+  };
+}
+function getRepoName(cwd) {
+  try {
+    const { execSync: execSync3 } = __require("child_process");
+    const remote = execSync3("git remote get-url origin", {
+      cwd,
+      encoding: "utf-8"
+    }).trim();
+    const match = remote.match(/[/:]([\w.-]+\/[\w.-]+?)(?:\.git)?$/);
+    return match ? match[1] : cwd.split("/").pop() || "unknown";
+  } catch {
+    return cwd.split("/").pop() || "unknown";
+  }
+}
+
 // src/cli.ts
+import { benchCommand } from "@devpilot.sh/benchmarks/cli";
 var pkg = {
   name: "@devpilot.sh/cli",
   version: VERSION
 };
-var cli = new Command11();
+var cli = new Command12();
 cli.name("devpilot").description("DevPilot CLI - Manage your AI coding agent fleet").version(VERSION);
 cli.addCommand(initCommand);
 cli.addCommand(setupCommand);
@@ -2031,6 +2549,8 @@ cli.addCommand(statusCommand);
 cli.addCommand(configCommand);
 cli.addCommand(bridgeCommand);
 cli.addCommand(updateCommand);
+cli.addCommand(wikiCommand);
+cli.addCommand(benchCommand);
 function runCli(args = process.argv) {
   const notifier = updateNotifier({
     pkg,

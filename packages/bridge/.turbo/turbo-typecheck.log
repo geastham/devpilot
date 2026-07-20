@@ -1,4 +1,0 @@
-
-> @devpilot.sh/bridge@0.1.0 typecheck /home/user/devpilot/packages/bridge
-> tsc --noEmit
-
