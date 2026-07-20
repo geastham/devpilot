@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db, activityEvents, eq, and, gt, desc } from '@/lib/db';
 import type { EventType } from '@/lib/db';
 
+// Live activity feed backed by DB reads — always dynamic, never prerendered.
+export const dynamic = 'force-dynamic';
+
 // GET /api/events - Get recent activity events
 export async function GET(request: NextRequest) {
   try {

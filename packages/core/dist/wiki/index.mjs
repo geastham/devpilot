@@ -1222,6 +1222,7 @@ function createSQLiteAdapter(path) {
     mkdirSync(dir, { recursive: true });
   }
   sqliteConnection = new Database(path);
+  sqliteConnection.pragma("busy_timeout = 5000");
   sqliteConnection.pragma("journal_mode = WAL");
   sqliteConnection.exec(createTableStatements);
   ensureColumn(sqliteConnection, "wave_tasks", "completion_summary", "completion_summary TEXT");

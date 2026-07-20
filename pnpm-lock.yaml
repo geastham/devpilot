@@ -11,6 +11,9 @@ importers:
       '@devpilot.sh/core':
         specifier: workspace:*
         version: link:packages/core
+      better-sqlite3:
+        specifier: ^11.0.0
+        version: 11.10.0
       clsx:
         specifier: ^2.1.0
         version: 2.1.1

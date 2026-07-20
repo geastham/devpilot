@@ -301,7 +301,10 @@ export function createSQLiteAdapter(path: string): SQLiteDatabase {
   // Create SQLite connection
   sqliteConnection = new Database(path);
 
-  // Enable WAL mode for better concurrent access
+  // Enable WAL mode for better concurrent access, and wait (rather than throw
+  // SQLITE_BUSY) when another connection briefly holds the lock — e.g. parallel
+  // Next.js build workers each opening the DB at import time.
+  sqliteConnection.pragma('busy_timeout = 5000');
   sqliteConnection.pragma('journal_mode = WAL');
 
   // Create tables if they don't exist

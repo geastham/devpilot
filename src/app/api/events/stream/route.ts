@@ -2,6 +2,10 @@ import { NextRequest } from 'next/server';
 import { db, activityEvents, rufloSessions, wavePlans, gt, eq, asc, inArray } from '@/lib/db';
 import type { WaveTask } from '@/lib/db';
 
+// This is a long-lived SSE stream backed by live DB reads — it must never be
+// statically prerendered at build time.
+export const dynamic = 'force-dynamic';
+
 // GET /api/events/stream - Server-Sent Events stream for real-time updates
 export async function GET(request: NextRequest) {
   const encoder = new TextEncoder();
