@@ -96,11 +96,15 @@ export class WorkspaceManager {
 
     const workspaceId = `${runId}-${scenario}-${benchmarkId}`;
     const info: WorkspaceInfo = {
-      path: workspacePath,
-      benchmarkId,
-      scenario,
-      runId,
-      createdAt: new Date().toISOString(),
+      id: workspaceId,
+      rootDir: workspacePath,
+      fixturesDir: fixturesDest,
+      acceptanceDir: acceptanceDest,
+      // No dedicated output subtree is created; the workspace root doubles as
+      // the output directory for generated artifacts.
+      outputDir: workspacePath,
+      prdPath: prdDest,
+      processIds: [],
     };
 
     this.activeWorkspaces.set(workspaceId, info);
@@ -252,12 +256,12 @@ export class WorkspaceManager {
 
     // Archive if requested
     if (options.archive && options.archivePath) {
-      await this.archiveWorkspace(info.path, options.archivePath);
+      await this.archiveWorkspace(info.rootDir, options.archivePath);
     }
 
     // Remove workspace directory
     try {
-      await rm(info.path, { recursive: true, force: true });
+      await rm(info.rootDir, { recursive: true, force: true });
     } catch {
       // Ignore cleanup errors
     }

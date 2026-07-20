@@ -7,6 +7,11 @@
 import { z } from 'zod';
 import type { ModelPricing, RunConfig } from './types';
 
+/** Recursively-optional variant of a type, for sparse config overrides. */
+type DeepPartial<T> = {
+  [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K];
+};
+
 // =============================================================================
 // Enum Schemas
 // =============================================================================
@@ -262,7 +267,7 @@ export function toRunConfig(
 /**
  * Load configuration values from environment variables.
  */
-export function loadEnvConfig(): Partial<BenchmarkConfig> {
+export function loadEnvConfig(): DeepPartial<BenchmarkConfig> {
   const env = process.env;
 
   return {
@@ -290,7 +295,7 @@ export function loadEnvConfig(): Partial<BenchmarkConfig> {
  */
 export function mergeConfig(
   fileConfig: BenchmarkConfig,
-  envConfig: Partial<BenchmarkConfig>
+  envConfig: DeepPartial<BenchmarkConfig>
 ): BenchmarkConfig {
   // Deep merge, preferring env values over file values
   return BenchmarkConfigSchema.parse({

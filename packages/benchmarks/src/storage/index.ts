@@ -16,14 +16,8 @@ export {
   parseTimestampPath,
 } from './version-tagger';
 
-export {
-  ResultsWriter,
-  ResultsWriterConfig,
-  createResultsWriter,
-} from './results-writer';
+export { ResultsWriter, createResultsWriter } from './results-writer';
+export type { ResultsWriterConfig } from './results-writer';
 
-export {
-  HistoryReader,
-  HistoryReaderConfig,
-  createHistoryReader,
-} from './history-reader';
+export { HistoryReader, createHistoryReader } from './history-reader';
+export type { HistoryReaderConfig } from './history-reader';

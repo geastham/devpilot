@@ -63,12 +63,12 @@ export const reportCommand = new Command('report')
           consoleReporter.printSummary(run);
           consoleReporter.printResultsTable(run);
 
-          for (const result of run.results) {
+          for (const result of run.benchmarks) {
             if (result.comparison) {
               consoleReporter.printComparison(
                 result.benchmarkId,
                 result.comparison,
-                result.waveAnalysis
+                result.waveAnalysis ?? undefined
               );
             }
           }

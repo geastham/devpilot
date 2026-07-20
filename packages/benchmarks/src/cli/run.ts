@@ -38,16 +38,13 @@ export const runCommand = new Command('run')
       const benchmarksDir = options.benchmarksDir ?? join(projectRoot, 'benchmarks');
       const resultsDir = options.resultsDir ?? join(benchmarksDir, 'results');
 
-      // Load config if provided
-      let config = {};
-      if (options.config) {
-        config = await loadConfig(options.config);
-      }
+      // Load config (defaults when no path provided)
+      const config = await loadConfig(options.config);
 
       // Determine benchmarks to run
       let benchmarks: BenchmarkId[] = options.benchmarks;
       if (!benchmarks || benchmarks.length === 0) {
-        benchmarks = ['01-cli-static-site-gen', '02-rest-api-task-manager', '03-react-analytics-dashboard'];
+        benchmarks = ['01-forgepress', '02-taskforge', '03-insightboard'];
       }
 
       // Determine scenarios
@@ -56,16 +53,13 @@ export const runCommand = new Command('run')
         scenarios = ['baseline', 'devpilot'];
       }
 
-      // Build run config
-      const runConfig = toRunConfig({
-        ...config,
+      // Build run config with CLI overrides
+      const runConfig = toRunConfig(config, {
         benchmarks,
         scenarios,
-        execution: {
-          maxConcurrency: options.concurrency,
-          timeoutMs: options.timeout * 60 * 1000,
-          retryOnFailure: true,
-        },
+        parallel: options.parallel,
+        maxConcurrentSessions: options.concurrency,
+        timeoutMs: options.timeout * 60 * 1000,
       });
 
       if (options.dryRun) {
@@ -111,12 +105,12 @@ export const runCommand = new Command('run')
       reporter.printResultsTable(run);
 
       // Print detailed comparisons
-      for (const result of run.results) {
+      for (const result of run.benchmarks) {
         if (result.comparison) {
           reporter.printComparison(
             result.benchmarkId,
             result.comparison,
-            result.waveAnalysis
+            result.waveAnalysis ?? undefined
           );
         }
       }

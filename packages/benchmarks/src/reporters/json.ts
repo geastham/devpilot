@@ -7,7 +7,7 @@
 import { writeFile, mkdir } from 'fs/promises';
 import { join, dirname } from 'path';
 import type {
-  BenchmarkRun,
+  RunManifest,
   ScenarioResult,
   ComparisonResult,
   WaveAnalysis,
@@ -36,7 +36,7 @@ export class JsonReporter {
   /**
    * Generate full run report as JSON.
    */
-  generateRunReport(run: BenchmarkRun): string {
+  generateRunReport(run: RunManifest): string {
     const report = this.options.includeRawOutput
       ? run
       : this.stripRawOutput(run);
@@ -81,7 +81,6 @@ export class JsonReporter {
   ): string {
     const report = {
       scenario: scenario.scenario,
-      benchmarkId: scenario.benchmarkId,
       score,
       waveAnalysis,
       metrics: {
@@ -100,7 +99,7 @@ export class JsonReporter {
   /**
    * Generate summary report as JSON.
    */
-  generateSummaryReport(run: BenchmarkRun): string {
+  generateSummaryReport(run: RunManifest): string {
     const report = {
       id: run.id,
       version: run.version,
@@ -108,7 +107,7 @@ export class JsonReporter {
       status: run.status,
       durationMs: run.durationMs,
       summary: run.summary,
-      benchmarks: run.results.map((r) => ({
+      benchmarks: run.benchmarks.map((r) => ({
         benchmarkId: r.benchmarkId,
         comparison: r.comparison,
         waveAnalysis: r.waveAnalysis
@@ -136,13 +135,19 @@ export class JsonReporter {
   /**
    * Strip raw output from run for smaller file size.
    */
-  private stripRawOutput(run: BenchmarkRun): BenchmarkRun {
+  private stripRawOutput(run: RunManifest): RunManifest {
     return {
       ...run,
-      results: run.results.map((r) => ({
+      benchmarks: run.benchmarks.map((r) => ({
         ...r,
-        baseline: r.baseline ? this.stripScenarioOutput(r.baseline) : undefined,
-        devpilot: r.devpilot ? this.stripScenarioOutput(r.devpilot) : undefined,
+        scenarios: {
+          baseline: r.scenarios.baseline
+            ? this.stripScenarioOutput(r.scenarios.baseline)
+            : null,
+          devpilot: r.scenarios.devpilot
+            ? this.stripScenarioOutput(r.scenarios.devpilot)
+            : null,
+        },
       })),
     };
   }
@@ -155,11 +160,11 @@ export class JsonReporter {
       ...scenario,
       sessions: scenario.sessions.map((s) => ({
         ...s,
-        output: '[stripped]',
+        stdout: '[stripped]',
       })),
       acceptanceResults: {
         ...scenario.acceptanceResults,
-        output: '[stripped]',
+        scriptOutput: '[stripped]',
       },
     };
   }

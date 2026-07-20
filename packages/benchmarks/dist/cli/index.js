@@ -323,11 +323,15 @@ var WorkspaceManager = class {
     await this.initializePackageJson(workspacePath, benchmarkId, benchmarkPath);
     const workspaceId = `${runId}-${scenario}-${benchmarkId}`;
     const info = {
-      path: workspacePath,
-      benchmarkId,
-      scenario,
-      runId,
-      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+      id: workspaceId,
+      rootDir: workspacePath,
+      fixturesDir: fixturesDest,
+      acceptanceDir: acceptanceDest,
+      // No dedicated output subtree is created; the workspace root doubles as
+      // the output directory for generated artifacts.
+      outputDir: workspacePath,
+      prdPath: prdDest,
+      processIds: []
     };
     this.activeWorkspaces.set(workspaceId, info);
     return info;
@@ -445,10 +449,10 @@ var WorkspaceManager = class {
     if (!info) return;
     await this.processManager.killWorkspace(workspaceId);
     if (options.archive && options.archivePath) {
-      await this.archiveWorkspace(info.path, options.archivePath);
+      await this.archiveWorkspace(info.rootDir, options.archivePath);
     }
     try {
-      await (0, import_promises.rm)(info.path, { recursive: true, force: true });
+      await (0, import_promises.rm)(info.rootDir, { recursive: true, force: true });
     } catch {
     }
     this.activeWorkspaces.delete(workspaceId);
@@ -540,16 +544,15 @@ var AcceptanceRunner = class {
       }
       const result = await this.runTestScript(workspacePath, testScript);
       const tests = this.parseTestOutput(result.stdout + "\n" + result.stderr);
-      const passed = tests.filter((t) => t.passed).length;
-      const failed = tests.filter((t) => !t.passed).length;
+      const passed = tests.filter((t) => t.status === "pass").length;
+      const failed = tests.filter((t) => t.status === "fail").length;
       return {
-        tests,
+        totalTests: tests.length,
         passed,
         failed,
-        total: tests.length,
         passRate: tests.length > 0 ? passed / tests.length : 0,
-        output: result.stdout,
-        durationMs: Date.now() - startTime
+        details: tests,
+        scriptOutput: result.stdout
       };
     } finally {
       if (serverProcess) {
@@ -638,13 +641,13 @@ var AcceptanceRunner = class {
       if (passMatch) {
         tests.push({
           name: passMatch[2].trim(),
-          passed: true
+          status: "pass"
         });
       } else if (failMatch) {
         tests.push({
           name: failMatch[2].trim(),
-          passed: false,
-          error: this.findErrorContext(lines, lines.indexOf(line))
+          status: "fail",
+          output: this.findErrorContext(lines, lines.indexOf(line))
         });
       }
     }
@@ -656,10 +659,10 @@ var AcceptanceRunner = class {
         const passed = parseInt(summaryMatch[1], 10);
         const failed = parseInt(summaryMatch[2], 10);
         for (let i = 0; i < passed; i++) {
-          tests.push({ name: `Test ${i + 1}`, passed: true });
+          tests.push({ name: `Test ${i + 1}`, status: "pass" });
         }
         for (let i = 0; i < failed; i++) {
-          tests.push({ name: `Test ${passed + i + 1}`, passed: false });
+          tests.push({ name: `Test ${passed + i + 1}`, status: "fail" });
         }
       }
     }
@@ -683,13 +686,12 @@ var AcceptanceRunner = class {
    */
   createEmptyResult(reason) {
     return {
-      tests: [],
+      totalTests: 0,
       passed: 0,
       failed: 0,
-      total: 0,
       passRate: 0,
-      output: reason,
-      durationMs: 0
+      details: [],
+      scriptOutput: reason
     };
   }
   /**
@@ -726,98 +728,153 @@ var BaselineExecutor = class {
    */
   async execute(workspace, collector) {
     const startTime = Date.now();
+    const startedAt = new Date(startTime).toISOString();
     const sessionId = (0, import_cuid2.createId)();
     const sessions = [];
     const errors = [];
-    collector.registerSession(sessionId, this.config.model);
     try {
-      const prdPath = (0, import_path3.join)(workspace.path, "PRD.md");
+      const prdPath = (0, import_path3.join)(workspace.rootDir, "PRD.md");
       const prdContent = await (0, import_promises3.readFile)(prdPath, "utf-8");
       const prompt = this.buildPrompt(prdContent);
-      collector.getTimeline().recordEvent({
-        type: "session_start",
-        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-        sessionId
-      });
+      collector.getTimeline().recordEvent("session_start", { sessionId });
       const result = await this.executeClaudeCode(workspace, prompt, sessionId);
-      collector.getTimeline().recordEvent({
-        type: "session_complete",
-        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-        sessionId
-      });
+      collector.getTimeline().recordEvent("session_complete", { sessionId });
       const usage = this.parseTokenUsage(result.stdout);
-      if (usage) {
-        collector.recordTokenUsage(sessionId, usage);
-      }
-      sessions.push({
+      const session = this.buildSession(
         sessionId,
-        model: this.config.model,
-        startTime: new Date(startTime).toISOString(),
-        endTime: (/* @__PURE__ */ new Date()).toISOString(),
-        durationMs: Date.now() - startTime,
-        tokenUsage: usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-        exitCode: result.exitCode ?? 0,
-        output: result.stdout
-      });
-      const acceptanceResults = await this.acceptanceRunner.run(workspace.path);
+        prompt,
+        startedAt,
+        usage,
+        result
+      );
+      collector.registerSession(session);
+      sessions.push(session);
+      const acceptanceResults = await this.acceptanceRunner.run(
+        workspace.rootDir
+      );
       if (acceptanceResults.passRate < 1 && this.config.retryOnFailure) {
         const retryResult = await this.retryExecution(
           workspace,
           acceptanceResults,
           collector,
-          sessions
+          sessions,
+          startedAt
         );
         if (retryResult) {
           return retryResult;
         }
       }
-      const metrics = collector.aggregateScenarioMetrics();
-      return {
-        scenario: "baseline",
-        benchmarkId: workspace.benchmarkId,
-        startTime: new Date(startTime).toISOString(),
-        endTime: (/* @__PURE__ */ new Date()).toISOString(),
-        wallClockMs: Date.now() - startTime,
+      const metrics = collector.aggregateScenarioMetrics(
         sessions,
-        totalTokens: metrics.totalTokens,
-        totalCostUsd: metrics.totalCost,
+        acceptanceResults.passRate
+      );
+      return this.buildResult(
+        "completed",
+        startedAt,
+        startTime,
+        sessions,
+        metrics,
         acceptanceResults,
-        firstAttemptPassRate: acceptanceResults.passRate,
-        reworkRatio: 1,
+        collector,
+        errors,
+        acceptanceResults.passRate,
+        1
         // Single session, no rework
-        errors
-      };
+      );
     } catch (error) {
-      const execError = {
+      errors.push({
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        phase: "execution",
         code: "EXECUTION_ERROR",
         message: error instanceof Error ? error.message : String(error),
-        context: "baseline-executor",
         recoverable: false
-      };
-      errors.push(execError);
-      return {
-        scenario: "baseline",
-        benchmarkId: workspace.benchmarkId,
-        startTime: new Date(startTime).toISOString(),
-        endTime: (/* @__PURE__ */ new Date()).toISOString(),
-        wallClockMs: Date.now() - startTime,
-        sessions,
-        totalTokens: 0,
-        totalCostUsd: 0,
-        acceptanceResults: {
-          tests: [],
-          passed: 0,
-          failed: 0,
-          total: 0,
-          passRate: 0,
-          output: "",
-          durationMs: 0
-        },
-        firstAttemptPassRate: 0,
-        reworkRatio: 1,
-        errors
-      };
+      });
+      return this.buildFailedResult(startedAt, startTime, sessions, collector, errors);
     }
+  }
+  /**
+   * Build a canonical session record from execution output.
+   */
+  buildSession(sessionId, prompt, startedAt, usage, result) {
+    return {
+      sessionId,
+      scenario: "baseline",
+      model: this.config.model,
+      prompt,
+      startedAt,
+      completedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      durationMs: Date.now() - new Date(startedAt).getTime(),
+      tokensInput: usage?.inputTokens ?? 0,
+      tokensOutput: usage?.outputTokens ?? 0,
+      cacheReadTokens: usage?.cacheReadTokens ?? 0,
+      cacheWriteTokens: usage?.cacheWriteTokens ?? 0,
+      costUsd: 0,
+      filesCreated: [],
+      filesModified: [],
+      success: (result.exitCode ?? 0) === 0,
+      stdout: result.stdout
+    };
+  }
+  /**
+   * Assemble a completed scenario result from aggregated metrics.
+   */
+  buildResult(status, startedAt, startTime, sessions, metrics, acceptanceResults, collector, errors, firstAttemptPassRate, reworkRatio) {
+    return {
+      scenario: "baseline",
+      status,
+      startedAt,
+      completedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      wallClockMs: Date.now() - startTime,
+      totalTokensInput: metrics.tokens.inputTokens,
+      totalTokensOutput: metrics.tokens.outputTokens,
+      totalTokens: metrics.tokens.totalTokens,
+      cacheReadTokens: metrics.tokens.cacheReadTokens,
+      cacheWriteTokens: metrics.tokens.cacheWriteTokens,
+      totalCostUsd: metrics.totalCostUsd,
+      costBreakdown: metrics.costBreakdown,
+      acceptanceResults,
+      firstAttemptPassRate,
+      reworkRatio,
+      sessions,
+      timeline: collector.exportTimeline(),
+      errors,
+      filesCreated: metrics.filesCreated,
+      filesModified: metrics.filesModified
+    };
+  }
+  /**
+   * Assemble a failed scenario result with zeroed metrics.
+   */
+  buildFailedResult(startedAt, startTime, sessions, collector, errors) {
+    return {
+      scenario: "baseline",
+      status: "failed",
+      startedAt,
+      completedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      wallClockMs: Date.now() - startTime,
+      totalTokensInput: 0,
+      totalTokensOutput: 0,
+      totalTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalCostUsd: 0,
+      costBreakdown: [],
+      acceptanceResults: {
+        totalTests: 0,
+        passed: 0,
+        failed: 0,
+        passRate: 0,
+        details: [],
+        scriptOutput: ""
+      },
+      firstAttemptPassRate: 0,
+      reworkRatio: 1,
+      sessions,
+      timeline: collector.exportTimeline(),
+      errors,
+      filesCreated: [],
+      filesModified: []
+    };
   }
   /**
    * Build the prompt for Claude Code.
@@ -854,7 +911,7 @@ Start implementation now.`;
       prompt
     ];
     return this.processManager.spawn(this.config.claudeCliPath, args, {
-      cwd: workspace.path,
+      cwd: workspace.rootDir,
       workspaceId: sessionId,
       timeoutMs: this.config.timeoutMs,
       env: {
@@ -880,8 +937,8 @@ Start implementation now.`;
                 inputTokens: parsed.usage.input_tokens,
                 outputTokens: parsed.usage.output_tokens,
                 totalTokens: parsed.usage.input_tokens + parsed.usage.output_tokens,
-                cacheCreationInputTokens: parsed.usage.cache_creation_input_tokens,
-                cacheReadInputTokens: parsed.usage.cache_read_input_tokens
+                cacheReadTokens: parsed.usage.cache_read_input_tokens ?? 0,
+                cacheWriteTokens: parsed.usage.cache_creation_input_tokens ?? 0
               };
             }
           } catch {
@@ -895,7 +952,9 @@ Start implementation now.`;
         return {
           inputTokens: parseInt(textMatch[2], 10),
           outputTokens: parseInt(textMatch[3], 10),
-          totalTokens: parseInt(textMatch[1], 10)
+          totalTokens: parseInt(textMatch[1], 10),
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0
         };
       }
     } catch {
@@ -905,60 +964,54 @@ Start implementation now.`;
   /**
    * Retry execution after test failures.
    */
-  async retryExecution(workspace, firstAttemptResults, collector, sessions) {
+  async retryExecution(workspace, firstAttemptResults, collector, sessions, scenarioStartedAt) {
     const retrySessionId = (0, import_cuid2.createId)();
     const retryStartTime = Date.now();
-    collector.registerSession(retrySessionId, this.config.model);
-    const failedTests = firstAttemptResults.tests.filter((t) => !t.passed).map((t) => `- ${t.name}${t.error ? `: ${t.error}` : ""}`).join("\n");
+    const retryStartedAt = new Date(retryStartTime).toISOString();
+    const failedTests = firstAttemptResults.details.filter((t) => t.status !== "pass").map((t) => `- ${t.name}${t.output ? `: ${t.output}` : ""}`).join("\n");
     const retryPrompt = `The following acceptance tests failed:
 
 ${failedTests}
 
 Please fix the issues and ensure all tests pass. Review the error messages and make the necessary corrections.`;
     try {
-      collector.getTimeline().recordEvent({
-        type: "session_start",
-        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      collector.getTimeline().recordEvent("session_start", {
         sessionId: retrySessionId
       });
       const result = await this.executeClaudeCode(workspace, retryPrompt, retrySessionId);
-      collector.getTimeline().recordEvent({
-        type: "session_complete",
-        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      collector.getTimeline().recordEvent("session_complete", {
         sessionId: retrySessionId
       });
       const usage = this.parseTokenUsage(result.stdout);
-      if (usage) {
-        collector.recordTokenUsage(retrySessionId, usage);
-      }
-      sessions.push({
-        sessionId: retrySessionId,
-        model: this.config.model,
-        startTime: new Date(retryStartTime).toISOString(),
-        endTime: (/* @__PURE__ */ new Date()).toISOString(),
-        durationMs: Date.now() - retryStartTime,
-        tokenUsage: usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-        exitCode: result.exitCode ?? 0,
-        output: result.stdout
-      });
-      const retryAcceptanceResults = await this.acceptanceRunner.run(workspace.path);
-      const metrics = collector.aggregateScenarioMetrics();
-      const totalWallClockMs = sessions.reduce((sum, s) => sum + s.durationMs, 0);
-      return {
-        scenario: "baseline",
-        benchmarkId: workspace.benchmarkId,
-        startTime: sessions[0].startTime,
-        endTime: (/* @__PURE__ */ new Date()).toISOString(),
-        wallClockMs: totalWallClockMs,
+      const session = this.buildSession(
+        retrySessionId,
+        retryPrompt,
+        retryStartedAt,
+        usage,
+        result
+      );
+      collector.registerSession(session);
+      sessions.push(session);
+      const retryAcceptanceResults = await this.acceptanceRunner.run(
+        workspace.rootDir
+      );
+      const metrics = collector.aggregateScenarioMetrics(
         sessions,
-        totalTokens: metrics.totalTokens,
-        totalCostUsd: metrics.totalCost,
-        acceptanceResults: retryAcceptanceResults,
-        firstAttemptPassRate: firstAttemptResults.passRate,
-        reworkRatio: sessions.length,
+        firstAttemptResults.passRate
+      );
+      return this.buildResult(
+        "completed",
+        scenarioStartedAt,
+        new Date(scenarioStartedAt).getTime(),
+        sessions,
+        metrics,
+        retryAcceptanceResults,
+        collector,
+        [],
+        firstAttemptResults.passRate,
+        sessions.length
         // Number of attempts
-        errors: []
-      };
+      );
     } catch (error) {
       return null;
     }
@@ -994,22 +1047,18 @@ var DevPilotExecutor = class {
    */
   async execute(workspace, collector) {
     const startTime = Date.now();
+    const startedAt = new Date(startTime).toISOString();
     const sessions = [];
     const waveExecutions = [];
     const errors = [];
     try {
-      const prdPath = (0, import_path4.join)(workspace.path, "PRD.md");
+      const prdPath = (0, import_path4.join)(workspace.rootDir, "PRD.md");
       const prdContent = await (0, import_promises4.readFile)(prdPath, "utf-8");
-      collector.getTimeline().recordEvent({
-        type: "run_start",
-        timestamp: (/* @__PURE__ */ new Date()).toISOString()
-      });
+      collector.getTimeline().recordEvent("run_start", {});
       const wavePlan = await this.generateWavePlan(workspace, prdContent, collector);
       let firstAttemptPassRate = 0;
       for (const wave of wavePlan.waves) {
-        collector.getTimeline().recordEvent({
-          type: "wave_start",
-          timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        collector.getTimeline().recordEvent("wave_start", {
           waveNumber: wave.waveNumber
         });
         const waveExecution = await this.executeWave(
@@ -1020,13 +1069,11 @@ var DevPilotExecutor = class {
           sessions
         );
         waveExecutions.push(waveExecution);
-        collector.getTimeline().recordEvent({
-          type: "wave_complete",
-          timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        collector.getTimeline().recordEvent("wave_complete", {
           waveNumber: wave.waveNumber
         });
       }
-      let acceptanceResults = await this.acceptanceRunner.run(workspace.path);
+      let acceptanceResults = await this.acceptanceRunner.run(workspace.rootDir);
       firstAttemptPassRate = acceptanceResults.passRate;
       if (acceptanceResults.passRate < 1 && this.config.retryOnFailure) {
         const remediationResult = await this.executeRemediationWave(
@@ -1041,61 +1088,137 @@ var DevPilotExecutor = class {
           acceptanceResults = remediationResult.acceptanceResults;
         }
       }
-      const metrics = collector.aggregateScenarioMetrics();
-      return {
-        scenario: "devpilot",
-        benchmarkId: workspace.benchmarkId,
-        startTime: new Date(startTime).toISOString(),
-        endTime: (/* @__PURE__ */ new Date()).toISOString(),
-        wallClockMs: Date.now() - startTime,
+      const metrics = collector.aggregateScenarioMetrics(
         sessions,
-        totalTokens: metrics.totalTokens,
-        totalCostUsd: metrics.totalCost,
+        firstAttemptPassRate
+      );
+      return this.buildResult(
+        "completed",
+        startedAt,
+        startTime,
+        sessions,
+        metrics,
         acceptanceResults,
-        wavePlan,
-        waveExecutions,
+        collector,
+        errors,
         firstAttemptPassRate,
-        reworkRatio: this.calculateReworkRatio(sessions, workspace),
-        errors
-      };
+        this.calculateReworkRatio(sessions, workspace),
+        wavePlan,
+        waveExecutions
+      );
     } catch (error) {
-      const execError = {
+      errors.push({
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        phase: "execution",
         code: "EXECUTION_ERROR",
         message: error instanceof Error ? error.message : String(error),
-        context: "devpilot-executor",
         recoverable: false
-      };
-      errors.push(execError);
-      return {
-        scenario: "devpilot",
-        benchmarkId: workspace.benchmarkId,
-        startTime: new Date(startTime).toISOString(),
-        endTime: (/* @__PURE__ */ new Date()).toISOString(),
-        wallClockMs: Date.now() - startTime,
+      });
+      return this.buildFailedResult(
+        startedAt,
+        startTime,
         sessions,
-        totalTokens: 0,
-        totalCostUsd: 0,
-        acceptanceResults: {
-          tests: [],
-          passed: 0,
-          failed: 0,
-          total: 0,
-          passRate: 0,
-          output: "",
-          durationMs: 0
-        },
-        firstAttemptPassRate: 0,
-        reworkRatio: 1,
-        errors
-      };
+        collector,
+        errors,
+        waveExecutions
+      );
     }
+  }
+  /**
+   * Assemble a completed scenario result from aggregated metrics.
+   */
+  buildResult(status, startedAt, startTime, sessions, metrics, acceptanceResults, collector, errors, firstAttemptPassRate, reworkRatio, wavePlan, waveExecutionLog) {
+    return {
+      scenario: "devpilot",
+      status,
+      startedAt,
+      completedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      wallClockMs: Date.now() - startTime,
+      totalTokensInput: metrics.tokens.inputTokens,
+      totalTokensOutput: metrics.tokens.outputTokens,
+      totalTokens: metrics.tokens.totalTokens,
+      cacheReadTokens: metrics.tokens.cacheReadTokens,
+      cacheWriteTokens: metrics.tokens.cacheWriteTokens,
+      totalCostUsd: metrics.totalCostUsd,
+      costBreakdown: metrics.costBreakdown,
+      acceptanceResults,
+      firstAttemptPassRate,
+      wavePlan,
+      waveExecutionLog,
+      reworkRatio,
+      sessions,
+      timeline: collector.exportTimeline(),
+      errors,
+      filesCreated: metrics.filesCreated,
+      filesModified: metrics.filesModified
+    };
+  }
+  /**
+   * Assemble a failed scenario result with zeroed metrics.
+   */
+  buildFailedResult(startedAt, startTime, sessions, collector, errors, waveExecutionLog) {
+    return {
+      scenario: "devpilot",
+      status: "failed",
+      startedAt,
+      completedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      wallClockMs: Date.now() - startTime,
+      totalTokensInput: 0,
+      totalTokensOutput: 0,
+      totalTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalCostUsd: 0,
+      costBreakdown: [],
+      acceptanceResults: {
+        totalTests: 0,
+        passed: 0,
+        failed: 0,
+        passRate: 0,
+        details: [],
+        scriptOutput: ""
+      },
+      firstAttemptPassRate: 0,
+      waveExecutionLog,
+      reworkRatio: 1,
+      sessions,
+      timeline: collector.exportTimeline(),
+      errors,
+      filesCreated: [],
+      filesModified: []
+    };
+  }
+  /**
+   * Build a canonical session record from execution output.
+   */
+  buildSession(sessionId, prompt, startedAt, usage, result, options = {}) {
+    return {
+      sessionId,
+      scenario: "devpilot",
+      waveNumber: options.waveNumber,
+      taskId: options.taskId,
+      model: this.config.model,
+      prompt,
+      startedAt,
+      completedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      durationMs: Date.now() - new Date(startedAt).getTime(),
+      tokensInput: usage?.inputTokens ?? 0,
+      tokensOutput: usage?.outputTokens ?? 0,
+      cacheReadTokens: usage?.cacheReadTokens ?? 0,
+      cacheWriteTokens: usage?.cacheWriteTokens ?? 0,
+      costUsd: 0,
+      filesCreated: [],
+      filesModified: [],
+      success: (result.exitCode ?? 0) === 0,
+      stdout: result.stdout
+    };
   }
   /**
    * Generate wave plan from PRD.
    */
   async generateWavePlan(workspace, prdContent, collector) {
     const plannerSessionId = (0, import_cuid22.createId)();
-    collector.registerSession(plannerSessionId, this.config.plannerModel);
+    const plannerStartedAt = (/* @__PURE__ */ new Date()).toISOString();
     const planPrompt = `Analyze the following PRD and create a wave plan for parallel execution.
 
 # PRD
@@ -1130,22 +1253,27 @@ Rules:
 4. Include all files that will be created/modified
 
 Output ONLY valid JSON, no other text.`;
-    collector.getTimeline().recordEvent({
-      type: "session_start",
-      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    collector.getTimeline().recordEvent("session_start", {
       sessionId: plannerSessionId
     });
     const result = await this.executeClaudeCode(workspace, planPrompt, plannerSessionId);
-    collector.getTimeline().recordEvent({
-      type: "session_complete",
-      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    collector.getTimeline().recordEvent("session_complete", {
       sessionId: plannerSessionId
     });
     const wavePlan = this.parseWavePlan(result.stdout);
     const usage = this.parseTokenUsage(result.stdout);
-    if (usage) {
-      collector.recordTokenUsage(plannerSessionId, usage);
-    }
+    const plannerSession = {
+      ...this.buildSession(
+        plannerSessionId,
+        planPrompt,
+        plannerStartedAt,
+        usage,
+        result,
+        { taskId: "planner" }
+      ),
+      model: this.config.plannerModel
+    };
+    collector.registerSession(plannerSession);
     return wavePlan;
   }
   /**
@@ -1159,16 +1287,13 @@ Output ONLY valid JSON, no other text.`;
         return {
           waves: parsed.waves.map((w, idx) => ({
             waveNumber: w.waveNumber ?? idx + 1,
-            tasks: w.tasks.map((t) => ({
-              id: t.id,
-              description: t.description,
-              files: t.files ?? [],
-              dependencies: t.dependencies ?? []
-            })),
-            status: "pending"
+            tasks: w.tasks.map((t) => this.toPlannedTask(t)),
+            dependsOn: w.dependsOn ?? [],
+            estimatedDurationMs: 0
           })),
-          totalTasks: parsed.totalTasks ?? 0,
-          estimatedParallelism: parsed.estimatedParallelism ?? 1
+          criticalPathMs: 0,
+          maxParallelism: parsed.estimatedParallelism ?? 1,
+          totalTasks: parsed.totalTasks ?? 0
         };
       } catch {
       }
@@ -1178,18 +1303,36 @@ Output ONLY valid JSON, no other text.`;
         {
           waveNumber: 1,
           tasks: [
-            {
+            this.toPlannedTask({
               id: "full-implementation",
               description: "Implement entire project",
               files: [],
               dependencies: []
-            }
+            })
           ],
-          status: "pending"
+          dependsOn: [],
+          estimatedDurationMs: 0
         }
       ],
-      totalTasks: 1,
-      estimatedParallelism: 1
+      criticalPathMs: 0,
+      maxParallelism: 1,
+      totalTasks: 1
+    };
+  }
+  /**
+   * Convert a raw parsed task object into a canonical PlannedTask.
+   */
+  toPlannedTask(raw) {
+    const description = raw.description ?? raw.id;
+    return {
+      id: raw.id,
+      name: description,
+      files: raw.files ?? [],
+      prompt: description,
+      // Executor is configured with a single model tier for task sessions.
+      model: this.config.model,
+      dependsOn: raw.dependencies ?? [],
+      estimatedDurationMs: 0
     };
   }
   /**
@@ -1197,14 +1340,21 @@ Output ONLY valid JSON, no other text.`;
    */
   async executeWave(workspace, wave, prdContent, collector, sessions) {
     const waveStartTime = Date.now();
+    const waveStartedAt = new Date(waveStartTime).toISOString();
     const taskPromises = [];
-    const concurrencyLimit = Math.min(this.config.maxConcurrency, wave.tasks.length);
+    const concurrencyLimit = Math.min(this.config.maxConcurrency, wave.tasks.length) || 1;
     const taskQueue = [...wave.tasks];
     const activeTasks = [];
     while (taskQueue.length > 0 || activeTasks.length > 0) {
       while (activeTasks.length < concurrencyLimit && taskQueue.length > 0) {
         const task = taskQueue.shift();
-        const taskPromise = this.executeTask(workspace, task, prdContent, collector).then((session) => {
+        const taskPromise = this.executeTask(
+          workspace,
+          task,
+          prdContent,
+          collector,
+          wave.waveNumber
+        ).then((session) => {
           sessions.push(session);
           return { task, session };
         });
@@ -1225,26 +1375,30 @@ Output ONLY valid JSON, no other text.`;
       }
     }
     const results = await Promise.all(taskPromises);
+    const completedTasks = results.filter((r) => r.session.success).length;
     return {
       waveNumber: wave.waveNumber,
-      startTime: new Date(waveStartTime).toISOString(),
-      endTime: (/* @__PURE__ */ new Date()).toISOString(),
-      durationMs: Date.now() - waveStartTime,
-      tasksCompleted: results.length,
-      tasksFailed: results.filter((r) => r.session.exitCode !== 0).length
+      plannedTasks: wave.tasks.length,
+      completedTasks,
+      failedTasks: results.length - completedTasks,
+      startedAt: waveStartedAt,
+      completedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      wallClockMs: Date.now() - waveStartTime,
+      sessions: results.map((r) => r.session),
+      parallelismActual: concurrencyLimit,
+      idleTimeMs: 0
     };
   }
   /**
    * Execute a single task.
    */
-  async executeTask(workspace, task, prdContent, collector) {
+  async executeTask(workspace, task, prdContent, collector, waveNumber) {
     const sessionId = (0, import_cuid22.createId)();
-    const startTime = Date.now();
-    collector.registerSession(sessionId, this.config.model);
+    const startedAt = (/* @__PURE__ */ new Date()).toISOString();
     const taskPrompt = `You are implementing part of a larger project. Focus ONLY on this specific task:
 
 # Task
-${task.description}
+${task.name}
 
 # Files to create/modify
 ${task.files.join("\n") || "Determine based on task"}
@@ -1259,34 +1413,22 @@ ${prdContent}
 4. Do not duplicate functionality that other tasks will handle
 
 Implement this task now.`;
-    collector.getTimeline().recordEvent({
-      type: "session_start",
-      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    collector.getTimeline().recordEvent("session_start", {
       sessionId,
       taskId: task.id
     });
     const result = await this.executeClaudeCode(workspace, taskPrompt, sessionId);
-    collector.getTimeline().recordEvent({
-      type: "session_complete",
-      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    collector.getTimeline().recordEvent("session_complete", {
       sessionId,
       taskId: task.id
     });
     const usage = this.parseTokenUsage(result.stdout);
-    if (usage) {
-      collector.recordTokenUsage(sessionId, usage);
-    }
-    return {
-      sessionId,
-      model: this.config.model,
-      startTime: new Date(startTime).toISOString(),
-      endTime: (/* @__PURE__ */ new Date()).toISOString(),
-      durationMs: Date.now() - startTime,
-      tokenUsage: usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-      exitCode: result.exitCode ?? 0,
-      output: result.stdout,
-      taskId: task.id
-    };
+    const session = this.buildSession(sessionId, taskPrompt, startedAt, usage, result, {
+      taskId: task.id,
+      waveNumber
+    });
+    collector.registerSession(session);
+    return session;
   }
   /**
    * Execute remediation wave for failed tests.
@@ -1294,8 +1436,8 @@ Implement this task now.`;
   async executeRemediationWave(workspace, acceptanceResults, prdContent, collector, sessions) {
     const remediationSessionId = (0, import_cuid22.createId)();
     const startTime = Date.now();
-    collector.registerSession(remediationSessionId, this.config.model);
-    const failedTests = acceptanceResults.tests.filter((t) => !t.passed).map((t) => `- ${t.name}${t.error ? `: ${t.error}` : ""}`).join("\n");
+    const startedAt = new Date(startTime).toISOString();
+    const failedTests = acceptanceResults.details.filter((t) => t.status !== "pass").map((t) => `- ${t.name}${t.output ? `: ${t.output}` : ""}`).join("\n");
     const remediationPrompt = `Some acceptance tests failed. Fix the issues:
 
 # Failed Tests
@@ -1311,9 +1453,7 @@ ${prdContent}
 
 Fix the issues now.`;
     try {
-      collector.getTimeline().recordEvent({
-        type: "session_start",
-        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      collector.getTimeline().recordEvent("session_start", {
         sessionId: remediationSessionId
       });
       const result = await this.executeClaudeCode(
@@ -1321,36 +1461,34 @@ Fix the issues now.`;
         remediationPrompt,
         remediationSessionId
       );
-      collector.getTimeline().recordEvent({
-        type: "session_complete",
-        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      collector.getTimeline().recordEvent("session_complete", {
         sessionId: remediationSessionId
       });
       const usage = this.parseTokenUsage(result.stdout);
-      if (usage) {
-        collector.recordTokenUsage(remediationSessionId, usage);
-      }
-      sessions.push({
-        sessionId: remediationSessionId,
-        model: this.config.model,
-        startTime: new Date(startTime).toISOString(),
-        endTime: (/* @__PURE__ */ new Date()).toISOString(),
-        durationMs: Date.now() - startTime,
-        tokenUsage: usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-        exitCode: result.exitCode ?? 0,
-        output: result.stdout,
-        taskId: "remediation"
-      });
-      const newAcceptanceResults = await this.acceptanceRunner.run(workspace.path);
+      const session = this.buildSession(
+        remediationSessionId,
+        remediationPrompt,
+        startedAt,
+        usage,
+        result,
+        { taskId: "remediation" }
+      );
+      collector.registerSession(session);
+      sessions.push(session);
+      const newAcceptanceResults = await this.acceptanceRunner.run(workspace.rootDir);
       return {
         waveExecution: {
           waveNumber: -1,
           // Remediation wave
-          startTime: new Date(startTime).toISOString(),
-          endTime: (/* @__PURE__ */ new Date()).toISOString(),
-          durationMs: Date.now() - startTime,
-          tasksCompleted: 1,
-          tasksFailed: 0
+          plannedTasks: 1,
+          completedTasks: session.success ? 1 : 0,
+          failedTasks: session.success ? 0 : 1,
+          startedAt,
+          completedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          wallClockMs: Date.now() - startTime,
+          sessions: [session],
+          parallelismActual: 1,
+          idleTimeMs: 0
         },
         acceptanceResults: newAcceptanceResults
       };
@@ -1372,7 +1510,7 @@ Fix the issues now.`;
       prompt
     ];
     return this.processManager.spawn(this.config.claudeCliPath, args, {
-      cwd: workspace.path,
+      cwd: workspace.rootDir,
       workspaceId: sessionId,
       timeoutMs: this.config.timeoutMs,
       env: {
@@ -1397,8 +1535,8 @@ Fix the issues now.`;
                 inputTokens: parsed.usage.input_tokens,
                 outputTokens: parsed.usage.output_tokens,
                 totalTokens: parsed.usage.input_tokens + parsed.usage.output_tokens,
-                cacheCreationInputTokens: parsed.usage.cache_creation_input_tokens,
-                cacheReadInputTokens: parsed.usage.cache_read_input_tokens
+                cacheReadTokens: parsed.usage.cache_read_input_tokens ?? 0,
+                cacheWriteTokens: parsed.usage.cache_creation_input_tokens ?? 0
               };
             }
           } catch {
@@ -1415,7 +1553,9 @@ Fix the issues now.`;
   calculateReworkRatio(sessions, workspace) {
     const fileEditCounts = /* @__PURE__ */ new Map();
     for (const session of sessions) {
-      const fileMatches = session.output.match(/(?:create|edit|write)\s+['"]([\w\/\-\.]+)['"]/gi);
+      const fileMatches = (session.stdout ?? "").match(
+        /(?:create|edit|write)\s+['"]([\w\/\-\.]+)['"]/gi
+      );
       if (fileMatches) {
         for (const match of fileMatches) {
           const file = match.replace(/^(create|edit|write)\s+['"]/i, "").replace(/['"]$/, "");
@@ -2366,6 +2506,17 @@ var MetricsCollector = class {
     session.filesModified.forEach((f) => this.filesModified.add(f));
   }
   /**
+   * Record token usage for a session directly.
+   *
+   * Convenience wrapper around the underlying token tracker that resolves the
+   * model from the registered session (falling back to 'unknown' when the
+   * session has not been registered yet).
+   */
+  recordTokenUsage(sessionId, usage) {
+    const model = this.sessions.get(sessionId)?.model ?? "unknown";
+    this.tokenTracker.recordUsage(sessionId, model, usage);
+  }
+  /**
    * Update an existing session.
    */
   updateSession(sessionId, update) {
@@ -2546,6 +2697,12 @@ var MetricsCollector = class {
   // ===========================================================================
   // Export
   // ===========================================================================
+  /**
+   * Get the underlying timeline recorder for direct event recording.
+   */
+  getTimeline() {
+    return this.timeline;
+  }
   /**
    * Export timeline events.
    */
@@ -3362,7 +3519,10 @@ var BenchmarkRunner = class {
         verbose: this.config.verbose
       }
     );
-    this.resultsWriter = createResultsWriter(this.config.resultsDir);
+    this.resultsWriter = createResultsWriter({
+      resultsDir: this.config.resultsDir,
+      projectRoot: this.config.projectRoot
+    });
     this.scoringEngine = createScoringEngine();
     this.waveAnalyzer = createWaveAnalyzer();
     this.comparator = createComparator();
@@ -3401,53 +3561,46 @@ var BenchmarkRunner = class {
         }
       }
       const endTime = /* @__PURE__ */ new Date();
-      const run = {
+      const benchmarks = results.map((r) => ({
+        id: (0, import_cuid23.createId)(),
+        benchmarkId: r.benchmarkId,
+        devpilotVersion: version.version,
+        gitCommit: version.gitCommit,
+        gitTag: version.gitTag,
+        timestamp: startTime.toISOString(),
+        config: runConfig,
+        scenarios: {
+          baseline: r.baseline ?? null,
+          devpilot: r.devpilot ?? null
+        },
+        comparison: r.comparison ?? null,
+        compositeScore: r.devpilotScore ?? r.baselineScore ?? null,
+        waveAnalysis: r.waveAnalysis ?? null
+      }));
+      const manifest = {
         id: runId,
         version: version.version,
         gitCommit: version.gitCommit,
         gitTag: version.gitTag,
         timestamp: startTime.toISOString(),
         config: runConfig,
-        results: results.map((r) => ({
-          benchmarkId: r.benchmarkId,
-          baseline: r.baseline,
-          devpilot: r.devpilot,
-          comparison: r.comparison,
-          waveAnalysis: r.waveAnalysis
-        })),
-        summary: this.createSummary(results),
         status: this.determineStatus(results),
-        durationMs: endTime.getTime() - startTime.getTime()
+        durationMs: endTime.getTime() - startTime.getTime(),
+        benchmarks,
+        summary: this.createSummary(results),
+        pricingSnapshot: createMetricsCollector().getPricingSnapshot()
       };
-      await this.resultsWriter.writeRunManifest(run);
-      for (const result of results) {
-        if (result.baseline) {
-          await this.resultsWriter.writeScenarioResult(
-            runId,
-            result.benchmarkId,
-            "baseline",
-            result.baseline
+      const runDir = await this.resultsWriter.writeRunManifest(manifest);
+      for (const benchmarkRun of benchmarks) {
+        await this.resultsWriter.writeBenchmarkResult(runDir, benchmarkRun);
+        if (benchmarkRun.waveAnalysis) {
+          await this.resultsWriter.writeWaveAnalysis(
+            (0, import_path5.join)(runDir, benchmarkRun.benchmarkId),
+            benchmarkRun.waveAnalysis
           );
-        }
-        if (result.devpilot) {
-          await this.resultsWriter.writeScenarioResult(
-            runId,
-            result.benchmarkId,
-            "devpilot",
-            result.devpilot
-          );
-        }
-        if (result.comparison) {
-          await this.resultsWriter.writeBenchmarkResult(runId, result.benchmarkId, {
-            comparison: result.comparison,
-            waveAnalysis: result.waveAnalysis
-          });
         }
       }
-      await this.resultsWriter.updateLatestSymlink(
-        (0, import_path5.join)(this.config.resultsDir, version.version, startTime.toISOString().replace(/[:.]/g, "-"))
-      );
-      return run;
+      return manifest;
     } finally {
       await this.workspaceManager.cleanupAll();
       await this.processManager.killAll();
@@ -3469,7 +3622,7 @@ var BenchmarkRunner = class {
         benchmarksDir: this.config.benchmarksDir,
         archiveOnCleanup: this.config.archiveWorkspaces
       });
-      const baselineCollector = createMetricsCollector(runConfig.pricing);
+      const baselineCollector = createMetricsCollector();
       result.baseline = await this.baselineExecutor.execute(baselineWorkspace, baselineCollector);
       result.baselineScore = this.scoringEngine.calculateScore(result.baseline);
       const workspaceId = WorkspaceManager.getWorkspaceId(runId, "baseline", benchmarkId);
@@ -3490,7 +3643,7 @@ var BenchmarkRunner = class {
         benchmarksDir: this.config.benchmarksDir,
         archiveOnCleanup: this.config.archiveWorkspaces
       });
-      const devpilotCollector = createMetricsCollector(runConfig.pricing);
+      const devpilotCollector = createMetricsCollector();
       result.devpilot = await this.devpilotExecutor.execute(devpilotWorkspace, devpilotCollector);
       if (groundTruth && result.devpilot.wavePlan) {
         result.waveAnalysis = this.waveAnalyzer.analyze(result.devpilot.wavePlan, groundTruth);
@@ -3549,19 +3702,28 @@ var BenchmarkRunner = class {
    */
   createSummary(results) {
     const comparisons = results.filter((r) => r.comparison).map((r) => r.comparison);
+    const passedBenchmarks = results.filter(
+      (r) => (!r.baseline || r.baseline.acceptanceResults.passRate === 1) && (!r.devpilot || r.devpilot.acceptanceResults.passRate === 1)
+    ).length;
+    const scores = results.map((r) => r.devpilotScore ?? r.baselineScore).filter((s) => s !== void 0);
+    const avgCompositeScore = scores.length > 0 ? scores.reduce((sum, s) => sum + s.total, 0) / scores.length : 0;
     if (comparisons.length === 0) {
       return {
         totalBenchmarks: results.length,
+        passedBenchmarks,
         avgSpeedup: 1,
         avgCostReduction: 0,
-        avgQualityDelta: 0
+        avgQualityDelta: 0,
+        avgCompositeScore
       };
     }
     return {
       totalBenchmarks: results.length,
+      passedBenchmarks,
       avgSpeedup: comparisons.reduce((sum, c) => sum + c.speedup, 0) / comparisons.length,
       avgCostReduction: comparisons.reduce((sum, c) => sum + c.costReduction, 0) / comparisons.length,
-      avgQualityDelta: comparisons.reduce((sum, c) => sum + c.qualityDelta, 0) / comparisons.length
+      avgQualityDelta: comparisons.reduce((sum, c) => sum + c.qualityDelta, 0) / comparisons.length,
+      avgCompositeScore
     };
   }
   /**
@@ -3651,7 +3813,7 @@ var ConsoleReporter = class {
       import_chalk.default.gray("  Benchmark".padEnd(25)) + import_chalk.default.gray("Speedup".padEnd(12)) + import_chalk.default.gray("Cost".padEnd(12)) + import_chalk.default.gray("Quality".padEnd(12)) + import_chalk.default.gray("Wave".padEnd(10))
     );
     console.log(import_chalk.default.gray("  " + "\u2500".repeat(65)));
-    for (const result of run.results) {
+    for (const result of run.benchmarks) {
       const name = result.benchmarkId.padEnd(23);
       const speedup = result.comparison ? this.formatSpeedup(result.comparison.speedup) : import_chalk.default.gray("-".padEnd(10));
       const cost = result.comparison ? this.formatPercentage(result.comparison.costReduction, true) : import_chalk.default.gray("-".padEnd(10));
@@ -3878,27 +4040,21 @@ var runCommand = new import_commander.Command("run").description("Execute benchm
     const projectRoot = process.cwd();
     const benchmarksDir = options.benchmarksDir ?? (0, import_path6.join)(projectRoot, "benchmarks");
     const resultsDir = options.resultsDir ?? (0, import_path6.join)(benchmarksDir, "results");
-    let config = {};
-    if (options.config) {
-      config = await loadConfig(options.config);
-    }
+    const config = await loadConfig(options.config);
     let benchmarks = options.benchmarks;
     if (!benchmarks || benchmarks.length === 0) {
-      benchmarks = ["01-cli-static-site-gen", "02-rest-api-task-manager", "03-react-analytics-dashboard"];
+      benchmarks = ["01-forgepress", "02-taskforge", "03-insightboard"];
     }
     let scenarios = options.scenarios;
     if (!scenarios || scenarios.length === 0) {
       scenarios = ["baseline", "devpilot"];
     }
-    const runConfig = toRunConfig({
-      ...config,
+    const runConfig = toRunConfig(config, {
       benchmarks,
       scenarios,
-      execution: {
-        maxConcurrency: options.concurrency,
-        timeoutMs: options.timeout * 60 * 1e3,
-        retryOnFailure: true
-      }
+      parallel: options.parallel,
+      maxConcurrentSessions: options.concurrency,
+      timeoutMs: options.timeout * 60 * 1e3
     });
     if (options.dryRun) {
       console.log("Dry run - configuration validated:");
@@ -3933,12 +4089,12 @@ var runCommand = new import_commander.Command("run").description("Execute benchm
     reporter.printHeader(run);
     reporter.printSummary(run);
     reporter.printResultsTable(run);
-    for (const result of run.results) {
+    for (const result of run.benchmarks) {
       if (result.comparison) {
         reporter.printComparison(
           result.benchmarkId,
           result.comparison,
-          result.waveAnalysis
+          result.waveAnalysis ?? void 0
         );
       }
     }
@@ -4235,7 +4391,6 @@ var JsonReporter = class {
   generateScoreReport(scenario, score, waveAnalysis) {
     const report = {
       scenario: scenario.scenario,
-      benchmarkId: scenario.benchmarkId,
       score,
       waveAnalysis,
       metrics: {
@@ -4260,7 +4415,7 @@ var JsonReporter = class {
       status: run.status,
       durationMs: run.durationMs,
       summary: run.summary,
-      benchmarks: run.results.map((r) => ({
+      benchmarks: run.benchmarks.map((r) => ({
         benchmarkId: r.benchmarkId,
         comparison: r.comparison,
         waveAnalysis: r.waveAnalysis ? {
@@ -4286,10 +4441,12 @@ var JsonReporter = class {
   stripRawOutput(run) {
     return {
       ...run,
-      results: run.results.map((r) => ({
+      benchmarks: run.benchmarks.map((r) => ({
         ...r,
-        baseline: r.baseline ? this.stripScenarioOutput(r.baseline) : void 0,
-        devpilot: r.devpilot ? this.stripScenarioOutput(r.devpilot) : void 0
+        scenarios: {
+          baseline: r.scenarios.baseline ? this.stripScenarioOutput(r.scenarios.baseline) : null,
+          devpilot: r.scenarios.devpilot ? this.stripScenarioOutput(r.scenarios.devpilot) : null
+        }
       }))
     };
   }
@@ -4301,11 +4458,11 @@ var JsonReporter = class {
       ...scenario,
       sessions: scenario.sessions.map((s) => ({
         ...s,
-        output: "[stripped]"
+        stdout: "[stripped]"
       })),
       acceptanceResults: {
         ...scenario.acceptanceResults,
-        output: "[stripped]"
+        scriptOutput: "[stripped]"
       }
     };
   }
@@ -4562,7 +4719,7 @@ var MarkdownReporter = class {
     lines.push("");
     lines.push(this.generateResultsTable(run));
     lines.push("");
-    for (const result of run.results) {
+    for (const result of run.benchmarks) {
       lines.push(`## ${result.benchmarkId}`);
       lines.push("");
       if (result.comparison) {
@@ -4577,16 +4734,16 @@ var MarkdownReporter = class {
         lines.push(this.generateWaveAnalysisSection(result.waveAnalysis));
         lines.push("");
       }
-      if (result.baseline) {
+      if (result.scenarios.baseline) {
         lines.push("### Baseline Scenario");
         lines.push("");
-        lines.push(this.generateScenarioSection(result.baseline));
+        lines.push(this.generateScenarioSection(result.scenarios.baseline));
         lines.push("");
       }
-      if (result.devpilot) {
+      if (result.scenarios.devpilot) {
         lines.push("### DevPilot Scenario");
         lines.push("");
-        lines.push(this.generateScenarioSection(result.devpilot));
+        lines.push(this.generateScenarioSection(result.scenarios.devpilot));
         lines.push("");
       }
     }
@@ -4640,7 +4797,7 @@ var MarkdownReporter = class {
     const lines = [];
     lines.push("| Benchmark | Speedup | Cost Reduction | Quality Delta | Wave Score |");
     lines.push("|-----------|---------|----------------|---------------|------------|");
-    for (const result of run.results) {
+    for (const result of run.benchmarks) {
       const speedup = result.comparison ? `${result.comparison.speedup.toFixed(2)}x` : "-";
       const costReduction = result.comparison ? `${(result.comparison.costReduction * 100).toFixed(1)}%` : "-";
       const qualityDelta = result.comparison ? `${(result.comparison.qualityDelta * 100).toFixed(1)}%` : "-";
@@ -4743,8 +4900,8 @@ var MarkdownReporter = class {
     lines.push(`${"\u2500".repeat(widthChars + 10)}`);
     for (const [sessionId, sessionEvents] of sessions) {
       const shortId = sessionId.slice(0, 8);
-      const startEvent = sessionEvents.find((e) => e.type === "session_start");
-      const endEvent = sessionEvents.find((e) => e.type === "session_complete");
+      const startEvent = sessionEvents.find((e) => e.eventType === "session_start");
+      const endEvent = sessionEvents.find((e) => e.eventType === "session_complete");
       if (startEvent && endEvent) {
         const startPos = Math.floor(
           (new Date(startEvent.timestamp).getTime() - minTime) / range * widthChars
@@ -4837,12 +4994,12 @@ var reportCommand = new import_commander2.Command("report").description("Generat
         consoleReporter.printHeader(run);
         consoleReporter.printSummary(run);
         consoleReporter.printResultsTable(run);
-        for (const result of run.results) {
+        for (const result of run.benchmarks) {
           if (result.comparison) {
             consoleReporter.printComparison(
               result.benchmarkId,
               result.comparison,
-              result.waveAnalysis
+              result.waveAnalysis ?? void 0
             );
           }
         }
@@ -4900,32 +5057,36 @@ var compareCommand = new import_commander3.Command("compare").description("Compa
     }
     const comparisons = [];
     const comparator = createComparator();
-    for (const result1 of run1.results) {
+    for (const result1 of run1.benchmarks) {
       if (options.benchmark && result1.benchmarkId !== options.benchmark) {
         continue;
       }
-      const result2 = run2.results.find((r) => r.benchmarkId === result1.benchmarkId);
+      const result2 = run2.benchmarks.find(
+        (r) => r.benchmarkId === result1.benchmarkId
+      );
       if (!result2) continue;
-      if (result1.devpilot && result2.devpilot) {
-        const comparison = comparator.compare(result1.devpilot, result2.devpilot);
+      const devpilot1 = result1.scenarios.devpilot;
+      const devpilot2 = result2.scenarios.devpilot;
+      if (devpilot1 && devpilot2) {
+        const comparison = comparator.compare(devpilot1, devpilot2);
         comparisons.push({
           benchmarkId: result1.benchmarkId,
           v1: {
             version: run1.version,
-            wallClockMs: result1.devpilot.wallClockMs,
-            totalCostUsd: result1.devpilot.totalCostUsd,
-            passRate: result1.devpilot.acceptanceResults.passRate
+            wallClockMs: devpilot1.wallClockMs,
+            totalCostUsd: devpilot1.totalCostUsd,
+            passRate: devpilot1.acceptanceResults.passRate
           },
           v2: {
             version: run2.version,
-            wallClockMs: result2.devpilot.wallClockMs,
-            totalCostUsd: result2.devpilot.totalCostUsd,
-            passRate: result2.devpilot.acceptanceResults.passRate
+            wallClockMs: devpilot2.wallClockMs,
+            totalCostUsd: devpilot2.totalCostUsd,
+            passRate: devpilot2.acceptanceResults.passRate
           },
           delta: {
-            timeMs: result2.devpilot.wallClockMs - result1.devpilot.wallClockMs,
-            costUsd: result2.devpilot.totalCostUsd - result1.devpilot.totalCostUsd,
-            passRate: result2.devpilot.acceptanceResults.passRate - result1.devpilot.acceptanceResults.passRate
+            timeMs: devpilot2.wallClockMs - devpilot1.wallClockMs,
+            costUsd: devpilot2.totalCostUsd - devpilot1.totalCostUsd,
+            passRate: devpilot2.acceptanceResults.passRate - devpilot1.acceptanceResults.passRate
           }
         });
       }
@@ -5055,15 +5216,16 @@ var historyCommand = new import_commander4.Command("history").description("View 
       if (runs.length === 0) continue;
       const run = await reader.readRunManifest(version, runs[0]);
       if (!run) continue;
-      for (const result of run.results) {
+      for (const result of run.benchmarks) {
         if (benchmarkId && result.benchmarkId !== benchmarkId) continue;
-        if (!result.devpilot || !result.comparison) continue;
+        const devpilot = result.scenarios.devpilot;
+        if (!devpilot || !result.comparison) continue;
         const dataPoint = {
           version,
           timestamp: run.timestamp,
           speedup: result.comparison.speedup,
           costReduction: result.comparison.costReduction,
-          passRate: result.devpilot.acceptanceResults.passRate,
+          passRate: devpilot.acceptanceResults.passRate,
           compositeScore: 0
           // Would need scoring to calculate
         };
@@ -5214,7 +5376,7 @@ var listCommand = new import_commander5.Command("list").description("List benchm
             const manifest = await reader.readRunManifest(version, timestamp);
             if (manifest) {
               const status = manifest.status === "completed" ? "\u2713" : manifest.status === "failed" ? "\u2717" : "\u25CB";
-              const benchmarkCount = manifest.results.length;
+              const benchmarkCount = manifest.benchmarks.length;
               const avgSpeedup = manifest.summary.avgSpeedup.toFixed(2);
               console.log(`  ${status} ${manifest.id.slice(0, 8)}  ${timestamp}  ${benchmarkCount} benchmarks  ${avgSpeedup}x avg`);
             }

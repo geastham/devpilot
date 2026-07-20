@@ -8,6 +8,7 @@ import { readFile } from 'fs/promises';
 import { join } from 'path';
 import type {
   ScenarioResult,
+  ScenarioStatus,
   SessionRecord,
   ExecutionError,
   WorkspaceInfo,
@@ -16,10 +17,12 @@ import type {
   PlannedTask,
   WaveExecution,
   TokenUsage,
+  ModelTier,
+  AcceptanceResult,
 } from '../types';
 import { ProcessManager, ProcessResult } from './process-manager';
 import { AcceptanceRunner } from './acceptance';
-import { MetricsCollector } from '../metrics/collector';
+import { MetricsCollector, ScenarioMetrics } from '../metrics/collector';
 import { createId } from '@paralleldrive/cuid2';
 
 const DEFAULT_TIMEOUT_MS = 600000; // 10 minutes
@@ -70,20 +73,18 @@ export class DevPilotExecutor {
     collector: MetricsCollector
   ): Promise<ScenarioResult> {
     const startTime = Date.now();
+    const startedAt = new Date(startTime).toISOString();
     const sessions: SessionRecord[] = [];
     const waveExecutions: WaveExecution[] = [];
     const errors: ExecutionError[] = [];
 
     try {
       // Read PRD
-      const prdPath = join(workspace.path, 'PRD.md');
+      const prdPath = join(workspace.rootDir, 'PRD.md');
       const prdContent = await readFile(prdPath, 'utf-8');
 
       // Generate wave plan
-      collector.getTimeline().recordEvent({
-        type: 'run_start',
-        timestamp: new Date().toISOString(),
-      });
+      collector.getTimeline().recordEvent('run_start', {});
 
       const wavePlan = await this.generateWavePlan(workspace, prdContent, collector);
 
@@ -91,9 +92,7 @@ export class DevPilotExecutor {
       let firstAttemptPassRate = 0;
 
       for (const wave of wavePlan.waves) {
-        collector.getTimeline().recordEvent({
-          type: 'wave_start',
-          timestamp: new Date().toISOString(),
+        collector.getTimeline().recordEvent('wave_start', {
           waveNumber: wave.waveNumber,
         });
 
@@ -106,15 +105,13 @@ export class DevPilotExecutor {
         );
         waveExecutions.push(waveExecution);
 
-        collector.getTimeline().recordEvent({
-          type: 'wave_complete',
-          timestamp: new Date().toISOString(),
+        collector.getTimeline().recordEvent('wave_complete', {
           waveNumber: wave.waveNumber,
         });
       }
 
       // Run acceptance tests
-      let acceptanceResults = await this.acceptanceRunner.run(workspace.path);
+      let acceptanceResults = await this.acceptanceRunner.run(workspace.rootDir);
       firstAttemptPassRate = acceptanceResults.passRate;
 
       // Retry if tests failed and retry is enabled
@@ -133,56 +130,162 @@ export class DevPilotExecutor {
       }
 
       // Calculate metrics
-      const metrics = collector.aggregateScenarioMetrics();
-
-      return {
-        scenario: 'devpilot',
-        benchmarkId: workspace.benchmarkId,
-        startTime: new Date(startTime).toISOString(),
-        endTime: new Date().toISOString(),
-        wallClockMs: Date.now() - startTime,
+      const metrics = collector.aggregateScenarioMetrics(
         sessions,
-        totalTokens: metrics.totalTokens,
-        totalCostUsd: metrics.totalCost,
+        firstAttemptPassRate
+      );
+
+      return this.buildResult(
+        'completed',
+        startedAt,
+        startTime,
+        sessions,
+        metrics,
         acceptanceResults,
-        wavePlan,
-        waveExecutions,
-        firstAttemptPassRate,
-        reworkRatio: this.calculateReworkRatio(sessions, workspace),
+        collector,
         errors,
-      };
+        firstAttemptPassRate,
+        this.calculateReworkRatio(sessions, workspace),
+        wavePlan,
+        waveExecutions
+      );
     } catch (error) {
-      const execError: ExecutionError = {
+      errors.push({
+        timestamp: new Date().toISOString(),
+        phase: 'execution',
         code: 'EXECUTION_ERROR',
         message: error instanceof Error ? error.message : String(error),
-        context: 'devpilot-executor',
         recoverable: false,
-      };
-      errors.push(execError);
+      });
 
-      return {
-        scenario: 'devpilot',
-        benchmarkId: workspace.benchmarkId,
-        startTime: new Date(startTime).toISOString(),
-        endTime: new Date().toISOString(),
-        wallClockMs: Date.now() - startTime,
+      return this.buildFailedResult(
+        startedAt,
+        startTime,
         sessions,
-        totalTokens: 0,
-        totalCostUsd: 0,
-        acceptanceResults: {
-          tests: [],
-          passed: 0,
-          failed: 0,
-          total: 0,
-          passRate: 0,
-          output: '',
-          durationMs: 0,
-        },
-        firstAttemptPassRate: 0,
-        reworkRatio: 1.0,
+        collector,
         errors,
-      };
+        waveExecutions
+      );
     }
+  }
+
+  /**
+   * Assemble a completed scenario result from aggregated metrics.
+   */
+  private buildResult(
+    status: ScenarioStatus,
+    startedAt: string,
+    startTime: number,
+    sessions: SessionRecord[],
+    metrics: ScenarioMetrics,
+    acceptanceResults: AcceptanceResult,
+    collector: MetricsCollector,
+    errors: ExecutionError[],
+    firstAttemptPassRate: number,
+    reworkRatio: number,
+    wavePlan?: WavePlan,
+    waveExecutionLog?: WaveExecution[]
+  ): ScenarioResult {
+    return {
+      scenario: 'devpilot',
+      status,
+      startedAt,
+      completedAt: new Date().toISOString(),
+      wallClockMs: Date.now() - startTime,
+      totalTokensInput: metrics.tokens.inputTokens,
+      totalTokensOutput: metrics.tokens.outputTokens,
+      totalTokens: metrics.tokens.totalTokens,
+      cacheReadTokens: metrics.tokens.cacheReadTokens,
+      cacheWriteTokens: metrics.tokens.cacheWriteTokens,
+      totalCostUsd: metrics.totalCostUsd,
+      costBreakdown: metrics.costBreakdown,
+      acceptanceResults,
+      firstAttemptPassRate,
+      wavePlan,
+      waveExecutionLog,
+      reworkRatio,
+      sessions,
+      timeline: collector.exportTimeline(),
+      errors,
+      filesCreated: metrics.filesCreated,
+      filesModified: metrics.filesModified,
+    };
+  }
+
+  /**
+   * Assemble a failed scenario result with zeroed metrics.
+   */
+  private buildFailedResult(
+    startedAt: string,
+    startTime: number,
+    sessions: SessionRecord[],
+    collector: MetricsCollector,
+    errors: ExecutionError[],
+    waveExecutionLog: WaveExecution[]
+  ): ScenarioResult {
+    return {
+      scenario: 'devpilot',
+      status: 'failed',
+      startedAt,
+      completedAt: new Date().toISOString(),
+      wallClockMs: Date.now() - startTime,
+      totalTokensInput: 0,
+      totalTokensOutput: 0,
+      totalTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalCostUsd: 0,
+      costBreakdown: [],
+      acceptanceResults: {
+        totalTests: 0,
+        passed: 0,
+        failed: 0,
+        passRate: 0,
+        details: [],
+        scriptOutput: '',
+      },
+      firstAttemptPassRate: 0,
+      waveExecutionLog,
+      reworkRatio: 1.0,
+      sessions,
+      timeline: collector.exportTimeline(),
+      errors,
+      filesCreated: [],
+      filesModified: [],
+    };
+  }
+
+  /**
+   * Build a canonical session record from execution output.
+   */
+  private buildSession(
+    sessionId: string,
+    prompt: string,
+    startedAt: string,
+    usage: TokenUsage | null,
+    result: ProcessResult,
+    options: { taskId?: string; waveNumber?: number } = {}
+  ): SessionRecord {
+    return {
+      sessionId,
+      scenario: 'devpilot',
+      waveNumber: options.waveNumber,
+      taskId: options.taskId,
+      model: this.config.model,
+      prompt,
+      startedAt,
+      completedAt: new Date().toISOString(),
+      durationMs: Date.now() - new Date(startedAt).getTime(),
+      tokensInput: usage?.inputTokens ?? 0,
+      tokensOutput: usage?.outputTokens ?? 0,
+      cacheReadTokens: usage?.cacheReadTokens ?? 0,
+      cacheWriteTokens: usage?.cacheWriteTokens ?? 0,
+      costUsd: 0,
+      filesCreated: [],
+      filesModified: [],
+      success: (result.exitCode ?? 0) === 0,
+      stdout: result.stdout,
+    };
   }
 
   /**
@@ -194,7 +297,7 @@ export class DevPilotExecutor {
     collector: MetricsCollector
   ): Promise<WavePlan> {
     const plannerSessionId = createId();
-    collector.registerSession(plannerSessionId, this.config.plannerModel);
+    const plannerStartedAt = new Date().toISOString();
 
     const planPrompt = `Analyze the following PRD and create a wave plan for parallel execution.
 
@@ -231,28 +334,33 @@ Rules:
 
 Output ONLY valid JSON, no other text.`;
 
-    collector.getTimeline().recordEvent({
-      type: 'session_start',
-      timestamp: new Date().toISOString(),
+    collector.getTimeline().recordEvent('session_start', {
       sessionId: plannerSessionId,
     });
 
     const result = await this.executeClaudeCode(workspace, planPrompt, plannerSessionId);
 
-    collector.getTimeline().recordEvent({
-      type: 'session_complete',
-      timestamp: new Date().toISOString(),
+    collector.getTimeline().recordEvent('session_complete', {
       sessionId: plannerSessionId,
     });
 
     // Parse wave plan from output
     const wavePlan = this.parseWavePlan(result.stdout);
 
-    // Record token usage
+    // Record the planner session (and its token usage) with the collector
     const usage = this.parseTokenUsage(result.stdout);
-    if (usage) {
-      collector.recordTokenUsage(plannerSessionId, usage);
-    }
+    const plannerSession: SessionRecord = {
+      ...this.buildSession(
+        plannerSessionId,
+        planPrompt,
+        plannerStartedAt,
+        usage,
+        result,
+        { taskId: 'planner' }
+      ),
+      model: this.config.plannerModel,
+    };
+    collector.registerSession(plannerSession);
 
     return wavePlan;
   }
@@ -269,16 +377,13 @@ Output ONLY valid JSON, no other text.`;
         return {
           waves: parsed.waves.map((w: any, idx: number) => ({
             waveNumber: w.waveNumber ?? idx + 1,
-            tasks: w.tasks.map((t: any) => ({
-              id: t.id,
-              description: t.description,
-              files: t.files ?? [],
-              dependencies: t.dependencies ?? [],
-            })),
-            status: 'pending' as const,
+            tasks: w.tasks.map((t: any) => this.toPlannedTask(t)),
+            dependsOn: w.dependsOn ?? [],
+            estimatedDurationMs: 0,
           })),
+          criticalPathMs: 0,
+          maxParallelism: parsed.estimatedParallelism ?? 1,
           totalTasks: parsed.totalTasks ?? 0,
-          estimatedParallelism: parsed.estimatedParallelism ?? 1,
         };
       } catch {
         // Parsing failed
@@ -291,18 +396,42 @@ Output ONLY valid JSON, no other text.`;
         {
           waveNumber: 1,
           tasks: [
-            {
+            this.toPlannedTask({
               id: 'full-implementation',
               description: 'Implement entire project',
               files: [],
               dependencies: [],
-            },
+            }),
           ],
-          status: 'pending',
+          dependsOn: [],
+          estimatedDurationMs: 0,
         },
       ],
+      criticalPathMs: 0,
+      maxParallelism: 1,
       totalTasks: 1,
-      estimatedParallelism: 1,
+    };
+  }
+
+  /**
+   * Convert a raw parsed task object into a canonical PlannedTask.
+   */
+  private toPlannedTask(raw: {
+    id: string;
+    description?: string;
+    files?: string[];
+    dependencies?: string[];
+  }): PlannedTask {
+    const description = raw.description ?? raw.id;
+    return {
+      id: raw.id,
+      name: description,
+      files: raw.files ?? [],
+      prompt: description,
+      // Executor is configured with a single model tier for task sessions.
+      model: this.config.model as ModelTier,
+      dependsOn: raw.dependencies ?? [],
+      estimatedDurationMs: 0,
     };
   }
 
@@ -317,22 +446,28 @@ Output ONLY valid JSON, no other text.`;
     sessions: SessionRecord[]
   ): Promise<WaveExecution> {
     const waveStartTime = Date.now();
+    const waveStartedAt = new Date(waveStartTime).toISOString();
     const taskPromises: Promise<{ task: PlannedTask; session: SessionRecord }>[] = [];
 
     // Execute tasks in parallel (up to maxConcurrency)
-    const concurrencyLimit = Math.min(this.config.maxConcurrency, wave.tasks.length);
+    const concurrencyLimit = Math.min(this.config.maxConcurrency, wave.tasks.length) || 1;
     const taskQueue = [...wave.tasks];
-    const activeTasks: Promise<any>[] = [];
+    const activeTasks: Promise<unknown>[] = [];
 
     while (taskQueue.length > 0 || activeTasks.length > 0) {
       // Fill up to concurrency limit
       while (activeTasks.length < concurrencyLimit && taskQueue.length > 0) {
         const task = taskQueue.shift()!;
-        const taskPromise = this.executeTask(workspace, task, prdContent, collector)
-          .then((session) => {
-            sessions.push(session);
-            return { task, session };
-          });
+        const taskPromise = this.executeTask(
+          workspace,
+          task,
+          prdContent,
+          collector,
+          wave.waveNumber
+        ).then((session) => {
+          sessions.push(session);
+          return { task, session };
+        });
         taskPromises.push(taskPromise);
         activeTasks.push(taskPromise);
       }
@@ -356,13 +491,19 @@ Output ONLY valid JSON, no other text.`;
     // Wait for all tasks to complete
     const results = await Promise.all(taskPromises);
 
+    const completedTasks = results.filter((r) => r.session.success).length;
+
     return {
       waveNumber: wave.waveNumber,
-      startTime: new Date(waveStartTime).toISOString(),
-      endTime: new Date().toISOString(),
-      durationMs: Date.now() - waveStartTime,
-      tasksCompleted: results.length,
-      tasksFailed: results.filter((r) => r.session.exitCode !== 0).length,
+      plannedTasks: wave.tasks.length,
+      completedTasks,
+      failedTasks: results.length - completedTasks,
+      startedAt: waveStartedAt,
+      completedAt: new Date().toISOString(),
+      wallClockMs: Date.now() - waveStartTime,
+      sessions: results.map((r) => r.session),
+      parallelismActual: concurrencyLimit,
+      idleTimeMs: 0,
     };
   }
 
@@ -373,17 +514,16 @@ Output ONLY valid JSON, no other text.`;
     workspace: WorkspaceInfo,
     task: PlannedTask,
     prdContent: string,
-    collector: MetricsCollector
+    collector: MetricsCollector,
+    waveNumber: number
   ): Promise<SessionRecord> {
     const sessionId = createId();
-    const startTime = Date.now();
-
-    collector.registerSession(sessionId, this.config.model);
+    const startedAt = new Date().toISOString();
 
     const taskPrompt = `You are implementing part of a larger project. Focus ONLY on this specific task:
 
 # Task
-${task.description}
+${task.name}
 
 # Files to create/modify
 ${task.files.join('\n') || 'Determine based on task'}
@@ -399,38 +539,25 @@ ${prdContent}
 
 Implement this task now.`;
 
-    collector.getTimeline().recordEvent({
-      type: 'session_start',
-      timestamp: new Date().toISOString(),
+    collector.getTimeline().recordEvent('session_start', {
       sessionId,
       taskId: task.id,
     });
 
     const result = await this.executeClaudeCode(workspace, taskPrompt, sessionId);
 
-    collector.getTimeline().recordEvent({
-      type: 'session_complete',
-      timestamp: new Date().toISOString(),
+    collector.getTimeline().recordEvent('session_complete', {
       sessionId,
       taskId: task.id,
     });
 
     const usage = this.parseTokenUsage(result.stdout);
-    if (usage) {
-      collector.recordTokenUsage(sessionId, usage);
-    }
-
-    return {
-      sessionId,
-      model: this.config.model,
-      startTime: new Date(startTime).toISOString(),
-      endTime: new Date().toISOString(),
-      durationMs: Date.now() - startTime,
-      tokenUsage: usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-      exitCode: result.exitCode ?? 0,
-      output: result.stdout,
+    const session = this.buildSession(sessionId, taskPrompt, startedAt, usage, result, {
       taskId: task.id,
-    };
+      waveNumber,
+    });
+    collector.registerSession(session);
+    return session;
   }
 
   /**
@@ -438,19 +565,18 @@ Implement this task now.`;
    */
   private async executeRemediationWave(
     workspace: WorkspaceInfo,
-    acceptanceResults: ScenarioResult['acceptanceResults'],
+    acceptanceResults: AcceptanceResult,
     prdContent: string,
     collector: MetricsCollector,
     sessions: SessionRecord[]
-  ): Promise<{ waveExecution: WaveExecution; acceptanceResults: ScenarioResult['acceptanceResults'] } | null> {
+  ): Promise<{ waveExecution: WaveExecution; acceptanceResults: AcceptanceResult } | null> {
     const remediationSessionId = createId();
     const startTime = Date.now();
+    const startedAt = new Date(startTime).toISOString();
 
-    collector.registerSession(remediationSessionId, this.config.model);
-
-    const failedTests = acceptanceResults.tests
-      .filter((t) => !t.passed)
-      .map((t) => `- ${t.name}${t.error ? `: ${t.error}` : ''}`)
+    const failedTests = acceptanceResults.details
+      .filter((t) => t.status !== 'pass')
+      .map((t) => `- ${t.name}${t.output ? `: ${t.output}` : ''}`)
       .join('\n');
 
     const remediationPrompt = `Some acceptance tests failed. Fix the issues:
@@ -469,9 +595,7 @@ ${prdContent}
 Fix the issues now.`;
 
     try {
-      collector.getTimeline().recordEvent({
-        type: 'session_start',
-        timestamp: new Date().toISOString(),
+      collector.getTimeline().recordEvent('session_start', {
         sessionId: remediationSessionId,
       });
 
@@ -481,40 +605,37 @@ Fix the issues now.`;
         remediationSessionId
       );
 
-      collector.getTimeline().recordEvent({
-        type: 'session_complete',
-        timestamp: new Date().toISOString(),
+      collector.getTimeline().recordEvent('session_complete', {
         sessionId: remediationSessionId,
       });
 
       const usage = this.parseTokenUsage(result.stdout);
-      if (usage) {
-        collector.recordTokenUsage(remediationSessionId, usage);
-      }
-
-      sessions.push({
-        sessionId: remediationSessionId,
-        model: this.config.model,
-        startTime: new Date(startTime).toISOString(),
-        endTime: new Date().toISOString(),
-        durationMs: Date.now() - startTime,
-        tokenUsage: usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-        exitCode: result.exitCode ?? 0,
-        output: result.stdout,
-        taskId: 'remediation',
-      });
+      const session = this.buildSession(
+        remediationSessionId,
+        remediationPrompt,
+        startedAt,
+        usage,
+        result,
+        { taskId: 'remediation' }
+      );
+      collector.registerSession(session);
+      sessions.push(session);
 
       // Run acceptance tests again
-      const newAcceptanceResults = await this.acceptanceRunner.run(workspace.path);
+      const newAcceptanceResults = await this.acceptanceRunner.run(workspace.rootDir);
 
       return {
         waveExecution: {
           waveNumber: -1, // Remediation wave
-          startTime: new Date(startTime).toISOString(),
-          endTime: new Date().toISOString(),
-          durationMs: Date.now() - startTime,
-          tasksCompleted: 1,
-          tasksFailed: 0,
+          plannedTasks: 1,
+          completedTasks: session.success ? 1 : 0,
+          failedTasks: session.success ? 0 : 1,
+          startedAt,
+          completedAt: new Date().toISOString(),
+          wallClockMs: Date.now() - startTime,
+          sessions: [session],
+          parallelismActual: 1,
+          idleTimeMs: 0,
         },
         acceptanceResults: newAcceptanceResults,
       };
@@ -540,7 +661,7 @@ Fix the issues now.`;
     ];
 
     return this.processManager.spawn(this.config.claudeCliPath, args, {
-      cwd: workspace.path,
+      cwd: workspace.rootDir,
       workspaceId: sessionId,
       timeoutMs: this.config.timeoutMs,
       env: {
@@ -566,8 +687,8 @@ Fix the issues now.`;
                 inputTokens: parsed.usage.input_tokens,
                 outputTokens: parsed.usage.output_tokens,
                 totalTokens: parsed.usage.input_tokens + parsed.usage.output_tokens,
-                cacheCreationInputTokens: parsed.usage.cache_creation_input_tokens,
-                cacheReadInputTokens: parsed.usage.cache_read_input_tokens,
+                cacheReadTokens: parsed.usage.cache_read_input_tokens ?? 0,
+                cacheWriteTokens: parsed.usage.cache_creation_input_tokens ?? 0,
               };
             }
           } catch {
@@ -590,7 +711,9 @@ Fix the issues now.`;
 
     for (const session of sessions) {
       // Parse file operations from session output (simplified)
-      const fileMatches = session.output.match(/(?:create|edit|write)\s+['"]([\w\/\-\.]+)['"]/gi);
+      const fileMatches = (session.stdout ?? '').match(
+        /(?:create|edit|write)\s+['"]([\w\/\-\.]+)['"]/gi
+      );
       if (fileMatches) {
         for (const match of fileMatches) {
           const file = match.replace(/^(create|edit|write)\s+['"]/i, '').replace(/['"]$/, '');

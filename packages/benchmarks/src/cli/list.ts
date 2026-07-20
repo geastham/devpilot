@@ -91,7 +91,7 @@ export const listCommand = new Command('list')
               const manifest = await reader.readRunManifest(version, timestamp);
               if (manifest) {
                 const status = manifest.status === 'completed' ? '✓' : manifest.status === 'failed' ? '✗' : '○';
-                const benchmarkCount = manifest.results.length;
+                const benchmarkCount = manifest.benchmarks.length;
                 const avgSpeedup = manifest.summary.avgSpeedup.toFixed(2);
 
                 console.log(`  ${status} ${manifest.id.slice(0, 8)}  ${timestamp}  ${benchmarkCount} benchmarks  ${avgSpeedup}x avg`);

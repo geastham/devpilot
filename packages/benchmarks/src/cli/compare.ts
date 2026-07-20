@@ -11,7 +11,7 @@ import { createConsoleReporter } from '../reporters/console';
 import { createJsonReporter } from '../reporters/json';
 import { createMarkdownReporter } from '../reporters/markdown';
 import { createComparator } from '../analysis/comparator';
-import type { BenchmarkRun } from '../types';
+import type { RunManifest } from '../types';
 
 export const compareCommand = new Command('compare')
   .description('Compare benchmark results between versions')
@@ -45,37 +45,42 @@ export const compareCommand = new Command('compare')
       const comparisons = [];
       const comparator = createComparator();
 
-      for (const result1 of run1.results) {
+      for (const result1 of run1.benchmarks) {
         if (options.benchmark && result1.benchmarkId !== options.benchmark) {
           continue;
         }
 
-        const result2 = run2.results.find((r) => r.benchmarkId === result1.benchmarkId);
+        const result2 = run2.benchmarks.find(
+          (r) => r.benchmarkId === result1.benchmarkId
+        );
         if (!result2) continue;
 
+        const devpilot1 = result1.scenarios.devpilot;
+        const devpilot2 = result2.scenarios.devpilot;
+
         // Compare DevPilot scenarios if both exist
-        if (result1.devpilot && result2.devpilot) {
-          const comparison = comparator.compare(result1.devpilot, result2.devpilot);
+        if (devpilot1 && devpilot2) {
+          const comparison = comparator.compare(devpilot1, devpilot2);
           comparisons.push({
             benchmarkId: result1.benchmarkId,
             v1: {
               version: run1.version,
-              wallClockMs: result1.devpilot.wallClockMs,
-              totalCostUsd: result1.devpilot.totalCostUsd,
-              passRate: result1.devpilot.acceptanceResults.passRate,
+              wallClockMs: devpilot1.wallClockMs,
+              totalCostUsd: devpilot1.totalCostUsd,
+              passRate: devpilot1.acceptanceResults.passRate,
             },
             v2: {
               version: run2.version,
-              wallClockMs: result2.devpilot.wallClockMs,
-              totalCostUsd: result2.devpilot.totalCostUsd,
-              passRate: result2.devpilot.acceptanceResults.passRate,
+              wallClockMs: devpilot2.wallClockMs,
+              totalCostUsd: devpilot2.totalCostUsd,
+              passRate: devpilot2.acceptanceResults.passRate,
             },
             delta: {
-              timeMs: result2.devpilot.wallClockMs - result1.devpilot.wallClockMs,
-              costUsd: result2.devpilot.totalCostUsd - result1.devpilot.totalCostUsd,
+              timeMs: devpilot2.wallClockMs - devpilot1.wallClockMs,
+              costUsd: devpilot2.totalCostUsd - devpilot1.totalCostUsd,
               passRate:
-                result2.devpilot.acceptanceResults.passRate -
-                result1.devpilot.acceptanceResults.passRate,
+                devpilot2.acceptanceResults.passRate -
+                devpilot1.acceptanceResults.passRate,
             },
           });
         }
@@ -177,7 +182,7 @@ export const compareCommand = new Command('compare')
 async function findRun(
   reader: ReturnType<typeof createHistoryReader>,
   versionOrId: string
-): Promise<BenchmarkRun | null> {
+): Promise<RunManifest | null> {
   // Try as version first
   const versions = await reader.listVersions();
   if (versions.includes(versionOrId)) {

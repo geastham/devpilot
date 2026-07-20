@@ -110,7 +110,10 @@ export class BenchmarkRunner {
       }
     );
 
-    this.resultsWriter = createResultsWriter(this.config.resultsDir);
+    this.resultsWriter = createResultsWriter({
+      resultsDir: this.config.resultsDir,
+      projectRoot: this.config.projectRoot,
+    });
     this.scoringEngine = createScoringEngine();
     this.waveAnalyzer = createWaveAnalyzer();
     this.comparator = createComparator();
@@ -119,7 +122,7 @@ export class BenchmarkRunner {
   /**
    * Run benchmarks.
    */
-  async run(runConfig: RunConfig): Promise<BenchmarkRun> {
+  async run(runConfig: RunConfig): Promise<RunManifest> {
     const runId = createId();
     const startTime = new Date();
     const results: BenchmarkResult[] = [];
@@ -159,61 +162,53 @@ export class BenchmarkRunner {
         }
       }
 
-      // Create run manifest
+      // Create run manifest with one BenchmarkRun per benchmark
       const endTime = new Date();
-      const run: BenchmarkRun = {
+      const benchmarks: BenchmarkRun[] = results.map((r) => ({
+        id: createId(),
+        benchmarkId: r.benchmarkId,
+        devpilotVersion: version.version,
+        gitCommit: version.gitCommit,
+        gitTag: version.gitTag,
+        timestamp: startTime.toISOString(),
+        config: runConfig,
+        scenarios: {
+          baseline: r.baseline ?? null,
+          devpilot: r.devpilot ?? null,
+        },
+        comparison: r.comparison ?? null,
+        compositeScore: r.devpilotScore ?? r.baselineScore ?? null,
+        waveAnalysis: r.waveAnalysis ?? null,
+      }));
+
+      const manifest: RunManifest = {
         id: runId,
         version: version.version,
         gitCommit: version.gitCommit,
         gitTag: version.gitTag,
         timestamp: startTime.toISOString(),
         config: runConfig,
-        results: results.map((r) => ({
-          benchmarkId: r.benchmarkId,
-          baseline: r.baseline,
-          devpilot: r.devpilot,
-          comparison: r.comparison,
-          waveAnalysis: r.waveAnalysis,
-        })),
-        summary: this.createSummary(results),
         status: this.determineStatus(results),
         durationMs: endTime.getTime() - startTime.getTime(),
+        benchmarks,
+        summary: this.createSummary(results),
+        pricingSnapshot: createMetricsCollector().getPricingSnapshot(),
       };
 
-      // Write results
-      await this.resultsWriter.writeRunManifest(run);
+      // Write results (writeRunManifest creates the run dir and latest symlink)
+      const runDir = await this.resultsWriter.writeRunManifest(manifest);
 
-      for (const result of results) {
-        if (result.baseline) {
-          await this.resultsWriter.writeScenarioResult(
-            runId,
-            result.benchmarkId,
-            'baseline',
-            result.baseline
+      for (const benchmarkRun of benchmarks) {
+        await this.resultsWriter.writeBenchmarkResult(runDir, benchmarkRun);
+        if (benchmarkRun.waveAnalysis) {
+          await this.resultsWriter.writeWaveAnalysis(
+            join(runDir, benchmarkRun.benchmarkId),
+            benchmarkRun.waveAnalysis
           );
-        }
-        if (result.devpilot) {
-          await this.resultsWriter.writeScenarioResult(
-            runId,
-            result.benchmarkId,
-            'devpilot',
-            result.devpilot
-          );
-        }
-        if (result.comparison) {
-          await this.resultsWriter.writeBenchmarkResult(runId, result.benchmarkId, {
-            comparison: result.comparison,
-            waveAnalysis: result.waveAnalysis,
-          });
         }
       }
 
-      // Update latest symlink
-      await this.resultsWriter.updateLatestSymlink(
-        join(this.config.resultsDir, version.version, startTime.toISOString().replace(/[:.]/g, '-'))
-      );
-
-      return run;
+      return manifest;
     } finally {
       // Cleanup workspaces
       await this.workspaceManager.cleanupAll();
@@ -245,7 +240,7 @@ export class BenchmarkRunner {
         archiveOnCleanup: this.config.archiveWorkspaces,
       });
 
-      const baselineCollector = createMetricsCollector(runConfig.pricing);
+      const baselineCollector = createMetricsCollector();
       result.baseline = await this.baselineExecutor.execute(baselineWorkspace, baselineCollector);
       result.baselineScore = this.scoringEngine.calculateScore(result.baseline);
 
@@ -271,7 +266,7 @@ export class BenchmarkRunner {
         archiveOnCleanup: this.config.archiveWorkspaces,
       });
 
-      const devpilotCollector = createMetricsCollector(runConfig.pricing);
+      const devpilotCollector = createMetricsCollector();
       result.devpilot = await this.devpilotExecutor.execute(devpilotWorkspace, devpilotCollector);
 
       // Analyze wave plan against ground truth
@@ -345,35 +340,53 @@ export class BenchmarkRunner {
   /**
    * Create run summary.
    */
-  private createSummary(results: BenchmarkResult[]): BenchmarkRun['summary'] {
+  private createSummary(results: BenchmarkResult[]): RunManifest['summary'] {
     const comparisons = results
       .filter((r) => r.comparison)
       .map((r) => r.comparison!);
 
+    const passedBenchmarks = results.filter(
+      (r) =>
+        (!r.baseline || r.baseline.acceptanceResults.passRate === 1) &&
+        (!r.devpilot || r.devpilot.acceptanceResults.passRate === 1)
+    ).length;
+
+    const scores = results
+      .map((r) => r.devpilotScore ?? r.baselineScore)
+      .filter((s): s is CompositeScore => s !== undefined);
+    const avgCompositeScore =
+      scores.length > 0
+        ? scores.reduce((sum, s) => sum + s.total, 0) / scores.length
+        : 0;
+
     if (comparisons.length === 0) {
       return {
         totalBenchmarks: results.length,
+        passedBenchmarks,
         avgSpeedup: 1,
         avgCostReduction: 0,
         avgQualityDelta: 0,
+        avgCompositeScore,
       };
     }
 
     return {
       totalBenchmarks: results.length,
+      passedBenchmarks,
       avgSpeedup:
         comparisons.reduce((sum, c) => sum + c.speedup, 0) / comparisons.length,
       avgCostReduction:
         comparisons.reduce((sum, c) => sum + c.costReduction, 0) / comparisons.length,
       avgQualityDelta:
         comparisons.reduce((sum, c) => sum + c.qualityDelta, 0) / comparisons.length,
+      avgCompositeScore,
     };
   }
 
   /**
    * Determine overall run status.
    */
-  private determineStatus(results: BenchmarkResult[]): BenchmarkRun['status'] {
+  private determineStatus(results: BenchmarkResult[]): RunManifest['status'] {
     const hasErrors = results.some(
       (r) =>
         (r.baseline?.errors?.length ?? 0) > 0 || (r.devpilot?.errors?.length ?? 0) > 0

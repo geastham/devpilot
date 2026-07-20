@@ -54,6 +54,7 @@ export type BenchmarkRunStatus =
   | 'pending'
   | 'running'
   | 'completed'
+  | 'partial'
   | 'failed'
   | 'cancelled';
 
@@ -81,6 +82,8 @@ export interface BenchmarkRun {
   comparison: ComparisonResult | null;
   /** Composite score */
   compositeScore: CompositeScore | null;
+  /** Wave plan analysis vs ground truth (DevPilot scenario, if evaluated) */
+  waveAnalysis?: WaveAnalysis | null;
 }
 
 // =============================================================================
@@ -600,6 +603,10 @@ export interface RunManifest {
   timestamp: string;
   /** Run configuration */
   config: RunConfig;
+  /** Overall run status */
+  status: BenchmarkRunStatus;
+  /** Total wall clock duration of the run in milliseconds */
+  durationMs: number;
   /** All benchmark runs */
   benchmarks: BenchmarkRun[];
   /** Aggregate summary */
@@ -612,6 +619,8 @@ export interface RunManifest {
     avgSpeedup: number;
     /** Average cost reduction */
     avgCostReduction: number;
+    /** Average quality delta (devpilot pass rate - baseline pass rate) */
+    avgQualityDelta: number;
     /** Average composite score */
     avgCompositeScore: number;
   };

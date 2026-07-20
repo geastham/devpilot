@@ -343,16 +343,18 @@ export async function withTimeout<T>(
 export function parseProcessError(error: unknown, context: string): ExecutionError {
   if (error instanceof Error) {
     return {
+      timestamp: new Date().toISOString(),
+      phase: 'execution',
       code: 'PROCESS_ERROR',
-      message: error.message,
-      context,
+      message: `${context}: ${error.message}`,
       recoverable: false,
     };
   }
   return {
+    timestamp: new Date().toISOString(),
+    phase: 'execution',
     code: 'UNKNOWN_ERROR',
-    message: String(error),
-    context,
+    message: `${context}: ${String(error)}`,
     recoverable: false,
   };
 }
