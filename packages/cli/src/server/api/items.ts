@@ -5,8 +5,10 @@ import {
   workstreams,
   tasks,
   touchedFiles,
+  inFlightFiles,
   activityEvents,
 } from '@devpilot.sh/core/db';
+import { generatePlanForItem, projectWavePlanToPlan } from '@devpilot.sh/core/wave-planner';
 import { eq, and, desc } from 'drizzle-orm';
 import { getDb } from '../index';
 
@@ -204,7 +206,22 @@ export async function registerItemRoutes(app: FastifyInstance) {
       return;
     }
 
-    // Delete existing plan if any
+    // A missing API key is a configuration error surfaced honestly, not mocked.
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      reply.status(503).send({
+        error: 'PLAN_AI_UNAVAILABLE',
+        detail: 'ANTHROPIC_API_KEY is not configured',
+      });
+      return;
+    }
+
+    // In-flight file paths drive conflict warnings during projection.
+    const allInFlightFiles = await db.query.inFlightFiles.findMany();
+    const inFlightPaths = allInFlightFiles.map((f: { path: string }) => f.path);
+
+    // Replace any existing plan (manual cascade — sqlite FKs aren't enforced).
+    const priorVersion = item.plan?.version ?? 0;
     if (item.plan) {
       await db.delete(tasks).where(eq(tasks.planId, item.plan.id));
       const existingWorkstreams = await db.query.workstreams.findMany({
@@ -218,45 +235,23 @@ export async function registerItemRoutes(app: FastifyInstance) {
       await db.delete(plans).where(eq(plans.id, item.plan.id));
     }
 
-    // Create a mock plan (in production, this would call AI service)
-    const [plan] = await db.insert(plans).values({
+    // Generate (real AI, with the generator's flat-plan fallback) then project.
+    const workingDir = process.env.WORKING_DIR || process.cwd();
+    const { generation, planId } = await generatePlanForItem({
       horizonItemId: id,
-      version: item.plan ? item.plan.version + 1 : 1,
-      estimatedCostUsd: 0.18,
-      baselineCostUsd: 0.24,
-      acceptanceCriteria: [
-        `All tests pass for ${item.repo}`,
-        'No regressions in existing functionality',
-        'Code review approved',
-      ],
-      confidenceSignals: {
-        hasMemory: true,
-        recentlyModifiedFiles: 2,
-        similarTasksCompleted: 5,
-        overallConfidence: 0.85,
-      },
-      fleetContextSnapshot: { activeSessions: 0 },
-      memorySessionsUsed: [],
-    }).returning();
-
-    const [workstream] = await db.insert(workstreams).values({
-      planId: plan.id,
-      label: 'Implementation',
+      title: item.title,
       repo: item.repo,
-      workerCount: 1,
-      orderIndex: 0,
-    }).returning();
-
-    await db.insert(tasks).values({
-      workstreamId: workstream.id,
-      label: 'Complete task',
-      model: 'SONNET',
-      complexity: 'M',
-      estimatedCostUsd: 0.18,
-      filePaths: ['src/'],
-      dependsOn: [],
-      orderIndex: 0,
+      workingDir,
+      apiKey,
     });
+
+    await projectWavePlanToPlan({ planId, generation, inFlightPaths });
+
+    if (priorVersion > 0) {
+      await db.update(plans)
+        .set({ version: priorVersion + 1 })
+        .where(eq(plans.id, planId));
+    }
 
     // Update item zone if in SHAPING
     if (item.zone === 'SHAPING') {
@@ -266,7 +261,7 @@ export async function registerItemRoutes(app: FastifyInstance) {
     }
 
     const completePlan = await db.query.plans.findFirst({
-      where: eq(plans.id, plan.id),
+      where: eq(plans.id, planId),
       with: {
         workstreams: {
           with: { tasks: true },
@@ -278,10 +273,10 @@ export async function registerItemRoutes(app: FastifyInstance) {
 
     await db.insert(activityEvents).values({
       type: 'PLAN_GENERATED',
-      message: `Plan generated for "${item.title}" ($${plan.estimatedCostUsd.toFixed(2)})`,
+      message: `Plan generated for "${item.title}" ($${(completePlan?.estimatedCostUsd ?? 0).toFixed(2)})`,
       repo: item.repo,
       ticketId: item.linearTicketId,
-      metadata: { planId: plan.id },
+      metadata: { planId },
     });
 
     reply.status(201).send(completePlan);

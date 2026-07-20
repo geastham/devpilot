@@ -226,12 +226,12 @@ export async function registerFleetRoutes(app: FastifyInstance) {
     );
 
     const totalTasks = item.plan.workstreams.reduce(
-      (sum, ws) => sum + ws.tasks.length,
+      (sum: number, ws: { tasks: unknown[] }) => sum + ws.tasks.length,
       0
     );
     const estimatedMinutes = totalTasks * 15;
 
-    const filePaths = item.plan.filesTouched.map((f) => f.path);
+    const filePaths = item.plan.filesTouched.map((f: { path: string }) => f.path);
 
     const [session] = await db.insert(rufloSessions).values({
       repo: item.repo,
