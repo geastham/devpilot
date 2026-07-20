@@ -10,10 +10,17 @@ import {
   eq,
 } from '@/lib/db';
 import { orchestrator, linear } from '@devpilot.sh/core';
+import { getServerOrchestrator } from '@/lib/orchestrator';
 
 // POST /api/orchestrator/complete - Receive completion reports from orchestrator
 export async function POST(request: Request) {
   try {
+    // Callback auth: when a token is configured, require the matching header.
+    const expectedToken = process.env.DEVPILOT_CALLBACK_TOKEN;
+    if (expectedToken && request.headers.get('X-DevPilot-Callback-Token') !== expectedToken) {
+      return NextResponse.json({ error: 'UNAUTHORIZED' }, { status: 401 });
+    }
+
     const report = await request.json() as orchestrator.CompletionReport;
 
     // Find the session
@@ -28,25 +35,36 @@ export async function POST(request: Request) {
       );
     }
 
-    // Update session status
+    // Idempotency (§9.5): a duplicate terminal completion is a no-op.
+    if (session.status === 'COMPLETE' || session.status === 'ERROR') {
+      return NextResponse.json({
+        success: true,
+        sessionId: report.sessionId,
+        status: session.status,
+        filesReleased: 0,
+        idempotent: true,
+      });
+    }
+
+    // Update session status; persist tokens + cost (cents) on the session row.
     await db.update(rufloSessions)
       .set({
         status: report.success ? 'COMPLETE' : 'ERROR',
         progressPercent: report.success ? 100 : session.progressPercent,
         elapsedMinutes: report.durationMinutes,
         prUrl: report.prUrl,
+        tokensUsed: report.tokensUsed,
+        costUsd: Math.round(report.costUsd * 100),
         updatedAt: new Date(),
       })
       .where(eq(rufloSessions.id, report.sessionId));
 
-    // Record completed task
+    // Record completed task (schema columns: sessionId, label, model, durationMinutes).
     await db.insert(completedTasks).values({
       sessionId: report.sessionId,
-      taskLabel: session.ticketTitle,
-      model: 'SONNET', // Default, should come from report
-      tokensUsed: report.tokensUsed,
-      costUsd: report.costUsd,
-      filesModified: report.filesModified,
+      label: session.ticketTitle,
+      model: null,
+      durationMinutes: report.durationMinutes,
     });
 
     // Release in-flight files
@@ -134,6 +152,15 @@ export async function POST(request: Request) {
         filesModified: report.filesModified,
         completionMessage: report.summary,
       });
+    }
+
+    // Forward to the orchestrator service: feeds the push-adapter cache and
+    // emits job:complete / job:error, which the ExecutionBridge consumes to
+    // advance the owning wave task.
+    try {
+      getServerOrchestrator().ingestCompletionReport(report);
+    } catch (ingestError) {
+      console.error('Failed to forward completion to orchestrator:', ingestError);
     }
 
     return NextResponse.json({
