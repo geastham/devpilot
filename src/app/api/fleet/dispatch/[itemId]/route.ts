@@ -8,28 +8,25 @@ import {
   activityEvents,
   conductorScores,
   eq,
-  asc,
 } from '@/lib/db';
-import { linear, orchestrator } from '@devpilot.sh/core';
+import { linear } from '@devpilot.sh/core';
+import { getServerOrchestrator } from '@/lib/orchestrator';
 
 interface RouteParams {
   params: Promise<{ itemId: string }>;
 }
 
-// POST /api/fleet/dispatch/[itemId] - Dispatch a horizon item to the fleet
-export async function POST(request: NextRequest, { params }: RouteParams) {
+// POST /api/fleet/dispatch/[itemId] - Dispatch a horizon item to the fleet.
+export async function POST(_request: NextRequest, { params }: RouteParams) {
   try {
     const { itemId } = await params;
 
-    // Get the item with its plan
     const item = await db.query.horizonItems.findFirst({
       where: eq(horizonItems.id, itemId),
       with: {
         plan: {
           with: {
-            workstreams: {
-              with: { tasks: true },
-            },
+            workstreams: { with: { tasks: true } },
             filesTouched: true,
           },
         },
@@ -54,25 +51,34 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    // Sort workstreams by orderIndex
+    // No dead sessions: bail out before any mutation when dispatch is disabled.
+    const service = getServerOrchestrator();
+    if (!service.isEnabled) {
+      return NextResponse.json(
+        {
+          error: 'ORCHESTRATOR_UNAVAILABLE',
+          detail:
+            'Set DEVPILOT_ORCHESTRATOR_MODE (claude-session | ao-cli | http) to enable dispatch',
+        },
+        { status: 503 }
+      );
+    }
+
     const sortedWorkstreams = [...item.plan.workstreams].sort(
       (a, b) => a.orderIndex - b.orderIndex
     );
 
-    // Calculate estimated time based on plan
     const totalTasks = item.plan.workstreams.reduce(
-      (sum, ws) => sum + ws.tasks.length,
+      (sum: number, ws: { tasks: unknown[] }) => sum + ws.tasks.length,
       0
     );
-    const estimatedMinutes = totalTasks * 15; // Rough estimate: 15 min per task
+    const estimatedMinutes = totalTasks * 15; // rough estimate: 15 min/task
 
-    // Get files that will be touched
-    const filePaths = item.plan.filesTouched.map((f) => f.path);
+    const filePaths = item.plan.filesTouched.map((f: { path: string }) => f.path);
+    const acceptanceCriteria = item.plan.acceptanceCriteria as string[] | undefined;
 
-    // Determine Linear ticket ID
+    // Determine / create the Linear ticket.
     let linearTicketId = item.linearTicketId;
-
-    // Create Linear ticket if integration is configured and no ticket exists
     if (!linearTicketId && linear.isLinearConfigured()) {
       const syncResult = await linear.syncSessionToLinear({
         sessionId: `pending-${Date.now()}`,
@@ -81,13 +87,12 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
         workstream: sortedWorkstreams[0]?.label,
         estimatedMinutes,
       });
-
       if (syncResult.success && syncResult.issueId) {
         linearTicketId = syncResult.issueId;
       }
     }
 
-    // Create the session
+    // Create the session + in-flight locks (rolled back if dispatch is rejected).
     const [session] = await db.insert(rufloSessions).values({
       repo: item.repo,
       linearTicketId: linearTicketId || `DP-${Date.now()}`,
@@ -100,7 +105,6 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       inFlightFiles: filePaths,
     }).returning();
 
-    // Create in-flight file records
     for (const file of item.plan.filesTouched) {
       await db.insert(inFlightFiles).values({
         path: file.path,
@@ -109,44 +113,73 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
         estimatedMinutesRemaining: estimatedMinutes,
         horizonItemId: itemId,
       });
-
-      // Update file status
       await db.update(touchedFiles)
-        .set({
-          status: 'IN_FLIGHT',
-          inFlightVia: session.id,
-        })
+        .set({ status: 'IN_FLIGHT', inFlightVia: session.id })
         .where(eq(touchedFiles.id, file.id));
     }
 
-    // Remove item from horizon (it's now in-flight)
-    await db.delete(horizonItems).where(eq(horizonItems.id, itemId));
+    // Dispatch.
+    const callbackBase =
+      process.env.DEVPILOT_CALLBACK_URL || process.env.APP_URL || 'http://localhost:3000';
+    const promptCriteria =
+      acceptanceCriteria && acceptanceCriteria.length > 0
+        ? `\n\nAcceptance Criteria:\n${acceptanceCriteria.map((c) => `- ${c}`).join('\n')}`
+        : '';
 
-    // Dispatch to orchestrator if configured
-    let orchestratorJobId: string | undefined;
-    if (orchestrator.isOrchestratorConfigured()) {
-      const client = orchestrator.getOrchestratorClient();
-      const callbackUrl = process.env.APP_URL || 'http://localhost:3000';
-
-      const dispatchRequest = orchestrator.buildDispatchRequest({
-        sessionId: session.id,
-        repo: item.repo,
-        title: item.title,
+    const dispatchResult = await service.dispatch({
+      sessionId: session.id,
+      repo: item.repo,
+      callbackUrl: `${callbackBase.replace(/\/$/, '')}/api/orchestrator`,
+      taskSpec: {
+        prompt: `Implement "${item.title}" for ${item.repo}.${promptCriteria}`,
         filePaths,
+        model: 'sonnet',
         workstream: sortedWorkstreams[0]?.label,
-        acceptanceCriteria: item.plan.acceptanceCriteria as string[] | undefined,
-        linearTicketId: session.linearTicketId,
-        callbackUrl: `${callbackUrl}/api/orchestrator`,
+        acceptanceCriteria,
         estimatedMinutes,
-      });
+      },
+      linearTicketId: session.linearTicketId,
+      metadata: {
+        itemId,
+        workstreams: item.plan.workstreams.length,
+        tasks: totalTasks,
+      },
+    });
 
-      const dispatchResult = await client.dispatch(dispatchRequest);
-      if (dispatchResult.accepted) {
-        orchestratorJobId = dispatchResult.orchestratorJobId;
+    if (!dispatchResult.accepted) {
+      // Roll back the session row + file locks; keep the horizon item so the
+      // work is not silently lost.
+      await db.delete(inFlightFiles).where(eq(inFlightFiles.activeSessionId, session.id));
+      for (const file of item.plan.filesTouched) {
+        await db.update(touchedFiles)
+          .set({ status: 'AVAILABLE', inFlightVia: null })
+          .where(eq(touchedFiles.id, file.id));
       }
+      await db.delete(rufloSessions).where(eq(rufloSessions.id, session.id));
+
+      return NextResponse.json(
+        {
+          error: 'DISPATCH_REJECTED',
+          detail: dispatchResult.error ?? 'Adapter rejected dispatch',
+        },
+        { status: 502 }
+      );
     }
 
-    // Create activity event
+    const orchestratorJobId = dispatchResult.orchestratorJobId;
+
+    // Persist the external correlation on the session row.
+    await db.update(rufloSessions)
+      .set({
+        externalSessionId: orchestratorJobId ?? null,
+        orchestratorMode: service.mode,
+        updatedAt: new Date(),
+      })
+      .where(eq(rufloSessions.id, session.id));
+
+    // Dispatch succeeded: remove the item from the horizon (now in-flight).
+    await db.delete(horizonItems).where(eq(horizonItems.id, itemId));
+
     await db.insert(activityEvents).values({
       type: 'ITEM_DISPATCHED',
       message: `Dispatched "${item.title}" to fleet`,
@@ -162,7 +195,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       },
     });
 
-    // Update conductor score (dispatching improves velocity)
+    // Update conductor score (dispatching improves velocity).
     const score = await db.query.conductorScores.findFirst();
     if (score) {
       await db.update(conductorScores)
@@ -179,16 +212,14 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       });
     }
 
-    // Fetch session with relations
     const sessionWithRelations = await db.query.rufloSessions.findFirst({
       where: eq(rufloSessions.id, session.id),
-      with: {
-        completedTasks: true,
-      },
+      with: { completedTasks: true },
     });
 
     return NextResponse.json({
       session: sessionWithRelations,
+      orchestrator: { mode: service.mode, externalJobId: orchestratorJobId },
       message: `Successfully dispatched "${item.title}" to fleet`,
     });
   } catch (error) {
