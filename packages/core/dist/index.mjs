@@ -1138,6 +1138,7 @@ __export(wave_planner_exports, {
   CodebaseContextService: () => CodebaseContextService,
   CompletionListener: () => CompletionListener,
   ConcurrencyManager: () => ConcurrencyManager,
+  ExecutionBridge: () => ExecutionBridge,
   FleetContextService: () => FleetContextService,
   PlanRefinementService: () => PlanRefinementService,
   PromptConstructor: () => PromptConstructor,
@@ -1165,8 +1166,10 @@ __export(wave_planner_exports, {
   generatePlanForItem: () => generatePlanForItem,
   generateWaveLabel: () => generateWaveLabel,
   generateWavePlan: () => generateWavePlan,
+  getExecutionBridgeOrNull: () => getExecutionBridgeOrNull,
   getTasksInWave: () => getTasksInWave,
   groupBy: () => groupBy,
+  initExecutionBridge: () => initExecutionBridge,
   markWavePlanComplete: () => markWavePlanComplete,
   normalizeComplexity: () => normalizeComplexity,
   normalizeModel: () => normalizeModel,
@@ -4568,6 +4571,13 @@ var WaveExecutionController = class {
     await this.failTask(wavePlanId, taskCode, error);
   }
   /**
+   * Terminally fail a task with no retry — used by the ExecutionBridge for
+   * cancellations (job:cancelled is terminal). Applies the failure policy.
+   */
+  async cancelTask(wavePlanId, taskCode, reason) {
+    await this.failTask(wavePlanId, taskCode, reason);
+  }
+  /**
    * Terminally fail a task and apply the failure policy: 'halt' fails the plan
    * and skips remaining pending tasks; 'continue' leaves other tasks running.
    */
@@ -6357,6 +6367,101 @@ var WaveDispatchCoordinator = class {
   }
 };
 
+// src/wave-planner/execution/execution-bridge.ts
+import { eq as eq9 } from "drizzle-orm";
+var bridgeInstance = null;
+var ExecutionBridge = class {
+  constructor(orchestrator, options) {
+    this.orchestrator = orchestrator;
+    this.unsubscribe = null;
+    this.db = getDatabase();
+    this.coordinator = new WaveDispatchCoordinator(options.execution);
+    this.controller = new WaveExecutionController(options.execution, this.coordinator);
+    this.listener = new CompletionListener(
+      (wavePlanId, waveIndex) => this.controller.handleWaveComplete(wavePlanId, waveIndex),
+      { retryLimit: options.execution.retryLimit }
+    );
+  }
+  /** Subscribe to orchestrator events. Idempotent. */
+  start() {
+    if (this.unsubscribe) return;
+    this.unsubscribe = this.orchestrator.onEvent((event) => {
+      void this.handleEvent(event);
+    });
+  }
+  /** Unsubscribe. */
+  stop() {
+    if (this.unsubscribe) {
+      this.unsubscribe();
+      this.unsubscribe = null;
+    }
+  }
+  /** Resolve a DevPilot sessionId to its owning wave task, if any. */
+  async resolveTask(sessionId) {
+    const task = await this.db.query.waveTasks.findFirst({
+      where: eq9(waveTasks.assignedSessionId, sessionId)
+    });
+    if (!task) return null;
+    return { wavePlanId: task.wavePlanId, taskCode: task.taskCode };
+  }
+  async handleEvent(event) {
+    try {
+      if (event.type === "job:progress") return;
+      const found = await this.resolveTask(event.sessionId);
+      if (!found) return;
+      const { wavePlanId, taskCode } = found;
+      switch (event.type) {
+        case "job:started":
+          await this.listener.handleTaskStarted(wavePlanId, taskCode, event.sessionId);
+          break;
+        case "job:complete": {
+          const report = event.data;
+          await this.listener.handleTaskComplete(wavePlanId, taskCode, report.summary);
+          break;
+        }
+        case "job:error":
+          await this.controller.onTaskFailed(wavePlanId, taskCode, this.errorMessage(event.data));
+          break;
+        case "job:cancelled":
+          await this.controller.cancelTask(wavePlanId, taskCode, "cancelled");
+          break;
+      }
+    } catch (err) {
+      try {
+        await this.db.insert(activityEvents).values({
+          type: "WAVE_TASK_FAILED",
+          message: `ExecutionBridge handler error for session ${event.sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+          metadata: { sessionId: event.sessionId, eventType: event.type }
+        });
+      } catch {
+      }
+    }
+  }
+  /** Extract a human-readable error from a job:error payload. */
+  errorMessage(data) {
+    if (data && typeof data === "object") {
+      const d = data;
+      if (typeof d.error === "string") return d.error;
+      if (d.error && typeof d.error === "object" && "message" in d.error) {
+        return String(d.error.message);
+      }
+      if (typeof d.summary === "string") return d.summary;
+      if (typeof d.message === "string") return d.message;
+    }
+    return "error";
+  }
+};
+function initExecutionBridge(orchestrator, options) {
+  if (bridgeInstance) {
+    bridgeInstance.stop();
+  }
+  bridgeInstance = new ExecutionBridge(orchestrator, options);
+  return bridgeInstance;
+}
+function getExecutionBridgeOrNull() {
+  return bridgeInstance;
+}
+
 // src/integrations/linear/index.ts
 var linear_exports = {};
 __export(linear_exports, {
@@ -6959,7 +7064,7 @@ Return compiled articles as a JSON array with the standard schema.`;
 // src/wiki/compiler.ts
 import Anthropic2 from "@anthropic-ai/sdk";
 import { createHash } from "crypto";
-import { eq as eq9, desc } from "drizzle-orm";
+import { eq as eq10, desc } from "drizzle-orm";
 var WikiCompiler = class {
   constructor(config) {
     this.config = config;
@@ -6977,7 +7082,7 @@ var WikiCompiler = class {
   async ingest(content, sourceType, title, origin) {
     const db2 = getDatabase();
     const contentHash = createHash("sha256").update(content).digest("hex");
-    const existing = await db2.select().from(wikiSources).where(eq9(wikiSources.contentHash, contentHash)).limit(1);
+    const existing = await db2.select().from(wikiSources).where(eq10(wikiSources.contentHash, contentHash)).limit(1);
     if (existing.length > 0) {
       return {
         sourceId: existing[0].id,
@@ -7002,7 +7107,7 @@ var WikiCompiler = class {
     const articlesCreated = [];
     const articlesUpdated = [];
     for (const article of articles) {
-      const existingArticle = await db2.select().from(wikiArticles).where(eq9(wikiArticles.slug, article.slug)).limit(1);
+      const existingArticle = await db2.select().from(wikiArticles).where(eq10(wikiArticles.slug, article.slug)).limit(1);
       if (existingArticle.length > 0) {
         await db2.update(wikiArticles).set({
           content: article.content,
@@ -7014,7 +7119,7 @@ var WikiCompiler = class {
           version: existingArticle[0].version + 1,
           status: "active",
           updatedAt: /* @__PURE__ */ new Date()
-        }).where(eq9(wikiArticles.slug, article.slug));
+        }).where(eq10(wikiArticles.slug, article.slug));
         articlesUpdated.push(article.slug);
       } else {
         await db2.insert(wikiArticles).values({
@@ -7054,7 +7159,7 @@ var WikiCompiler = class {
    */
   async query(question) {
     const db2 = getDatabase();
-    const allArticles = await db2.select().from(wikiArticles).where(eq9(wikiArticles.status, "active"));
+    const allArticles = await db2.select().from(wikiArticles).where(eq10(wikiArticles.status, "active"));
     const keywords = question.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
     const scored = allArticles.map((article) => {
       const text8 = `${article.title} ${article.content}`.toLowerCase();
@@ -7081,7 +7186,7 @@ ${s.article.content}`
     let newArticleSlug;
     if (parsed.suggestedNewArticle) {
       const newArticle = parsed.suggestedNewArticle;
-      const existingArticle = await db2.select().from(wikiArticles).where(eq9(wikiArticles.slug, newArticle.slug)).limit(1);
+      const existingArticle = await db2.select().from(wikiArticles).where(eq10(wikiArticles.slug, newArticle.slug)).limit(1);
       if (existingArticle.length === 0) {
         await db2.insert(wikiArticles).values({
           slug: newArticle.slug,
@@ -7141,7 +7246,7 @@ ${a.content}`
     const articlesMarkedStale = [];
     for (const finding of parsed.findings) {
       if (finding.type === "stale") {
-        await db2.update(wikiArticles).set({ status: "stale", updatedAt: /* @__PURE__ */ new Date() }).where(eq9(wikiArticles.slug, finding.articleSlug));
+        await db2.update(wikiArticles).set({ status: "stale", updatedAt: /* @__PURE__ */ new Date() }).where(eq10(wikiArticles.slug, finding.articleSlug));
         articlesMarkedStale.push(finding.articleSlug);
       }
     }
@@ -7239,7 +7344,7 @@ ${a.content}`
    */
   async getArticle(slug) {
     const db2 = getDatabase();
-    const results = await db2.select().from(wikiArticles).where(eq9(wikiArticles.slug, slug)).limit(1);
+    const results = await db2.select().from(wikiArticles).where(eq10(wikiArticles.slug, slug)).limit(1);
     if (results.length === 0) return null;
     const a = results[0];
     return {
@@ -7304,7 +7409,7 @@ ${a.content}`
         fs2.mkdirSync(categoryDir, { recursive: true });
       }
       for (const entry of catArticles) {
-        const fullArticle = await db2.select().from(wikiArticles).where(eq9(wikiArticles.slug, entry.slug)).limit(1);
+        const fullArticle = await db2.select().from(wikiArticles).where(eq10(wikiArticles.slug, entry.slug)).limit(1);
         if (fullArticle.length > 0) {
           const a = fullArticle[0];
           let fileContent = `# ${a.title}
@@ -7525,7 +7630,7 @@ __export(mempalace_exports, {
 
 // src/mempalace/client.ts
 import { createHash as createHash2 } from "crypto";
-import { and as and6, desc as desc2, eq as eq10, inArray, isNull, like as like2, or as or3 } from "drizzle-orm";
+import { and as and6, desc as desc2, eq as eq11, inArray, isNull, like as like2, or as or3 } from "drizzle-orm";
 var LocalShimClient = class {
   constructor() {
     this.mode = "local";
@@ -7556,7 +7661,7 @@ var LocalShimClient = class {
   }
   async ensureWing(slug, name, repo) {
     const db2 = getDatabase();
-    const existing = await db2.select().from(palaceWings).where(eq10(palaceWings.slug, slug)).limit(1);
+    const existing = await db2.select().from(palaceWings).where(eq11(palaceWings.slug, slug)).limit(1);
     if (existing.length > 0) {
       return this.rowToWing(existing[0]);
     }
@@ -7580,8 +7685,8 @@ var LocalShimClient = class {
     const contentHash = createHash2("sha256").update(input.content).digest("hex");
     const existing = await db2.select().from(palaceDrawers).where(
       and6(
-        eq10(palaceDrawers.contentHash, contentHash),
-        eq10(palaceDrawers.roomId, room.id)
+        eq11(palaceDrawers.contentHash, contentHash),
+        eq11(palaceDrawers.roomId, room.id)
       )
     ).limit(1);
     if (existing.length > 0) {
@@ -7615,11 +7720,11 @@ var LocalShimClient = class {
     const db2 = getDatabase();
     let roomIds;
     if (input.wingSlug) {
-      const wing = await db2.select().from(palaceWings).where(eq10(palaceWings.slug, input.wingSlug)).limit(1);
+      const wing = await db2.select().from(palaceWings).where(eq11(palaceWings.slug, input.wingSlug)).limit(1);
       if (wing.length === 0) {
         return { hits: [], totalScanned: 0 };
       }
-      const rooms = await db2.select().from(palaceRooms).where(eq10(palaceRooms.wingId, wing[0].id));
+      const rooms = await db2.select().from(palaceRooms).where(eq11(palaceRooms.wingId, wing[0].id));
       const ids = rooms.map((r) => r.id);
       if (ids.length === 0) {
         return { hits: [], totalScanned: 0 };
@@ -7648,12 +7753,12 @@ var LocalShimClient = class {
     const wingMap = /* @__PURE__ */ new Map();
     for (const entry of top) {
       if (!roomMap.has(entry.row.roomId)) {
-        const roomRows = await db2.select().from(palaceRooms).where(eq10(palaceRooms.id, entry.row.roomId)).limit(1);
+        const roomRows = await db2.select().from(palaceRooms).where(eq11(palaceRooms.id, entry.row.roomId)).limit(1);
         if (roomRows[0]) {
           const room = this.rowToRoom(roomRows[0]);
           roomMap.set(room.id, room);
           if (!wingMap.has(room.wingId)) {
-            const wingRows = await db2.select().from(palaceWings).where(eq10(palaceWings.id, room.wingId)).limit(1);
+            const wingRows = await db2.select().from(palaceWings).where(eq11(palaceWings.id, room.wingId)).limit(1);
             if (wingRows[0]) {
               wingMap.set(room.wingId, this.rowToWing(wingRows[0]));
             }
@@ -7681,7 +7786,7 @@ var LocalShimClient = class {
     const db2 = getDatabase();
     const wing = await this.ensureWing(input.wingSlug);
     const identity = wing.description ?? `You are assisting with the ${wing.name} project. Follow the project's existing patterns and constraints.`;
-    const rooms = await db2.select().from(palaceRooms).where(eq10(palaceRooms.wingId, wing.id));
+    const rooms = await db2.select().from(palaceRooms).where(eq11(palaceRooms.wingId, wing.id));
     const roomIds = rooms.map((r) => r.id);
     const criticalFacts = [];
     if (roomIds.length > 0) {
@@ -7705,13 +7810,13 @@ var LocalShimClient = class {
   }
   async recall(input) {
     const db2 = getDatabase();
-    const wingRows = await db2.select().from(palaceWings).where(eq10(palaceWings.slug, input.wingSlug)).limit(1);
+    const wingRows = await db2.select().from(palaceWings).where(eq11(palaceWings.slug, input.wingSlug)).limit(1);
     if (wingRows.length === 0) {
       return { topic: input.topic, closets: [], tokenEstimate: 0 };
     }
     const rooms = await db2.select().from(palaceRooms).where(
       and6(
-        eq10(palaceRooms.wingId, wingRows[0].id),
+        eq11(palaceRooms.wingId, wingRows[0].id),
         or3(
           like2(palaceRooms.topic, `%${input.topic}%`),
           like2(palaceRooms.slug, `%${input.topic}%`),
@@ -7726,7 +7831,7 @@ var LocalShimClient = class {
     const closetRows = await db2.select().from(palaceClosets).where(
       and6(
         inArray(palaceClosets.roomId, roomIds),
-        eq10(palaceClosets.tier, 2)
+        eq11(palaceClosets.tier, 2)
       )
     ).limit(input.limit ?? 5);
     const closets = closetRows.map(this.rowToCloset);
@@ -7738,9 +7843,9 @@ var LocalShimClient = class {
     const wing = await this.ensureWing(input.wingSlug);
     const existing = await db2.select().from(palaceKgTriples).where(
       and6(
-        eq10(palaceKgTriples.wingId, wing.id),
-        eq10(palaceKgTriples.subject, input.subject),
-        eq10(palaceKgTriples.predicate, input.predicate),
+        eq11(palaceKgTriples.wingId, wing.id),
+        eq11(palaceKgTriples.subject, input.subject),
+        eq11(palaceKgTriples.predicate, input.predicate),
         isNull(palaceKgTriples.validUntil)
       )
     );
@@ -7748,7 +7853,7 @@ var LocalShimClient = class {
     const now = /* @__PURE__ */ new Date();
     for (const row2 of existing) {
       if (row2.object !== input.object) {
-        await db2.update(palaceKgTriples).set({ validUntil: now }).where(eq10(palaceKgTriples.id, row2.id));
+        await db2.update(palaceKgTriples).set({ validUntil: now }).where(eq11(palaceKgTriples.id, row2.id));
         contradictions.push({
           subject: row2.subject,
           predicate: row2.predicate,
@@ -7773,12 +7878,12 @@ var LocalShimClient = class {
   }
   async kgQuery(input) {
     const db2 = getDatabase();
-    const wingRows = await db2.select().from(palaceWings).where(eq10(palaceWings.slug, input.wingSlug)).limit(1);
+    const wingRows = await db2.select().from(palaceWings).where(eq11(palaceWings.slug, input.wingSlug)).limit(1);
     if (wingRows.length === 0) return [];
-    const filters = [eq10(palaceKgTriples.wingId, wingRows[0].id)];
-    if (input.subject) filters.push(eq10(palaceKgTriples.subject, input.subject));
-    if (input.predicate) filters.push(eq10(palaceKgTriples.predicate, input.predicate));
-    if (input.object) filters.push(eq10(palaceKgTriples.object, input.object));
+    const filters = [eq11(palaceKgTriples.wingId, wingRows[0].id)];
+    if (input.subject) filters.push(eq11(palaceKgTriples.subject, input.subject));
+    if (input.predicate) filters.push(eq11(palaceKgTriples.predicate, input.predicate));
+    if (input.object) filters.push(eq11(palaceKgTriples.object, input.object));
     if (input.currentOnly) filters.push(isNull(palaceKgTriples.validUntil));
     const rows = await db2.select().from(palaceKgTriples).where(and6(...filters));
     return rows.map((r) => ({
@@ -7795,14 +7900,14 @@ var LocalShimClient = class {
   }
   async kgInvalidate(input) {
     const db2 = getDatabase();
-    const wingRows = await db2.select().from(palaceWings).where(eq10(palaceWings.slug, input.wingSlug)).limit(1);
+    const wingRows = await db2.select().from(palaceWings).where(eq11(palaceWings.slug, input.wingSlug)).limit(1);
     if (wingRows.length === 0) return { invalidatedCount: 0 };
     const now = /* @__PURE__ */ new Date();
     const result = await db2.update(palaceKgTriples).set({ validUntil: now }).where(
       and6(
-        eq10(palaceKgTriples.wingId, wingRows[0].id),
-        eq10(palaceKgTriples.subject, input.subject),
-        eq10(palaceKgTriples.predicate, input.predicate),
+        eq11(palaceKgTriples.wingId, wingRows[0].id),
+        eq11(palaceKgTriples.subject, input.subject),
+        eq11(palaceKgTriples.predicate, input.predicate),
         isNull(palaceKgTriples.validUntil)
       )
     ).returning();
@@ -7815,15 +7920,15 @@ var LocalShimClient = class {
   }
   async listRooms(wingSlug) {
     const db2 = getDatabase();
-    const wingRows = await db2.select().from(palaceWings).where(eq10(palaceWings.slug, wingSlug)).limit(1);
+    const wingRows = await db2.select().from(palaceWings).where(eq11(palaceWings.slug, wingSlug)).limit(1);
     if (wingRows.length === 0) return [];
-    const rows = await db2.select().from(palaceRooms).where(eq10(palaceRooms.wingId, wingRows[0].id));
+    const rows = await db2.select().from(palaceRooms).where(eq11(palaceRooms.wingId, wingRows[0].id));
     return rows.map(this.rowToRoom);
   }
   // ----- Internals -----
   async ensureRoom(wingId, slug, name, topic) {
     const db2 = getDatabase();
-    const existing = await db2.select().from(palaceRooms).where(and6(eq10(palaceRooms.wingId, wingId), eq10(palaceRooms.slug, slug))).limit(1);
+    const existing = await db2.select().from(palaceRooms).where(and6(eq11(palaceRooms.wingId, wingId), eq11(palaceRooms.slug, slug))).limit(1);
     if (existing.length > 0) {
       return this.rowToRoom(existing[0]);
     }

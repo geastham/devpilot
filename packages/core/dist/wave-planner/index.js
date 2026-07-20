@@ -33,6 +33,7 @@ __export(wave_planner_exports, {
   CodebaseContextService: () => CodebaseContextService,
   CompletionListener: () => CompletionListener,
   ConcurrencyManager: () => ConcurrencyManager,
+  ExecutionBridge: () => ExecutionBridge,
   FleetContextService: () => FleetContextService,
   PlanRefinementService: () => PlanRefinementService,
   PromptConstructor: () => PromptConstructor,
@@ -60,8 +61,10 @@ __export(wave_planner_exports, {
   generatePlanForItem: () => generatePlanForItem,
   generateWaveLabel: () => generateWaveLabel,
   generateWavePlan: () => generateWavePlan,
+  getExecutionBridgeOrNull: () => getExecutionBridgeOrNull,
   getTasksInWave: () => getTasksInWave,
   groupBy: () => groupBy,
+  initExecutionBridge: () => initExecutionBridge,
   markWavePlanComplete: () => markWavePlanComplete,
   normalizeComplexity: () => normalizeComplexity,
   normalizeModel: () => normalizeModel,
@@ -4559,6 +4562,13 @@ var WaveExecutionController = class {
     await this.failTask(wavePlanId, taskCode, error);
   }
   /**
+   * Terminally fail a task with no retry — used by the ExecutionBridge for
+   * cancellations (job:cancelled is terminal). Applies the failure policy.
+   */
+  async cancelTask(wavePlanId, taskCode, reason) {
+    await this.failTask(wavePlanId, taskCode, reason);
+  }
+  /**
    * Terminally fail a task and apply the failure policy: 'halt' fails the plan
    * and skips remaining pending tasks; 'continue' leaves other tasks running.
    */
@@ -5037,11 +5047,107 @@ var WaveDispatchCoordinator = class {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 };
+
+// src/wave-planner/execution/execution-bridge.ts
+var import_drizzle_orm15 = require("drizzle-orm");
+var bridgeInstance = null;
+var ExecutionBridge = class {
+  constructor(orchestrator, options) {
+    this.orchestrator = orchestrator;
+    this.unsubscribe = null;
+    this.db = getDatabase();
+    this.coordinator = new WaveDispatchCoordinator(options.execution);
+    this.controller = new WaveExecutionController(options.execution, this.coordinator);
+    this.listener = new CompletionListener(
+      (wavePlanId, waveIndex) => this.controller.handleWaveComplete(wavePlanId, waveIndex),
+      { retryLimit: options.execution.retryLimit }
+    );
+  }
+  /** Subscribe to orchestrator events. Idempotent. */
+  start() {
+    if (this.unsubscribe) return;
+    this.unsubscribe = this.orchestrator.onEvent((event) => {
+      void this.handleEvent(event);
+    });
+  }
+  /** Unsubscribe. */
+  stop() {
+    if (this.unsubscribe) {
+      this.unsubscribe();
+      this.unsubscribe = null;
+    }
+  }
+  /** Resolve a DevPilot sessionId to its owning wave task, if any. */
+  async resolveTask(sessionId) {
+    const task = await this.db.query.waveTasks.findFirst({
+      where: (0, import_drizzle_orm15.eq)(waveTasks.assignedSessionId, sessionId)
+    });
+    if (!task) return null;
+    return { wavePlanId: task.wavePlanId, taskCode: task.taskCode };
+  }
+  async handleEvent(event) {
+    try {
+      if (event.type === "job:progress") return;
+      const found = await this.resolveTask(event.sessionId);
+      if (!found) return;
+      const { wavePlanId, taskCode } = found;
+      switch (event.type) {
+        case "job:started":
+          await this.listener.handleTaskStarted(wavePlanId, taskCode, event.sessionId);
+          break;
+        case "job:complete": {
+          const report = event.data;
+          await this.listener.handleTaskComplete(wavePlanId, taskCode, report.summary);
+          break;
+        }
+        case "job:error":
+          await this.controller.onTaskFailed(wavePlanId, taskCode, this.errorMessage(event.data));
+          break;
+        case "job:cancelled":
+          await this.controller.cancelTask(wavePlanId, taskCode, "cancelled");
+          break;
+      }
+    } catch (err) {
+      try {
+        await this.db.insert(activityEvents).values({
+          type: "WAVE_TASK_FAILED",
+          message: `ExecutionBridge handler error for session ${event.sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+          metadata: { sessionId: event.sessionId, eventType: event.type }
+        });
+      } catch {
+      }
+    }
+  }
+  /** Extract a human-readable error from a job:error payload. */
+  errorMessage(data) {
+    if (data && typeof data === "object") {
+      const d = data;
+      if (typeof d.error === "string") return d.error;
+      if (d.error && typeof d.error === "object" && "message" in d.error) {
+        return String(d.error.message);
+      }
+      if (typeof d.summary === "string") return d.summary;
+      if (typeof d.message === "string") return d.message;
+    }
+    return "error";
+  }
+};
+function initExecutionBridge(orchestrator, options) {
+  if (bridgeInstance) {
+    bridgeInstance.stop();
+  }
+  bridgeInstance = new ExecutionBridge(orchestrator, options);
+  return bridgeInstance;
+}
+function getExecutionBridgeOrNull() {
+  return bridgeInstance;
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   CodebaseContextService,
   CompletionListener,
   ConcurrencyManager,
+  ExecutionBridge,
   FleetContextService,
   PlanRefinementService,
   PromptConstructor,
@@ -5069,8 +5175,10 @@ var WaveDispatchCoordinator = class {
   generatePlanForItem,
   generateWaveLabel,
   generateWavePlan,
+  getExecutionBridgeOrNull,
   getTasksInWave,
   groupBy,
+  initExecutionBridge,
   markWavePlanComplete,
   normalizeComplexity,
   normalizeModel,

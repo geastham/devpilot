@@ -367,6 +367,14 @@ export class WaveExecutionController {
   }
 
   /**
+   * Terminally fail a task with no retry — used by the ExecutionBridge for
+   * cancellations (job:cancelled is terminal). Applies the failure policy.
+   */
+  async cancelTask(wavePlanId: string, taskCode: string, reason: string): Promise<void> {
+    await this.failTask(wavePlanId, taskCode, reason);
+  }
+
+  /**
    * Terminally fail a task and apply the failure policy: 'halt' fails the plan
    * and skips remaining pending tasks; 'continue' leaves other tasks running.
    */
