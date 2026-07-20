@@ -9,7 +9,8 @@ import {
   completedTasks,
   eq,
 } from '@/lib/db';
-import { orchestrator, linear } from '@devpilot.sh/core';
+import { linear } from '@devpilot.sh/core';
+import type { CompletionReport } from '@devpilot.sh/core/orchestrator';
 import { getServerOrchestrator } from '@/lib/orchestrator';
 
 // POST /api/orchestrator/complete - Receive completion reports from orchestrator
@@ -21,7 +22,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'UNAUTHORIZED' }, { status: 401 });
     }
 
-    const report = await request.json() as orchestrator.CompletionReport;
+    const report = await request.json() as CompletionReport;
 
     // Find the session
     const session = await db.query.rufloSessions.findFirst({

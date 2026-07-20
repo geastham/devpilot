@@ -15,7 +15,7 @@ import {
   type OrchestratorAdapterConfig,
   type OrchestratorMode,
 } from '@devpilot.sh/core/orchestrator';
-import type { WaveExecutionConfig } from '@devpilot.sh/core/wave-planner';
+import { initExecutionBridge, type WaveExecutionConfig } from '@devpilot.sh/core/wave-planner';
 
 const globalForOrchestrator = globalThis as unknown as {
   devpilotOrchestrator?: OrchestratorService;
@@ -79,9 +79,8 @@ export function getWaveExecutionConfig(): WaveExecutionConfig {
  * Mode `disabled` still initializes the service (DisabledAdapter) so routes can
  * uniformly gate on `service.isEnabled`.
  *
- * NOTE: the ExecutionBridge (wave-task correlation) is wired into this bootstrap
- * in W4-T1 once the bridge lands (W3-T1); until then the status poller keeps
- * session-level rows current.
+ * On first call it wires the status poller (session-level rows) and the
+ * ExecutionBridge (wave-task correlation from job:* events) into the service.
  */
 export function getServerOrchestrator(): OrchestratorService {
   if (globalForOrchestrator.devpilotOrchestrator) {
@@ -93,6 +92,8 @@ export function getServerOrchestrator(): OrchestratorService {
     pollIntervalMs: 5000,
     ...createDbStatusPollerCallbacks(),
   });
+  // Correlate orchestrator job:* events to wave tasks and advance the loop.
+  initExecutionBridge(service, { execution: getWaveExecutionConfig() }).start();
 
   globalForOrchestrator.devpilotOrchestrator = service;
   return service;

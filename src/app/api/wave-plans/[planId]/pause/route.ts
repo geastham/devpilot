@@ -3,25 +3,12 @@ import { db, wavePlans, eq } from '@/lib/db';
 import {
   WaveExecutionController,
   WaveDispatchCoordinator,
-  type WaveExecutionConfig,
 } from '@devpilot.sh/core/wave-planner';
+import { getWaveExecutionConfig } from '@/lib/orchestrator';
 
 interface RouteParams {
   params: Promise<{ planId: string }>;
 }
-
-// Local execution config (temporary — T1-W4-T1 switches pause/resume/dispatch
-// to the shared getWaveExecutionConfig()).
-const DEFAULT_CONFIG: WaveExecutionConfig = {
-  maxConcurrentSubagents: 4,
-  maxTotalActiveTasks: 8,
-  subagentDispatchDelayMs: 500,
-  waveAdvanceDelayMs: 2000,
-  retryLimit: 1,
-  failurePolicy: 'halt',
-  autoAdvance: false,
-  callbackUrl: process.env.DEVPILOT_CALLBACK_URL ?? 'http://127.0.0.1:3000/api/orchestrator',
-};
 
 // POST /api/wave-plans/[planId]/pause - Pause a wave plan (executing → paused)
 export async function POST(_request: NextRequest, { params }: RouteParams) {
@@ -36,8 +23,9 @@ export async function POST(_request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ error: 'Wave plan not found' }, { status: 404 });
     }
 
-    const coordinator = new WaveDispatchCoordinator(DEFAULT_CONFIG);
-    const controller = new WaveExecutionController(DEFAULT_CONFIG, coordinator);
+    const config = getWaveExecutionConfig();
+    const coordinator = new WaveDispatchCoordinator(config);
+    const controller = new WaveExecutionController(config, coordinator);
 
     try {
       await controller.pause(planId);
