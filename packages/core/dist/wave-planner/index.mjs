@@ -4541,7 +4541,7 @@ var WaveExecutionController = class {
 };
 
 // src/wave-planner/execution/dispatch-coordinator.ts
-import { eq as eq7, and as and4 } from "drizzle-orm";
+import { eq as eq8, and as and4 } from "drizzle-orm";
 
 // src/orchestrator/ao-cli-adapter.ts
 import { exec as exec2 } from "child_process";
@@ -4661,6 +4661,9 @@ function getOrchestratorServiceOrNull() {
   return serviceInstance;
 }
 
+// src/orchestrator/host-wiring.ts
+import { eq as eq7 } from "drizzle-orm";
+
 // src/wave-planner/execution/dispatch-coordinator.ts
 var WaveDispatchCoordinator = class {
   constructor(config) {
@@ -4706,7 +4709,7 @@ var WaveDispatchCoordinator = class {
           status: "dispatched",
           startedAt: /* @__PURE__ */ new Date(),
           assignedSessionId: outcome.sessionId
-        }).where(eq7(waveTasks.id, task.id));
+        }).where(eq8(waveTasks.id, task.id));
         result.dispatched++;
         if (i < maxDispatch - 1) {
           await this.delay(this.config.subagentDispatchDelayMs);
@@ -4722,7 +4725,7 @@ var WaveDispatchCoordinator = class {
           status: "failed",
           errorMessage,
           completedAt: /* @__PURE__ */ new Date()
-        }).where(eq7(waveTasks.id, task.id));
+        }).where(eq8(waveTasks.id, task.id));
       }
     }
     result.queued += pendingTasks.length - maxDispatch;
@@ -4736,7 +4739,7 @@ var WaveDispatchCoordinator = class {
   async redispatchTask(wavePlanId, taskCode) {
     const result = { dispatched: 0, queued: 0, errors: [] };
     const task = await this.db.query.waveTasks.findFirst({
-      where: and4(eq7(waveTasks.wavePlanId, wavePlanId), eq7(waveTasks.taskCode, taskCode))
+      where: and4(eq8(waveTasks.wavePlanId, wavePlanId), eq8(waveTasks.taskCode, taskCode))
     });
     if (!task) {
       result.errors.push({ taskCode, error: "NOT_FOUND" });
@@ -4747,7 +4750,7 @@ var WaveDispatchCoordinator = class {
       return result;
     }
     const plan = await this.db.query.wavePlans.findFirst({
-      where: eq7(wavePlans.id, wavePlanId)
+      where: eq8(wavePlans.id, wavePlanId)
     });
     if (plan?.status !== "executing") {
       result.queued++;
@@ -4762,7 +4765,7 @@ var WaveDispatchCoordinator = class {
         status: "dispatched",
         startedAt: /* @__PURE__ */ new Date(),
         assignedSessionId: outcome.sessionId
-      }).where(eq7(waveTasks.id, task.id));
+      }).where(eq8(waveTasks.id, task.id));
       result.dispatched++;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
@@ -4770,7 +4773,7 @@ var WaveDispatchCoordinator = class {
         result.queued++;
         return result;
       }
-      await this.db.update(waveTasks).set({ status: "failed", errorMessage, completedAt: /* @__PURE__ */ new Date() }).where(eq7(waveTasks.id, task.id));
+      await this.db.update(waveTasks).set({ status: "failed", errorMessage, completedAt: /* @__PURE__ */ new Date() }).where(eq8(waveTasks.id, task.id));
       result.errors.push({ taskCode, error: errorMessage });
     }
     return result;
@@ -4800,8 +4803,8 @@ var WaveDispatchCoordinator = class {
   async getPredecessorContext(wavePlanId, taskCode) {
     const task = await this.db.query.waveTasks.findFirst({
       where: and4(
-        eq7(waveTasks.wavePlanId, wavePlanId),
-        eq7(waveTasks.taskCode, taskCode)
+        eq8(waveTasks.wavePlanId, wavePlanId),
+        eq8(waveTasks.taskCode, taskCode)
       )
     });
     if (!task || !task.dependencies || task.dependencies.length === 0) {
@@ -4811,9 +4814,9 @@ var WaveDispatchCoordinator = class {
     for (const depTaskCode of task.dependencies) {
       const depTask = await this.db.query.waveTasks.findFirst({
         where: and4(
-          eq7(waveTasks.wavePlanId, wavePlanId),
-          eq7(waveTasks.taskCode, depTaskCode),
-          eq7(waveTasks.status, "completed")
+          eq8(waveTasks.wavePlanId, wavePlanId),
+          eq8(waveTasks.taskCode, depTaskCode),
+          eq8(waveTasks.status, "completed")
         )
       });
       if (depTask) {
@@ -4833,13 +4836,13 @@ var WaveDispatchCoordinator = class {
    */
   async loadDispatchContext(wavePlanId) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: eq7(wavePlans.id, wavePlanId)
+      where: eq8(wavePlans.id, wavePlanId)
     });
     if (!wavePlan) {
       throw new Error(`Wave plan ${wavePlanId} not found`);
     }
     const item = await this.db.query.horizonItems.findFirst({
-      where: eq7(horizonItems.id, wavePlan.horizonItemId)
+      where: eq8(horizonItems.id, wavePlan.horizonItemId)
     });
     if (!item) {
       throw new Error(`Horizon item ${wavePlan.horizonItemId} not found`);
@@ -4856,7 +4859,7 @@ var WaveDispatchCoordinator = class {
    */
   async checkFleetCapacity() {
     const runningTasks = await this.db.query.waveTasks.findMany({
-      where: eq7(waveTasks.status, "running")
+      where: eq8(waveTasks.status, "running")
     });
     const activeWorkers = runningTasks.length;
     const totalWorkers = this.config.maxTotalActiveTasks;
@@ -4925,14 +4928,14 @@ var WaveDispatchCoordinator = class {
     };
     const response = await service.dispatch(dispatchReq);
     if (!response.accepted) {
-      await this.db.delete(rufloSessions).where(eq7(rufloSessions.id, session.id));
+      await this.db.delete(rufloSessions).where(eq8(rufloSessions.id, session.id));
       throw new Error(response.error ?? "DISPATCH_REJECTED");
     }
     await this.db.update(rufloSessions).set({
       externalSessionId: response.orchestratorJobId ?? null,
       orchestratorMode: service.mode,
       updatedAt: /* @__PURE__ */ new Date()
-    }).where(eq7(rufloSessions.id, session.id));
+    }).where(eq8(rufloSessions.id, session.id));
     return {
       sessionId: session.id,
       externalJobId: response.orchestratorJobId ?? "",

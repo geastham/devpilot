@@ -4625,7 +4625,7 @@ var WaveExecutionController = class {
 };
 
 // src/wave-planner/execution/dispatch-coordinator.ts
-import { eq as eq7, and as and4 } from "drizzle-orm";
+import { eq as eq8, and as and4 } from "drizzle-orm";
 
 // src/orchestrator/index.ts
 var orchestrator_exports = {};
@@ -4640,6 +4640,7 @@ __export(orchestrator_exports, {
   buildSessionPrompt: () => buildSessionPrompt,
   createAoCliAdapter: () => createAoCliAdapter,
   createClaudeSessionAdapter: () => createClaudeSessionAdapter,
+  createDbStatusPollerCallbacks: () => createDbStatusPollerCallbacks,
   getOrchestratorClient: () => getOrchestratorClient,
   getOrchestratorService: () => getOrchestratorService,
   getOrchestratorServiceOrNull: () => getOrchestratorServiceOrNull,
@@ -6013,6 +6014,50 @@ function getStatusPollerOrNull() {
   return pollerInstance;
 }
 
+// src/orchestrator/host-wiring.ts
+import { eq as eq7 } from "drizzle-orm";
+function createDbStatusPollerCallbacks() {
+  return {
+    onStatusUpdate: async (sessionId, status) => {
+      const db2 = getDatabase();
+      await db2.update(rufloSessions).set({
+        progressPercent: status.progressPercent,
+        status: status.status === "running" ? "ACTIVE" : status.status === "complete" ? "COMPLETE" : status.status === "error" ? "ERROR" : "ACTIVE",
+        updatedAt: /* @__PURE__ */ new Date()
+      }).where(eq7(rufloSessions.id, sessionId));
+    },
+    onComplete: async (sessionId, report) => {
+      const db2 = getDatabase();
+      await db2.update(rufloSessions).set({
+        status: report.success ? "COMPLETE" : "ERROR",
+        progressPercent: 100,
+        prUrl: report.prUrl,
+        tokensUsed: report.tokensUsed,
+        costUsd: Math.round(report.costUsd * 100),
+        // store as cents
+        updatedAt: /* @__PURE__ */ new Date()
+      }).where(eq7(rufloSessions.id, sessionId));
+      await db2.insert(activityEvents).values({
+        type: "SESSION_COMPLETE",
+        message: report.success ? `Session completed: ${report.summary}` : `Session failed: ${report.error?.message || "Unknown error"}`,
+        metadata: { sessionId, prUrl: report.prUrl }
+      });
+    },
+    onError: async (sessionId, error) => {
+      const db2 = getDatabase();
+      await db2.update(rufloSessions).set({
+        status: "ERROR",
+        updatedAt: /* @__PURE__ */ new Date()
+      }).where(eq7(rufloSessions.id, sessionId));
+      await db2.insert(activityEvents).values({
+        type: "SESSION_COMPLETE",
+        message: `Session error: ${error.message}`,
+        metadata: { sessionId, error: error.message }
+      });
+    }
+  };
+}
+
 // src/wave-planner/execution/dispatch-coordinator.ts
 var WaveDispatchCoordinator = class {
   constructor(config) {
@@ -6058,7 +6103,7 @@ var WaveDispatchCoordinator = class {
           status: "dispatched",
           startedAt: /* @__PURE__ */ new Date(),
           assignedSessionId: outcome.sessionId
-        }).where(eq7(waveTasks.id, task.id));
+        }).where(eq8(waveTasks.id, task.id));
         result.dispatched++;
         if (i < maxDispatch - 1) {
           await this.delay(this.config.subagentDispatchDelayMs);
@@ -6074,7 +6119,7 @@ var WaveDispatchCoordinator = class {
           status: "failed",
           errorMessage,
           completedAt: /* @__PURE__ */ new Date()
-        }).where(eq7(waveTasks.id, task.id));
+        }).where(eq8(waveTasks.id, task.id));
       }
     }
     result.queued += pendingTasks.length - maxDispatch;
@@ -6088,7 +6133,7 @@ var WaveDispatchCoordinator = class {
   async redispatchTask(wavePlanId, taskCode) {
     const result = { dispatched: 0, queued: 0, errors: [] };
     const task = await this.db.query.waveTasks.findFirst({
-      where: and4(eq7(waveTasks.wavePlanId, wavePlanId), eq7(waveTasks.taskCode, taskCode))
+      where: and4(eq8(waveTasks.wavePlanId, wavePlanId), eq8(waveTasks.taskCode, taskCode))
     });
     if (!task) {
       result.errors.push({ taskCode, error: "NOT_FOUND" });
@@ -6099,7 +6144,7 @@ var WaveDispatchCoordinator = class {
       return result;
     }
     const plan = await this.db.query.wavePlans.findFirst({
-      where: eq7(wavePlans.id, wavePlanId)
+      where: eq8(wavePlans.id, wavePlanId)
     });
     if (plan?.status !== "executing") {
       result.queued++;
@@ -6114,7 +6159,7 @@ var WaveDispatchCoordinator = class {
         status: "dispatched",
         startedAt: /* @__PURE__ */ new Date(),
         assignedSessionId: outcome.sessionId
-      }).where(eq7(waveTasks.id, task.id));
+      }).where(eq8(waveTasks.id, task.id));
       result.dispatched++;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
@@ -6122,7 +6167,7 @@ var WaveDispatchCoordinator = class {
         result.queued++;
         return result;
       }
-      await this.db.update(waveTasks).set({ status: "failed", errorMessage, completedAt: /* @__PURE__ */ new Date() }).where(eq7(waveTasks.id, task.id));
+      await this.db.update(waveTasks).set({ status: "failed", errorMessage, completedAt: /* @__PURE__ */ new Date() }).where(eq8(waveTasks.id, task.id));
       result.errors.push({ taskCode, error: errorMessage });
     }
     return result;
@@ -6152,8 +6197,8 @@ var WaveDispatchCoordinator = class {
   async getPredecessorContext(wavePlanId, taskCode) {
     const task = await this.db.query.waveTasks.findFirst({
       where: and4(
-        eq7(waveTasks.wavePlanId, wavePlanId),
-        eq7(waveTasks.taskCode, taskCode)
+        eq8(waveTasks.wavePlanId, wavePlanId),
+        eq8(waveTasks.taskCode, taskCode)
       )
     });
     if (!task || !task.dependencies || task.dependencies.length === 0) {
@@ -6163,9 +6208,9 @@ var WaveDispatchCoordinator = class {
     for (const depTaskCode of task.dependencies) {
       const depTask = await this.db.query.waveTasks.findFirst({
         where: and4(
-          eq7(waveTasks.wavePlanId, wavePlanId),
-          eq7(waveTasks.taskCode, depTaskCode),
-          eq7(waveTasks.status, "completed")
+          eq8(waveTasks.wavePlanId, wavePlanId),
+          eq8(waveTasks.taskCode, depTaskCode),
+          eq8(waveTasks.status, "completed")
         )
       });
       if (depTask) {
@@ -6185,13 +6230,13 @@ var WaveDispatchCoordinator = class {
    */
   async loadDispatchContext(wavePlanId) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: eq7(wavePlans.id, wavePlanId)
+      where: eq8(wavePlans.id, wavePlanId)
     });
     if (!wavePlan) {
       throw new Error(`Wave plan ${wavePlanId} not found`);
     }
     const item = await this.db.query.horizonItems.findFirst({
-      where: eq7(horizonItems.id, wavePlan.horizonItemId)
+      where: eq8(horizonItems.id, wavePlan.horizonItemId)
     });
     if (!item) {
       throw new Error(`Horizon item ${wavePlan.horizonItemId} not found`);
@@ -6208,7 +6253,7 @@ var WaveDispatchCoordinator = class {
    */
   async checkFleetCapacity() {
     const runningTasks = await this.db.query.waveTasks.findMany({
-      where: eq7(waveTasks.status, "running")
+      where: eq8(waveTasks.status, "running")
     });
     const activeWorkers = runningTasks.length;
     const totalWorkers = this.config.maxTotalActiveTasks;
@@ -6277,14 +6322,14 @@ var WaveDispatchCoordinator = class {
     };
     const response = await service.dispatch(dispatchReq);
     if (!response.accepted) {
-      await this.db.delete(rufloSessions).where(eq7(rufloSessions.id, session.id));
+      await this.db.delete(rufloSessions).where(eq8(rufloSessions.id, session.id));
       throw new Error(response.error ?? "DISPATCH_REJECTED");
     }
     await this.db.update(rufloSessions).set({
       externalSessionId: response.orchestratorJobId ?? null,
       orchestratorMode: service.mode,
       updatedAt: /* @__PURE__ */ new Date()
-    }).where(eq7(rufloSessions.id, session.id));
+    }).where(eq8(rufloSessions.id, session.id));
     return {
       sessionId: session.id,
       externalJobId: response.orchestratorJobId ?? "",
@@ -6913,7 +6958,7 @@ Return compiled articles as a JSON array with the standard schema.`;
 // src/wiki/compiler.ts
 import Anthropic2 from "@anthropic-ai/sdk";
 import { createHash } from "crypto";
-import { eq as eq8, desc } from "drizzle-orm";
+import { eq as eq9, desc } from "drizzle-orm";
 var WikiCompiler = class {
   constructor(config) {
     this.config = config;
@@ -6931,7 +6976,7 @@ var WikiCompiler = class {
   async ingest(content, sourceType, title, origin) {
     const db2 = getDatabase();
     const contentHash = createHash("sha256").update(content).digest("hex");
-    const existing = await db2.select().from(wikiSources).where(eq8(wikiSources.contentHash, contentHash)).limit(1);
+    const existing = await db2.select().from(wikiSources).where(eq9(wikiSources.contentHash, contentHash)).limit(1);
     if (existing.length > 0) {
       return {
         sourceId: existing[0].id,
@@ -6956,7 +7001,7 @@ var WikiCompiler = class {
     const articlesCreated = [];
     const articlesUpdated = [];
     for (const article of articles) {
-      const existingArticle = await db2.select().from(wikiArticles).where(eq8(wikiArticles.slug, article.slug)).limit(1);
+      const existingArticle = await db2.select().from(wikiArticles).where(eq9(wikiArticles.slug, article.slug)).limit(1);
       if (existingArticle.length > 0) {
         await db2.update(wikiArticles).set({
           content: article.content,
@@ -6968,7 +7013,7 @@ var WikiCompiler = class {
           version: existingArticle[0].version + 1,
           status: "active",
           updatedAt: /* @__PURE__ */ new Date()
-        }).where(eq8(wikiArticles.slug, article.slug));
+        }).where(eq9(wikiArticles.slug, article.slug));
         articlesUpdated.push(article.slug);
       } else {
         await db2.insert(wikiArticles).values({
@@ -7008,7 +7053,7 @@ var WikiCompiler = class {
    */
   async query(question) {
     const db2 = getDatabase();
-    const allArticles = await db2.select().from(wikiArticles).where(eq8(wikiArticles.status, "active"));
+    const allArticles = await db2.select().from(wikiArticles).where(eq9(wikiArticles.status, "active"));
     const keywords = question.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
     const scored = allArticles.map((article) => {
       const text8 = `${article.title} ${article.content}`.toLowerCase();
@@ -7035,7 +7080,7 @@ ${s.article.content}`
     let newArticleSlug;
     if (parsed.suggestedNewArticle) {
       const newArticle = parsed.suggestedNewArticle;
-      const existingArticle = await db2.select().from(wikiArticles).where(eq8(wikiArticles.slug, newArticle.slug)).limit(1);
+      const existingArticle = await db2.select().from(wikiArticles).where(eq9(wikiArticles.slug, newArticle.slug)).limit(1);
       if (existingArticle.length === 0) {
         await db2.insert(wikiArticles).values({
           slug: newArticle.slug,
@@ -7095,7 +7140,7 @@ ${a.content}`
     const articlesMarkedStale = [];
     for (const finding of parsed.findings) {
       if (finding.type === "stale") {
-        await db2.update(wikiArticles).set({ status: "stale", updatedAt: /* @__PURE__ */ new Date() }).where(eq8(wikiArticles.slug, finding.articleSlug));
+        await db2.update(wikiArticles).set({ status: "stale", updatedAt: /* @__PURE__ */ new Date() }).where(eq9(wikiArticles.slug, finding.articleSlug));
         articlesMarkedStale.push(finding.articleSlug);
       }
     }
@@ -7193,7 +7238,7 @@ ${a.content}`
    */
   async getArticle(slug) {
     const db2 = getDatabase();
-    const results = await db2.select().from(wikiArticles).where(eq8(wikiArticles.slug, slug)).limit(1);
+    const results = await db2.select().from(wikiArticles).where(eq9(wikiArticles.slug, slug)).limit(1);
     if (results.length === 0) return null;
     const a = results[0];
     return {
@@ -7258,7 +7303,7 @@ ${a.content}`
         fs2.mkdirSync(categoryDir, { recursive: true });
       }
       for (const entry of catArticles) {
-        const fullArticle = await db2.select().from(wikiArticles).where(eq8(wikiArticles.slug, entry.slug)).limit(1);
+        const fullArticle = await db2.select().from(wikiArticles).where(eq9(wikiArticles.slug, entry.slug)).limit(1);
         if (fullArticle.length > 0) {
           const a = fullArticle[0];
           let fileContent = `# ${a.title}
@@ -7479,7 +7524,7 @@ __export(mempalace_exports, {
 
 // src/mempalace/client.ts
 import { createHash as createHash2 } from "crypto";
-import { and as and6, desc as desc2, eq as eq9, inArray, isNull, like as like2, or as or3 } from "drizzle-orm";
+import { and as and6, desc as desc2, eq as eq10, inArray, isNull, like as like2, or as or3 } from "drizzle-orm";
 var LocalShimClient = class {
   constructor() {
     this.mode = "local";
@@ -7510,7 +7555,7 @@ var LocalShimClient = class {
   }
   async ensureWing(slug, name, repo) {
     const db2 = getDatabase();
-    const existing = await db2.select().from(palaceWings).where(eq9(palaceWings.slug, slug)).limit(1);
+    const existing = await db2.select().from(palaceWings).where(eq10(palaceWings.slug, slug)).limit(1);
     if (existing.length > 0) {
       return this.rowToWing(existing[0]);
     }
@@ -7534,8 +7579,8 @@ var LocalShimClient = class {
     const contentHash = createHash2("sha256").update(input.content).digest("hex");
     const existing = await db2.select().from(palaceDrawers).where(
       and6(
-        eq9(palaceDrawers.contentHash, contentHash),
-        eq9(palaceDrawers.roomId, room.id)
+        eq10(palaceDrawers.contentHash, contentHash),
+        eq10(palaceDrawers.roomId, room.id)
       )
     ).limit(1);
     if (existing.length > 0) {
@@ -7569,11 +7614,11 @@ var LocalShimClient = class {
     const db2 = getDatabase();
     let roomIds;
     if (input.wingSlug) {
-      const wing = await db2.select().from(palaceWings).where(eq9(palaceWings.slug, input.wingSlug)).limit(1);
+      const wing = await db2.select().from(palaceWings).where(eq10(palaceWings.slug, input.wingSlug)).limit(1);
       if (wing.length === 0) {
         return { hits: [], totalScanned: 0 };
       }
-      const rooms = await db2.select().from(palaceRooms).where(eq9(palaceRooms.wingId, wing[0].id));
+      const rooms = await db2.select().from(palaceRooms).where(eq10(palaceRooms.wingId, wing[0].id));
       const ids = rooms.map((r) => r.id);
       if (ids.length === 0) {
         return { hits: [], totalScanned: 0 };
@@ -7602,12 +7647,12 @@ var LocalShimClient = class {
     const wingMap = /* @__PURE__ */ new Map();
     for (const entry of top) {
       if (!roomMap.has(entry.row.roomId)) {
-        const roomRows = await db2.select().from(palaceRooms).where(eq9(palaceRooms.id, entry.row.roomId)).limit(1);
+        const roomRows = await db2.select().from(palaceRooms).where(eq10(palaceRooms.id, entry.row.roomId)).limit(1);
         if (roomRows[0]) {
           const room = this.rowToRoom(roomRows[0]);
           roomMap.set(room.id, room);
           if (!wingMap.has(room.wingId)) {
-            const wingRows = await db2.select().from(palaceWings).where(eq9(palaceWings.id, room.wingId)).limit(1);
+            const wingRows = await db2.select().from(palaceWings).where(eq10(palaceWings.id, room.wingId)).limit(1);
             if (wingRows[0]) {
               wingMap.set(room.wingId, this.rowToWing(wingRows[0]));
             }
@@ -7635,7 +7680,7 @@ var LocalShimClient = class {
     const db2 = getDatabase();
     const wing = await this.ensureWing(input.wingSlug);
     const identity = wing.description ?? `You are assisting with the ${wing.name} project. Follow the project's existing patterns and constraints.`;
-    const rooms = await db2.select().from(palaceRooms).where(eq9(palaceRooms.wingId, wing.id));
+    const rooms = await db2.select().from(palaceRooms).where(eq10(palaceRooms.wingId, wing.id));
     const roomIds = rooms.map((r) => r.id);
     const criticalFacts = [];
     if (roomIds.length > 0) {
@@ -7659,13 +7704,13 @@ var LocalShimClient = class {
   }
   async recall(input) {
     const db2 = getDatabase();
-    const wingRows = await db2.select().from(palaceWings).where(eq9(palaceWings.slug, input.wingSlug)).limit(1);
+    const wingRows = await db2.select().from(palaceWings).where(eq10(palaceWings.slug, input.wingSlug)).limit(1);
     if (wingRows.length === 0) {
       return { topic: input.topic, closets: [], tokenEstimate: 0 };
     }
     const rooms = await db2.select().from(palaceRooms).where(
       and6(
-        eq9(palaceRooms.wingId, wingRows[0].id),
+        eq10(palaceRooms.wingId, wingRows[0].id),
         or3(
           like2(palaceRooms.topic, `%${input.topic}%`),
           like2(palaceRooms.slug, `%${input.topic}%`),
@@ -7680,7 +7725,7 @@ var LocalShimClient = class {
     const closetRows = await db2.select().from(palaceClosets).where(
       and6(
         inArray(palaceClosets.roomId, roomIds),
-        eq9(palaceClosets.tier, 2)
+        eq10(palaceClosets.tier, 2)
       )
     ).limit(input.limit ?? 5);
     const closets = closetRows.map(this.rowToCloset);
@@ -7692,9 +7737,9 @@ var LocalShimClient = class {
     const wing = await this.ensureWing(input.wingSlug);
     const existing = await db2.select().from(palaceKgTriples).where(
       and6(
-        eq9(palaceKgTriples.wingId, wing.id),
-        eq9(palaceKgTriples.subject, input.subject),
-        eq9(palaceKgTriples.predicate, input.predicate),
+        eq10(palaceKgTriples.wingId, wing.id),
+        eq10(palaceKgTriples.subject, input.subject),
+        eq10(palaceKgTriples.predicate, input.predicate),
         isNull(palaceKgTriples.validUntil)
       )
     );
@@ -7702,7 +7747,7 @@ var LocalShimClient = class {
     const now = /* @__PURE__ */ new Date();
     for (const row2 of existing) {
       if (row2.object !== input.object) {
-        await db2.update(palaceKgTriples).set({ validUntil: now }).where(eq9(palaceKgTriples.id, row2.id));
+        await db2.update(palaceKgTriples).set({ validUntil: now }).where(eq10(palaceKgTriples.id, row2.id));
         contradictions.push({
           subject: row2.subject,
           predicate: row2.predicate,
@@ -7727,12 +7772,12 @@ var LocalShimClient = class {
   }
   async kgQuery(input) {
     const db2 = getDatabase();
-    const wingRows = await db2.select().from(palaceWings).where(eq9(palaceWings.slug, input.wingSlug)).limit(1);
+    const wingRows = await db2.select().from(palaceWings).where(eq10(palaceWings.slug, input.wingSlug)).limit(1);
     if (wingRows.length === 0) return [];
-    const filters = [eq9(palaceKgTriples.wingId, wingRows[0].id)];
-    if (input.subject) filters.push(eq9(palaceKgTriples.subject, input.subject));
-    if (input.predicate) filters.push(eq9(palaceKgTriples.predicate, input.predicate));
-    if (input.object) filters.push(eq9(palaceKgTriples.object, input.object));
+    const filters = [eq10(palaceKgTriples.wingId, wingRows[0].id)];
+    if (input.subject) filters.push(eq10(palaceKgTriples.subject, input.subject));
+    if (input.predicate) filters.push(eq10(palaceKgTriples.predicate, input.predicate));
+    if (input.object) filters.push(eq10(palaceKgTriples.object, input.object));
     if (input.currentOnly) filters.push(isNull(palaceKgTriples.validUntil));
     const rows = await db2.select().from(palaceKgTriples).where(and6(...filters));
     return rows.map((r) => ({
@@ -7749,14 +7794,14 @@ var LocalShimClient = class {
   }
   async kgInvalidate(input) {
     const db2 = getDatabase();
-    const wingRows = await db2.select().from(palaceWings).where(eq9(palaceWings.slug, input.wingSlug)).limit(1);
+    const wingRows = await db2.select().from(palaceWings).where(eq10(palaceWings.slug, input.wingSlug)).limit(1);
     if (wingRows.length === 0) return { invalidatedCount: 0 };
     const now = /* @__PURE__ */ new Date();
     const result = await db2.update(palaceKgTriples).set({ validUntil: now }).where(
       and6(
-        eq9(palaceKgTriples.wingId, wingRows[0].id),
-        eq9(palaceKgTriples.subject, input.subject),
-        eq9(palaceKgTriples.predicate, input.predicate),
+        eq10(palaceKgTriples.wingId, wingRows[0].id),
+        eq10(palaceKgTriples.subject, input.subject),
+        eq10(palaceKgTriples.predicate, input.predicate),
         isNull(palaceKgTriples.validUntil)
       )
     ).returning();
@@ -7769,15 +7814,15 @@ var LocalShimClient = class {
   }
   async listRooms(wingSlug) {
     const db2 = getDatabase();
-    const wingRows = await db2.select().from(palaceWings).where(eq9(palaceWings.slug, wingSlug)).limit(1);
+    const wingRows = await db2.select().from(palaceWings).where(eq10(palaceWings.slug, wingSlug)).limit(1);
     if (wingRows.length === 0) return [];
-    const rows = await db2.select().from(palaceRooms).where(eq9(palaceRooms.wingId, wingRows[0].id));
+    const rows = await db2.select().from(palaceRooms).where(eq10(palaceRooms.wingId, wingRows[0].id));
     return rows.map(this.rowToRoom);
   }
   // ----- Internals -----
   async ensureRoom(wingId, slug, name, topic) {
     const db2 = getDatabase();
-    const existing = await db2.select().from(palaceRooms).where(and6(eq9(palaceRooms.wingId, wingId), eq9(palaceRooms.slug, slug))).limit(1);
+    const existing = await db2.select().from(palaceRooms).where(and6(eq10(palaceRooms.wingId, wingId), eq10(palaceRooms.slug, slug))).limit(1);
     if (existing.length > 0) {
       return this.rowToRoom(existing[0]);
     }

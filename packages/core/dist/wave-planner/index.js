@@ -4616,7 +4616,7 @@ var WaveExecutionController = class {
 };
 
 // src/wave-planner/execution/dispatch-coordinator.ts
-var import_drizzle_orm13 = require("drizzle-orm");
+var import_drizzle_orm14 = require("drizzle-orm");
 
 // src/orchestrator/ao-cli-adapter.ts
 var import_child_process2 = require("child_process");
@@ -4736,6 +4736,9 @@ function getOrchestratorServiceOrNull() {
   return serviceInstance;
 }
 
+// src/orchestrator/host-wiring.ts
+var import_drizzle_orm13 = require("drizzle-orm");
+
 // src/wave-planner/execution/dispatch-coordinator.ts
 var WaveDispatchCoordinator = class {
   constructor(config) {
@@ -4781,7 +4784,7 @@ var WaveDispatchCoordinator = class {
           status: "dispatched",
           startedAt: /* @__PURE__ */ new Date(),
           assignedSessionId: outcome.sessionId
-        }).where((0, import_drizzle_orm13.eq)(waveTasks.id, task.id));
+        }).where((0, import_drizzle_orm14.eq)(waveTasks.id, task.id));
         result.dispatched++;
         if (i < maxDispatch - 1) {
           await this.delay(this.config.subagentDispatchDelayMs);
@@ -4797,7 +4800,7 @@ var WaveDispatchCoordinator = class {
           status: "failed",
           errorMessage,
           completedAt: /* @__PURE__ */ new Date()
-        }).where((0, import_drizzle_orm13.eq)(waveTasks.id, task.id));
+        }).where((0, import_drizzle_orm14.eq)(waveTasks.id, task.id));
       }
     }
     result.queued += pendingTasks.length - maxDispatch;
@@ -4811,7 +4814,7 @@ var WaveDispatchCoordinator = class {
   async redispatchTask(wavePlanId, taskCode) {
     const result = { dispatched: 0, queued: 0, errors: [] };
     const task = await this.db.query.waveTasks.findFirst({
-      where: (0, import_drizzle_orm13.and)((0, import_drizzle_orm13.eq)(waveTasks.wavePlanId, wavePlanId), (0, import_drizzle_orm13.eq)(waveTasks.taskCode, taskCode))
+      where: (0, import_drizzle_orm14.and)((0, import_drizzle_orm14.eq)(waveTasks.wavePlanId, wavePlanId), (0, import_drizzle_orm14.eq)(waveTasks.taskCode, taskCode))
     });
     if (!task) {
       result.errors.push({ taskCode, error: "NOT_FOUND" });
@@ -4822,7 +4825,7 @@ var WaveDispatchCoordinator = class {
       return result;
     }
     const plan = await this.db.query.wavePlans.findFirst({
-      where: (0, import_drizzle_orm13.eq)(wavePlans.id, wavePlanId)
+      where: (0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId)
     });
     if (plan?.status !== "executing") {
       result.queued++;
@@ -4837,7 +4840,7 @@ var WaveDispatchCoordinator = class {
         status: "dispatched",
         startedAt: /* @__PURE__ */ new Date(),
         assignedSessionId: outcome.sessionId
-      }).where((0, import_drizzle_orm13.eq)(waveTasks.id, task.id));
+      }).where((0, import_drizzle_orm14.eq)(waveTasks.id, task.id));
       result.dispatched++;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
@@ -4845,7 +4848,7 @@ var WaveDispatchCoordinator = class {
         result.queued++;
         return result;
       }
-      await this.db.update(waveTasks).set({ status: "failed", errorMessage, completedAt: /* @__PURE__ */ new Date() }).where((0, import_drizzle_orm13.eq)(waveTasks.id, task.id));
+      await this.db.update(waveTasks).set({ status: "failed", errorMessage, completedAt: /* @__PURE__ */ new Date() }).where((0, import_drizzle_orm14.eq)(waveTasks.id, task.id));
       result.errors.push({ taskCode, error: errorMessage });
     }
     return result;
@@ -4874,9 +4877,9 @@ var WaveDispatchCoordinator = class {
    */
   async getPredecessorContext(wavePlanId, taskCode) {
     const task = await this.db.query.waveTasks.findFirst({
-      where: (0, import_drizzle_orm13.and)(
-        (0, import_drizzle_orm13.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm13.eq)(waveTasks.taskCode, taskCode)
+      where: (0, import_drizzle_orm14.and)(
+        (0, import_drizzle_orm14.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm14.eq)(waveTasks.taskCode, taskCode)
       )
     });
     if (!task || !task.dependencies || task.dependencies.length === 0) {
@@ -4885,10 +4888,10 @@ var WaveDispatchCoordinator = class {
     const predecessorSummaries = [];
     for (const depTaskCode of task.dependencies) {
       const depTask = await this.db.query.waveTasks.findFirst({
-        where: (0, import_drizzle_orm13.and)(
-          (0, import_drizzle_orm13.eq)(waveTasks.wavePlanId, wavePlanId),
-          (0, import_drizzle_orm13.eq)(waveTasks.taskCode, depTaskCode),
-          (0, import_drizzle_orm13.eq)(waveTasks.status, "completed")
+        where: (0, import_drizzle_orm14.and)(
+          (0, import_drizzle_orm14.eq)(waveTasks.wavePlanId, wavePlanId),
+          (0, import_drizzle_orm14.eq)(waveTasks.taskCode, depTaskCode),
+          (0, import_drizzle_orm14.eq)(waveTasks.status, "completed")
         )
       });
       if (depTask) {
@@ -4908,13 +4911,13 @@ var WaveDispatchCoordinator = class {
    */
   async loadDispatchContext(wavePlanId) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: (0, import_drizzle_orm13.eq)(wavePlans.id, wavePlanId)
+      where: (0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId)
     });
     if (!wavePlan) {
       throw new Error(`Wave plan ${wavePlanId} not found`);
     }
     const item = await this.db.query.horizonItems.findFirst({
-      where: (0, import_drizzle_orm13.eq)(horizonItems.id, wavePlan.horizonItemId)
+      where: (0, import_drizzle_orm14.eq)(horizonItems.id, wavePlan.horizonItemId)
     });
     if (!item) {
       throw new Error(`Horizon item ${wavePlan.horizonItemId} not found`);
@@ -4931,7 +4934,7 @@ var WaveDispatchCoordinator = class {
    */
   async checkFleetCapacity() {
     const runningTasks = await this.db.query.waveTasks.findMany({
-      where: (0, import_drizzle_orm13.eq)(waveTasks.status, "running")
+      where: (0, import_drizzle_orm14.eq)(waveTasks.status, "running")
     });
     const activeWorkers = runningTasks.length;
     const totalWorkers = this.config.maxTotalActiveTasks;
@@ -5000,14 +5003,14 @@ var WaveDispatchCoordinator = class {
     };
     const response = await service.dispatch(dispatchReq);
     if (!response.accepted) {
-      await this.db.delete(rufloSessions).where((0, import_drizzle_orm13.eq)(rufloSessions.id, session.id));
+      await this.db.delete(rufloSessions).where((0, import_drizzle_orm14.eq)(rufloSessions.id, session.id));
       throw new Error(response.error ?? "DISPATCH_REJECTED");
     }
     await this.db.update(rufloSessions).set({
       externalSessionId: response.orchestratorJobId ?? null,
       orchestratorMode: service.mode,
       updatedAt: /* @__PURE__ */ new Date()
-    }).where((0, import_drizzle_orm13.eq)(rufloSessions.id, session.id));
+    }).where((0, import_drizzle_orm14.eq)(rufloSessions.id, session.id));
     return {
       sessionId: session.id,
       externalJobId: response.orchestratorJobId ?? "",

@@ -10,3 +10,4 @@ export * from './claude-session-adapter';
 export * from './session-prompt';
 export * from './service';
 export * from './status-poller';
+export * from './host-wiring';
