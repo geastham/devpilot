@@ -1,7 +1,13 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/index.ts', 'src/db/index.ts', 'src/orchestrator/index.ts', 'src/wiki/index.ts'],
+  entry: [
+    'src/index.ts',
+    'src/db/index.ts',
+    'src/orchestrator/index.ts',
+    'src/wiki/index.ts',
+    'src/wave-planner/index.ts',
+  ],
   format: ['cjs', 'esm'],
   dts: true,
   splitting: false,

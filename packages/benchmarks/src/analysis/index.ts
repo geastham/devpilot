@@ -6,11 +6,11 @@
 
 export {
   ScoringEngine,
-  ScoringConfig,
   DEFAULT_WEIGHTS,
   createScoringEngine,
   calculateScore,
 } from './scoring';
+export type { ScoringConfig } from './scoring';
 
 export {
   WaveAnalyzer,

@@ -150,6 +150,18 @@ export class MetricsCollector {
   }
 
   /**
+   * Record token usage for a session directly.
+   *
+   * Convenience wrapper around the underlying token tracker that resolves the
+   * model from the registered session (falling back to 'unknown' when the
+   * session has not been registered yet).
+   */
+  recordTokenUsage(sessionId: string, usage: TokenUsage): void {
+    const model = this.sessions.get(sessionId)?.model ?? 'unknown';
+    this.tokenTracker.recordUsage(sessionId, model, usage);
+  }
+
+  /**
    * Update an existing session.
    */
   updateSession(sessionId: string, update: Partial<SessionRecord>): void {
@@ -402,6 +414,13 @@ export class MetricsCollector {
   // ===========================================================================
   // Export
   // ===========================================================================
+
+  /**
+   * Get the underlying timeline recorder for direct event recording.
+   */
+  getTimeline(): TimelineRecorder {
+    return this.timeline;
+  }
 
   /**
    * Export timeline events.

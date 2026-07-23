@@ -48,16 +48,17 @@ export const historyCommand = new Command('history')
         const run = await reader.readRunManifest(version, runs[0]);
         if (!run) continue;
 
-        for (const result of run.results) {
+        for (const result of run.benchmarks) {
           if (benchmarkId && result.benchmarkId !== benchmarkId) continue;
-          if (!result.devpilot || !result.comparison) continue;
+          const devpilot = result.scenarios.devpilot;
+          if (!devpilot || !result.comparison) continue;
 
           const dataPoint: VersionDataPoint = {
             version,
             timestamp: run.timestamp,
             speedup: result.comparison.speedup,
             costReduction: result.comparison.costReduction,
-            passRate: result.devpilot.acceptanceResults.passRate,
+            passRate: devpilot.acceptanceResults.passRate,
             compositeScore: 0, // Would need scoring to calculate
           };
 

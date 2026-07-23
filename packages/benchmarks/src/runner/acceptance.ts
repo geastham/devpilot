@@ -60,17 +60,16 @@ export class AcceptanceRunner {
 
       // Parse results
       const tests = this.parseTestOutput(result.stdout + '\n' + result.stderr);
-      const passed = tests.filter((t) => t.passed).length;
-      const failed = tests.filter((t) => !t.passed).length;
+      const passed = tests.filter((t) => t.status === 'pass').length;
+      const failed = tests.filter((t) => t.status === 'fail').length;
 
       return {
-        tests,
+        totalTests: tests.length,
         passed,
         failed,
-        total: tests.length,
         passRate: tests.length > 0 ? passed / tests.length : 0,
-        output: result.stdout,
-        durationMs: Date.now() - startTime,
+        details: tests,
+        scriptOutput: result.stdout,
       };
     } finally {
       // Stop server if we started one
@@ -191,13 +190,13 @@ export class AcceptanceRunner {
       if (passMatch) {
         tests.push({
           name: passMatch[2].trim(),
-          passed: true,
+          status: 'pass',
         });
       } else if (failMatch) {
         tests.push({
           name: failMatch[2].trim(),
-          passed: false,
-          error: this.findErrorContext(lines, lines.indexOf(line)),
+          status: 'fail',
+          output: this.findErrorContext(lines, lines.indexOf(line)),
         });
       }
     }
@@ -212,10 +211,10 @@ export class AcceptanceRunner {
         const failed = parseInt(summaryMatch[2], 10);
 
         for (let i = 0; i < passed; i++) {
-          tests.push({ name: `Test ${i + 1}`, passed: true });
+          tests.push({ name: `Test ${i + 1}`, status: 'pass' });
         }
         for (let i = 0; i < failed; i++) {
-          tests.push({ name: `Test ${passed + i + 1}`, passed: false });
+          tests.push({ name: `Test ${passed + i + 1}`, status: 'fail' });
         }
       }
     }
@@ -243,13 +242,12 @@ export class AcceptanceRunner {
    */
   private createEmptyResult(reason: string): AcceptanceResult {
     return {
-      tests: [],
+      totalTests: 0,
       passed: 0,
       failed: 0,
-      total: 0,
       passRate: 0,
-      output: reason,
-      durationMs: 0,
+      details: [],
+      scriptOutput: reason,
     };
   }
 

@@ -92,9 +92,11 @@ export class WaveExecutionController {
   /**
    * Resume execution of a paused wave plan
    * Transitions: paused → executing
-   * Dispatches current wave if not complete
+   * Dispatches current wave if not complete.
+   * @returns the DispatchResult of the re-dispatched current wave, or null if
+   *          the current wave was already complete (nothing re-dispatched).
    */
-  async resume(wavePlanId: string): Promise<void> {
+  async resume(wavePlanId: string): Promise<DispatchResult | null> {
     // Validate status is 'paused'
     const wavePlan = await this.db.query.wavePlans.findFirst({
       where: eq(wavePlans.id, wavePlanId),
@@ -126,8 +128,10 @@ export class WaveExecutionController {
     // Dispatch current wave if not complete
     const currentWave = wavePlan.waves.find(w => w.waveIndex === wavePlan.currentWaveIndex);
     if (currentWave && currentWave.status !== 'completed') {
-      await this.dispatchWave(wavePlanId, wavePlan.currentWaveIndex);
+      return this.dispatchWave(wavePlanId, wavePlan.currentWaveIndex);
     }
+
+    return null;
   }
 
   /**
@@ -263,64 +267,62 @@ export class WaveExecutionController {
     const isWaveComplete = await this.checkWaveComplete(wavePlanId, waveIndex);
 
     if (isWaveComplete) {
-      // Mark wave as completed
-      await this.db.update(waves)
-        .set({
-          status: 'completed',
-          completedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(waves.wavePlanId, wavePlanId),
-            eq(waves.waveIndex, waveIndex)
-          )
-        );
-
-      // Check if this is the last wave
-      const wavePlan = await this.db.query.wavePlans.findFirst({
-        where: eq(wavePlans.id, wavePlanId),
-      });
-
-      if (!wavePlan) {
-        return;
-      }
-
-      const isLastWave = waveIndex === wavePlan.totalWaves - 1;
-
-      if (isLastWave) {
-        // Mark wave plan as completed
-        await this.db.update(wavePlans)
-          .set({
-            status: 'completed',
-            completedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(eq(wavePlans.id, wavePlanId));
-      } else if (this.config.autoAdvance) {
-        // Advance to next wave
-        const nextWaveIndex = waveIndex + 1;
-        await this.db.update(wavePlans)
-          .set({
-            currentWaveIndex: nextWaveIndex,
-            updatedAt: new Date(),
-          })
-          .where(eq(wavePlans.id, wavePlanId));
-
-        // Wait before dispatching next wave
-        await this.delay(this.config.waveAdvanceDelayMs);
-
-        // Dispatch next wave
-        await this.dispatchWave(wavePlanId, nextWaveIndex);
-      }
+      await this.handleWaveComplete(wavePlanId, waveIndex);
     }
   }
 
   /**
-   * Handle task failure
-   * Implements retry logic or marks as failed based on policy
+   * Handle wave completion: mark the wave complete, then either finish the plan
+   * (last wave) or auto-advance to the next wave. Invoked by the
+   * ExecutionBridge's CompletionListener callback (§6.5) and by onTaskComplete.
+   */
+  async handleWaveComplete(wavePlanId: string, waveIndex: number): Promise<void> {
+    // Mark wave as completed
+    await this.db.update(waves)
+      .set({ status: 'completed', completedAt: new Date() })
+      .where(
+        and(eq(waves.wavePlanId, wavePlanId), eq(waves.waveIndex, waveIndex))
+      );
+
+    const wavePlan = await this.db.query.wavePlans.findFirst({
+      where: eq(wavePlans.id, wavePlanId),
+    });
+    if (!wavePlan) {
+      return;
+    }
+
+    const isLastWave = waveIndex === wavePlan.totalWaves - 1;
+
+    if (isLastWave) {
+      await this.db.update(wavePlans)
+        .set({ status: 'completed', completedAt: new Date(), updatedAt: new Date() })
+        .where(eq(wavePlans.id, wavePlanId));
+      return;
+    }
+
+    if (this.config.autoAdvance) {
+      // Pause guard (§9.4): never auto-advance a plan that is no longer executing.
+      if (wavePlan.status !== 'executing') {
+        return;
+      }
+
+      const nextWaveIndex = waveIndex + 1;
+      await this.db.update(wavePlans)
+        .set({ currentWaveIndex: nextWaveIndex, updatedAt: new Date() })
+        .where(eq(wavePlans.id, wavePlanId));
+
+      await this.delay(this.config.waveAdvanceDelayMs);
+      await this.dispatchWave(wavePlanId, nextWaveIndex);
+    }
+  }
+
+  /**
+   * Handle task failure. Within the retry limit, mark the task 'retrying' and
+   * re-dispatch it immediately if the plan is still executing (a paused plan
+   * re-dispatches the task on resume). Beyond the limit, fail terminally per
+   * policy. This is where the former re-dispatch placeholder was resolved.
    */
   async onTaskFailed(wavePlanId: string, taskCode: string, error: string): Promise<void> {
-    // Get current task
     const task = await this.db.query.waveTasks.findFirst({
       where: and(
         eq(waveTasks.wavePlanId, wavePlanId),
@@ -332,7 +334,6 @@ export class WaveExecutionController {
       throw new Error(`Task ${taskCode} not found in plan ${wavePlanId}`);
     }
 
-    // Check if we should retry
     if (task.retryCount < this.config.retryLimit) {
       // Mark as retrying and increment retry count
       await this.db.update(waveTasks)
@@ -348,60 +349,79 @@ export class WaveExecutionController {
           )
         );
 
-      // TODO: Re-dispatch task to orchestrator
-    } else {
-      // Mark as failed
-      await this.db.update(waveTasks)
-        .set({
-          status: 'failed',
-          completedAt: new Date(),
-          errorMessage: error,
-        })
+      // Re-dispatch now if executing; a paused plan resumes the retry later.
+      const plan = await this.db.query.wavePlans.findFirst({
+        where: eq(wavePlans.id, wavePlanId),
+      });
+      if (plan?.status === 'executing') {
+        const result = await this.dispatchCoordinator.redispatchTask(wavePlanId, taskCode);
+        if (result.errors.length > 0) {
+          // Re-dispatch itself failed → treat as a terminal failure.
+          await this.failTask(wavePlanId, taskCode, result.errors[0].error);
+        }
+      }
+      return;
+    }
+
+    await this.failTask(wavePlanId, taskCode, error);
+  }
+
+  /**
+   * Terminally fail a task with no retry — used by the ExecutionBridge for
+   * cancellations (job:cancelled is terminal). Applies the failure policy.
+   */
+  async cancelTask(wavePlanId: string, taskCode: string, reason: string): Promise<void> {
+    await this.failTask(wavePlanId, taskCode, reason);
+  }
+
+  /**
+   * Terminally fail a task and apply the failure policy: 'halt' fails the plan
+   * and skips remaining pending tasks; 'continue' leaves other tasks running.
+   */
+  private async failTask(wavePlanId: string, taskCode: string, error: string): Promise<void> {
+    const task = await this.db.query.waveTasks.findFirst({
+      where: and(
+        eq(waveTasks.wavePlanId, wavePlanId),
+        eq(waveTasks.taskCode, taskCode)
+      ),
+    });
+    if (!task) {
+      throw new Error(`Task ${taskCode} not found in plan ${wavePlanId}`);
+    }
+
+    await this.db.update(waveTasks)
+      .set({ status: 'failed', completedAt: new Date(), errorMessage: error })
+      .where(
+        and(
+          eq(waveTasks.wavePlanId, wavePlanId),
+          eq(waveTasks.taskCode, taskCode)
+        )
+      );
+
+    if (this.config.failurePolicy === 'halt') {
+      await this.db.update(wavePlans)
+        .set({ status: 'failed', completedAt: new Date(), updatedAt: new Date() })
+        .where(eq(wavePlans.id, wavePlanId));
+
+      await this.db.update(waves)
+        .set({ status: 'failed', completedAt: new Date() })
         .where(
           and(
-            eq(waveTasks.wavePlanId, wavePlanId),
-            eq(waveTasks.taskCode, taskCode)
+            eq(waves.wavePlanId, wavePlanId),
+            eq(waves.waveIndex, task.waveIndex)
           )
         );
 
-      // Handle based on failure policy
-      if (this.config.failurePolicy === 'halt') {
-        // Mark wave plan as failed
-        await this.db.update(wavePlans)
-          .set({
-            status: 'failed',
-            completedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(eq(wavePlans.id, wavePlanId));
-
-        // Mark wave as failed
-        await this.db.update(waves)
-          .set({
-            status: 'failed',
-            completedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(waves.wavePlanId, wavePlanId),
-              eq(waves.waveIndex, task.waveIndex)
-            )
-          );
-
-        // Skip remaining tasks
-        await this.db.update(waveTasks)
-          .set({
-            status: 'skipped',
-          })
-          .where(
-            and(
-              eq(waveTasks.wavePlanId, wavePlanId),
-              eq(waveTasks.status, 'pending')
-            )
-          );
-      }
-      // If policy is 'continue', just mark task as failed and continue
+      await this.db.update(waveTasks)
+        .set({ status: 'skipped' })
+        .where(
+          and(
+            eq(waveTasks.wavePlanId, wavePlanId),
+            eq(waveTasks.status, 'pending')
+          )
+        );
     }
+    // 'continue' policy: only this task is failed; the wave proceeds.
   }
 
   /**

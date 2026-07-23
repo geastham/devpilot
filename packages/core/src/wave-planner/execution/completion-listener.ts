@@ -1,7 +1,14 @@
 import { eq, and } from 'drizzle-orm';
 import { getDatabase, type Database } from '../../db';
 import { waveTasks, activityEvents, type WaveTask } from '../../db/schema';
-import type { WaveSSEEvent } from './types';
+import { toActivityEventType, type WaveSSEEvent } from './types';
+
+export interface CompletionListenerOptions {
+  /** Max retries per task before terminal failure. Default 1. */
+  retryLimit?: number;
+}
+
+const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'skipped']);
 
 /**
  * CompletionListener handles task completion events from the orchestrator.
@@ -9,23 +16,37 @@ import type { WaveSSEEvent } from './types';
  */
 export class CompletionListener {
   private db: Database;
+  private retryLimit: number;
 
   constructor(
-    private onWaveComplete: (wavePlanId: string, waveIndex: number) => Promise<void>
+    private onWaveComplete: (wavePlanId: string, waveIndex: number) => Promise<void>,
+    options?: CompletionListenerOptions
   ) {
     this.db = getDatabase();
+    this.retryLimit = options?.retryLimit ?? 1;
   }
 
   /**
    * Handle task started event.
-   * Updates the wave task status to 'running' and records start time.
+   * Idempotently marks the wave task 'running'; a task already in a terminal
+   * state is not resurrected (a late job:started after completion is ignored).
    */
   async handleTaskStarted(
     wavePlanId: string,
     taskCode: string,
     sessionId: string
   ): Promise<void> {
-    await (this.db as any)
+    const task = await this.db.query.waveTasks.findFirst({
+      where: and(
+        eq(waveTasks.wavePlanId, wavePlanId),
+        eq(waveTasks.taskCode, taskCode)
+      ),
+    });
+    if (!task || TERMINAL_TASK_STATUSES.has(task.status)) {
+      return;
+    }
+
+    await this.db
       .update(waveTasks)
       .set({
         status: 'running',
@@ -68,13 +89,19 @@ export class CompletionListener {
       throw new Error(`Task ${taskCode} not found in wave plan ${wavePlanId}`);
     }
 
-    // Update task status to completed
-    await (this.db as any)
+    // Idempotency guard: a duplicate completion callback is a no-op (§9.5).
+    if (task.status === 'completed') {
+      return;
+    }
+
+    // Update task status to completed; store the summary in its own column
+    // (not errorMessage).
+    await this.db
       .update(waveTasks)
       .set({
         status: 'completed',
         completedAt: new Date(),
-        errorMessage: completionSummary || null,
+        completionSummary: completionSummary ?? null,
       })
       .where(
         and(
@@ -108,11 +135,10 @@ export class CompletionListener {
     error: string,
     retryCount: number
   ): Promise<void> {
-    // Determine if we should mark as retrying or failed
-    // Assuming retryLimit from config - for now, use a simple threshold
-    const status = retryCount < 1 ? 'retrying' : 'failed';
+    // Retry within the configured limit, else terminal failure.
+    const status = retryCount < this.retryLimit ? 'retrying' : 'failed';
 
-    await (this.db as any)
+    await this.db
       .update(waveTasks)
       .set({
         status,
@@ -177,8 +203,10 @@ export class CompletionListener {
         message = `Wave event: ${event.type}`;
     }
 
-    await (this.db as any).insert(activityEvents).values({
-      type: event.type,
+    await this.db.insert(activityEvents).values({
+      // Map the lowercase SSE type to the uppercase activity_events enum value
+      // (the CHECK constraint only accepts uppercase members).
+      type: toActivityEventType(event.type),
       message,
       metadata: event as unknown as Record<string, unknown>,
     });

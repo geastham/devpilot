@@ -11,8 +11,33 @@ export const serveCommand = new Command('serve')
   .option('--no-open', 'Do not open browser automatically')
   .option('--sync', 'Enable cloud sync')
   .option('--db <path>', 'Path to SQLite database', '.devpilot/data.db')
+  .option(
+    '--orchestrator-mode <mode>',
+    'Orchestrator mode: claude-session | ao-cli | http | disabled'
+  )
+  .option('--session-api-url <url>', 'claude-session dispatcher base URL')
+  .option('--session-api-key <key>', 'claude-session dispatcher bearer token')
+  .option('--ao-project <name>', 'ao-cli project name')
+  .option('--ao-path <path>', 'Path to the ao binary')
+  .option('--orchestrator-url <url>', 'Remote orchestrator base URL (http mode)')
   .action(async (options) => {
     const port = parseInt(options.port, 10);
+
+    // Assemble orchestrator config from flags, falling back to env (§8.1).
+    const orchestratorMode = options.orchestratorMode || process.env.DEVPILOT_ORCHESTRATOR_MODE;
+    const orchestrator = orchestratorMode
+      ? {
+          mode: orchestratorMode as 'claude-session' | 'ao-cli' | 'http' | 'disabled',
+          sessionApiUrl: options.sessionApiUrl || process.env.DEVPILOT_SESSION_API_URL,
+          sessionApiKey: options.sessionApiKey || process.env.DEVPILOT_SESSION_API_KEY,
+          sessionEnvironmentId: process.env.DEVPILOT_SESSION_ENVIRONMENT_ID,
+          callbackToken: process.env.DEVPILOT_CALLBACK_TOKEN,
+          aoProjectName: options.aoProject || process.env.DEVPILOT_AO_PROJECT,
+          aoPath: options.aoPath || process.env.DEVPILOT_AO_PATH,
+          httpUrl: options.orchestratorUrl || process.env.DEVPILOT_ORCHESTRATOR_URL,
+          apiKey: process.env.DEVPILOT_ORCHESTRATOR_API_KEY,
+        }
+      : undefined;
 
     console.log(chalk.cyan('🚀 Starting DevPilot Conductor...'));
     console.log('');
@@ -36,6 +61,7 @@ export const serveCommand = new Command('serve')
       const { url, close } = await startServer({
         port,
         dbPath,
+        orchestrator,
       });
 
       console.log(chalk.green('✓ Server started successfully'));

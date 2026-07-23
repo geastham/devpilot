@@ -40,8 +40,8 @@ export {
 
 export {
   TokenTracker,
-  createTokenTracker,
-  parseTokenUsage,
+  createEmptyUsage,
+  addUsage,
 } from './metrics/token-tracker';
 
 export {

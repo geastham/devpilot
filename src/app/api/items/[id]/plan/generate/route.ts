@@ -7,18 +7,22 @@ import {
   tasks,
   touchedFiles,
   inFlightFiles,
-  rufloSessions,
   activityEvents,
   eq,
 } from '@/lib/db';
-import type { Model, Complexity, FileStatus } from '@/lib/db';
+import {
+  generatePlanForItem,
+  projectWavePlanToPlan,
+} from '@devpilot.sh/core/wave-planner';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
-// POST /api/items/[id]/plan/generate - Generate a plan for a horizon item
-export async function POST(request: NextRequest, { params }: RouteParams) {
+// POST /api/items/[id]/plan/generate - Generate a plan for a horizon item.
+// Uses the real wave planner (AI, with the generator's own flat-plan fallback)
+// and projects the result into plans/workstreams/tasks/touchedFiles. No mocks.
+export async function POST(_request: NextRequest, { params }: RouteParams) {
   try {
     const { id } = await params;
 
@@ -31,37 +35,25 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ error: 'Item not found' }, { status: 404 });
     }
 
-    // Get current fleet state for context snapshot
-    const activeSessions = await db.query.rufloSessions.findMany({
-      where: eq(rufloSessions.status, 'ACTIVE'),
-    });
+    // A missing API key is a configuration error surfaced honestly, not mocked.
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      return NextResponse.json(
+        {
+          error: 'PLAN_AI_UNAVAILABLE',
+          detail: 'ANTHROPIC_API_KEY is not configured',
+        },
+        { status: 503 }
+      );
+    }
 
+    // In-flight file paths drive conflict warnings during projection.
     const allInFlightFiles = await db.query.inFlightFiles.findMany();
+    const inFlightPaths = allInFlightFiles.map((f) => f.path);
 
-    // Calculate fleet context snapshot
-    const fleetContextSnapshot = {
-      activeSessions: activeSessions.length,
-      inFlightFiles: allInFlightFiles.map((f) => ({
-        path: f.path,
-        sessionId: f.activeSessionId,
-        eta: f.estimatedMinutesRemaining,
-      })),
-      timestamp: new Date().toISOString(),
-    };
-
-    // Check for file conflicts with in-flight work
-    const conflictingPaths = allInFlightFiles.map((f) => f.path);
-
-    // Simulated plan generation - in production, this would call an AI service
-    const generatedWorkstreams = generateMockWorkstreams(item.title, item.repo);
-    const estimatedCostUsd = generatedWorkstreams.reduce(
-      (sum, ws) => sum + ws.tasks.reduce((t, task) => t + task.estimatedCostUsd, 0),
-      0
-    );
-
-    // Delete existing plan if any (cascade deletes workstreams, tasks, etc.)
+    // Replace any existing plan (manual cascade — sqlite FKs aren't enforced).
+    const priorVersion = item.plan?.version ?? 0;
     if (item.plan) {
-      // Delete related records first
       await db.delete(tasks).where(eq(tasks.planId, item.plan.id));
       const existingWorkstreams = await db.query.workstreams.findMany({
         where: eq(workstreams.planId, item.plan.id),
@@ -74,75 +66,23 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       await db.delete(plans).where(eq(plans.id, item.plan.id));
     }
 
-    // Create the new plan
-    const [plan] = await db.insert(plans).values({
+    // Generate (creates the plans row + persists the wave plan) then project.
+    const workingDir = process.env.WORKING_DIR || process.cwd();
+    const { generation, planId } = await generatePlanForItem({
       horizonItemId: id,
-      version: item.plan ? item.plan.version + 1 : 1,
-      estimatedCostUsd,
-      baselineCostUsd: estimatedCostUsd * 1.2, // Baseline is 20% higher
-      acceptanceCriteria: [
-        `All tests pass for ${item.repo}`,
-        'No regressions in existing functionality',
-        'Code review approved',
-      ],
-      confidenceSignals: {
-        hasMemory: true,
-        recentlyModifiedFiles: 2,
-        similarTasksCompleted: 5,
-        overallConfidence: 0.85,
-      },
-      fleetContextSnapshot,
-      memorySessionsUsed: [],
-    }).returning();
+      title: item.title,
+      repo: item.repo,
+      workingDir,
+      apiKey,
+    });
 
-    // Create workstreams and tasks
-    for (let wsIdx = 0; wsIdx < generatedWorkstreams.length; wsIdx++) {
-      const ws = generatedWorkstreams[wsIdx];
-      const [workstream] = await db.insert(workstreams).values({
-        planId: plan.id,
-        label: ws.label,
-        repo: ws.repo,
-        workerCount: ws.workerCount,
-        orderIndex: wsIdx,
-      }).returning();
+    await projectWavePlanToPlan({ planId, generation, inFlightPaths });
 
-      // Create tasks for this workstream
-      for (let taskIdx = 0; taskIdx < ws.tasks.length; taskIdx++) {
-        const task = ws.tasks[taskIdx];
-        await db.insert(tasks).values({
-          workstreamId: workstream.id,
-          label: task.label,
-          model: task.model as Model,
-          complexity: task.complexity as Complexity,
-          estimatedCostUsd: task.estimatedCostUsd,
-          filePaths: task.filePaths,
-          conflictWarning: conflictingPaths.some((cp) =>
-            task.filePaths.some((fp) => fp.includes(cp) || cp.includes(fp))
-          )
-            ? 'File may be modified by in-flight session'
-            : null,
-          dependsOn: task.dependsOn || [],
-          orderIndex: taskIdx,
-        });
-      }
-    }
-
-    // Create touched files
-    const uniqueFilePaths = generatedWorkstreams
-      .flatMap((ws) => ws.tasks.flatMap((t) => t.filePaths))
-      .filter((v, i, a) => a.indexOf(v) === i);
-
-    for (const path of uniqueFilePaths) {
-      await db.insert(touchedFiles).values({
-        planId: plan.id,
-        path,
-        status: conflictingPaths.includes(path)
-          ? ('IN_FLIGHT' as FileStatus)
-          : ('AVAILABLE' as FileStatus),
-        inFlightVia: conflictingPaths.includes(path)
-          ? allInFlightFiles.find((f) => f.path === path)?.activeSessionId
-          : null,
-      });
+    // Preserve the version-increment behaviour when replacing a plan.
+    if (priorVersion > 0) {
+      await db.update(plans)
+        .set({ version: priorVersion + 1 })
+        .where(eq(plans.id, planId));
     }
 
     // Update item zone to REFINING if it was in SHAPING
@@ -152,27 +92,30 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
         .where(eq(horizonItems.id, id));
     }
 
-    // Fetch the complete plan with relations
+    // Fetch the complete plan with relations (unchanged 201 response shape).
     const completePlan = await db.query.plans.findFirst({
-      where: eq(plans.id, plan.id),
+      where: eq(plans.id, planId),
       with: {
-        workstreams: {
-          with: { tasks: true },
-        },
+        workstreams: { with: { tasks: true } },
         sequentialTasks: true,
         filesTouched: true,
       },
     });
 
-    // Create activity event
-    const taskCount = completePlan?.workstreams.reduce((sum, ws) => sum + ws.tasks.length, 0) || 0;
+    const estimatedCostUsd = completePlan?.estimatedCostUsd ?? 0;
+    const taskCount =
+      completePlan?.workstreams.reduce(
+        (sum: number, ws: { tasks: unknown[] }) => sum + ws.tasks.length,
+        0
+      ) || 0;
+
     await db.insert(activityEvents).values({
       type: 'PLAN_GENERATED',
       message: `Plan generated for "${item.title}" ($${estimatedCostUsd.toFixed(2)})`,
       repo: item.repo,
       ticketId: item.linearTicketId,
       metadata: {
-        planId: plan.id,
+        planId,
         workstreams: completePlan?.workstreams.length || 0,
         tasks: taskCount,
       },
@@ -182,142 +125,11 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   } catch (error) {
     console.error('Failed to generate plan:', error);
     return NextResponse.json(
-      { error: 'Failed to generate plan' },
+      {
+        error: 'Failed to generate plan',
+        detail: error instanceof Error ? error.message : 'Unknown error',
+      },
       { status: 500 }
     );
   }
-}
-
-// Mock workstream generation - would be replaced with AI service
-function generateMockWorkstreams(title: string, repo: string) {
-  const words = title.toLowerCase().split(' ');
-  const isFeature = words.some((w) => ['add', 'implement', 'create', 'build'].includes(w));
-  const isFix = words.some((w) => ['fix', 'bug', 'issue', 'error'].includes(w));
-  const isRefactor = words.some((w) => ['refactor', 'cleanup', 'improve', 'optimize'].includes(w));
-
-  if (isFeature) {
-    return [
-      {
-        label: 'Core Implementation',
-        repo,
-        workerCount: 2,
-        tasks: [
-          {
-            label: 'Create base types and interfaces',
-            model: 'SONNET',
-            complexity: 'S',
-            estimatedCostUsd: 0.02,
-            filePaths: [`src/types/${words[words.length - 1]}.ts`],
-            dependsOn: [],
-          },
-          {
-            label: 'Implement core logic',
-            model: 'SONNET',
-            complexity: 'M',
-            estimatedCostUsd: 0.08,
-            filePaths: [`src/lib/${words[words.length - 1]}.ts`],
-            dependsOn: [],
-          },
-        ],
-      },
-      {
-        label: 'UI Components',
-        repo,
-        workerCount: 1,
-        tasks: [
-          {
-            label: 'Build UI components',
-            model: 'SONNET',
-            complexity: 'M',
-            estimatedCostUsd: 0.06,
-            filePaths: [`src/components/${words[words.length - 1]}/index.tsx`],
-            dependsOn: [],
-          },
-          {
-            label: 'Add tests',
-            model: 'HAIKU',
-            complexity: 'S',
-            estimatedCostUsd: 0.01,
-            filePaths: [`src/components/${words[words.length - 1]}/__tests__/index.test.tsx`],
-            dependsOn: [],
-          },
-        ],
-      },
-    ];
-  }
-
-  if (isFix) {
-    return [
-      {
-        label: 'Bug Fix',
-        repo,
-        workerCount: 1,
-        tasks: [
-          {
-            label: 'Investigate and fix issue',
-            model: 'SONNET',
-            complexity: 'M',
-            estimatedCostUsd: 0.05,
-            filePaths: ['src/lib/affected-module.ts'],
-            dependsOn: [],
-          },
-          {
-            label: 'Add regression test',
-            model: 'HAIKU',
-            complexity: 'S',
-            estimatedCostUsd: 0.01,
-            filePaths: ['src/__tests__/regression.test.ts'],
-            dependsOn: [],
-          },
-        ],
-      },
-    ];
-  }
-
-  if (isRefactor) {
-    return [
-      {
-        label: 'Refactoring',
-        repo,
-        workerCount: 1,
-        tasks: [
-          {
-            label: 'Analyze existing code structure',
-            model: 'OPUS',
-            complexity: 'L',
-            estimatedCostUsd: 0.15,
-            filePaths: ['src/lib/'],
-            dependsOn: [],
-          },
-          {
-            label: 'Apply refactoring changes',
-            model: 'SONNET',
-            complexity: 'L',
-            estimatedCostUsd: 0.12,
-            filePaths: ['src/lib/', 'src/components/'],
-            dependsOn: [],
-          },
-        ],
-      },
-    ];
-  }
-
-  // Default generic plan
-  return [
-    {
-      label: 'Implementation',
-      repo,
-      workerCount: 1,
-      tasks: [
-        {
-          label: 'Complete task',
-          model: 'SONNET',
-          complexity: 'M',
-          estimatedCostUsd: 0.05,
-          filePaths: ['src/'],
-          dependsOn: [],
-        },
-      ],
-    },
-  ];
 }

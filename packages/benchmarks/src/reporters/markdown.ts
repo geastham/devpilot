@@ -7,7 +7,7 @@
 import { writeFile, mkdir } from 'fs/promises';
 import { dirname } from 'path';
 import type {
-  BenchmarkRun,
+  RunManifest,
   ScenarioResult,
   ComparisonResult,
   WaveAnalysis,
@@ -27,7 +27,7 @@ export class MarkdownReporter {
   /**
    * Generate full run report.
    */
-  generateRunReport(run: BenchmarkRun): string {
+  generateRunReport(run: RunManifest): string {
     const lines: string[] = [];
 
     // Header
@@ -53,7 +53,7 @@ export class MarkdownReporter {
     lines.push('');
 
     // Per-Benchmark Details
-    for (const result of run.results) {
+    for (const result of run.benchmarks) {
       lines.push(`## ${result.benchmarkId}`);
       lines.push('');
 
@@ -71,17 +71,17 @@ export class MarkdownReporter {
         lines.push('');
       }
 
-      if (result.baseline) {
+      if (result.scenarios.baseline) {
         lines.push('### Baseline Scenario');
         lines.push('');
-        lines.push(this.generateScenarioSection(result.baseline));
+        lines.push(this.generateScenarioSection(result.scenarios.baseline));
         lines.push('');
       }
 
-      if (result.devpilot) {
+      if (result.scenarios.devpilot) {
         lines.push('### DevPilot Scenario');
         lines.push('');
-        lines.push(this.generateScenarioSection(result.devpilot));
+        lines.push(this.generateScenarioSection(result.scenarios.devpilot));
         lines.push('');
       }
     }
@@ -97,7 +97,7 @@ export class MarkdownReporter {
   /**
    * Generate executive summary.
    */
-  private generateExecutiveSummary(run: BenchmarkRun): string {
+  private generateExecutiveSummary(run: RunManifest): string {
     const lines: string[] = [];
 
     const { summary } = run;
@@ -141,13 +141,13 @@ export class MarkdownReporter {
   /**
    * Generate results table.
    */
-  private generateResultsTable(run: BenchmarkRun): string {
+  private generateResultsTable(run: RunManifest): string {
     const lines: string[] = [];
 
     lines.push('| Benchmark | Speedup | Cost Reduction | Quality Delta | Wave Score |');
     lines.push('|-----------|---------|----------------|---------------|------------|');
 
-    for (const result of run.results) {
+    for (const result of run.benchmarks) {
       const speedup = result.comparison
         ? `${result.comparison.speedup.toFixed(2)}x`
         : '-';
@@ -282,8 +282,8 @@ export class MarkdownReporter {
 
     for (const [sessionId, sessionEvents] of sessions) {
       const shortId = sessionId.slice(0, 8);
-      const startEvent = sessionEvents.find((e) => e.type === 'session_start');
-      const endEvent = sessionEvents.find((e) => e.type === 'session_complete');
+      const startEvent = sessionEvents.find((e) => e.eventType === 'session_start');
+      const endEvent = sessionEvents.find((e) => e.eventType === 'session_complete');
 
       if (startEvent && endEvent) {
         const startPos = Math.floor(
@@ -317,7 +317,7 @@ export class MarkdownReporter {
   /**
    * Format status with emoji.
    */
-  private formatStatus(status: BenchmarkRun['status']): string {
+  private formatStatus(status: RunManifest['status']): string {
     switch (status) {
       case 'completed':
         return 'Completed';

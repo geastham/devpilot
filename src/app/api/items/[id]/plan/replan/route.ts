@@ -9,6 +9,9 @@ import {
   activityEvents,
   eq,
 } from '@/lib/db';
+import type { Workstream, Task, TouchedFile, NewPlan } from '@/lib/db';
+
+type WorkstreamWithTasks = Workstream & { tasks: Task[] };
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -51,9 +54,9 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     const previousPlanId = currentPlan.id;
 
     // Apply constraints to generate new plan
-    const modifiedWorkstreams = currentPlan.workstreams.map((ws) => ({
+    const modifiedWorkstreams = currentPlan.workstreams.map((ws: WorkstreamWithTasks) => ({
       ...ws,
-      tasks: ws.tasks.map((task) => {
+      tasks: ws.tasks.map((task: Task) => {
         let modified = { ...task };
 
         // Avoid certain files
@@ -82,15 +85,16 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
     // Calculate new cost
     let newEstimatedCost = modifiedWorkstreams.reduce(
-      (sum, ws) => sum + ws.tasks.reduce((t, task) => t + task.estimatedCostUsd, 0),
+      (sum: number, ws: WorkstreamWithTasks) =>
+        sum + ws.tasks.reduce((t: number, task: Task) => t + task.estimatedCostUsd, 0),
       0
     );
 
     // Apply max cost constraint if specified
     if (maxCost && newEstimatedCost > maxCost) {
       const ratio = maxCost / newEstimatedCost;
-      modifiedWorkstreams.forEach((ws) => {
-        ws.tasks.forEach((task) => {
+      modifiedWorkstreams.forEach((ws: WorkstreamWithTasks) => {
+        ws.tasks.forEach((task: Task) => {
           task.estimatedCostUsd *= ratio;
         });
       });
@@ -104,9 +108,9 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       estimatedCostUsd: newEstimatedCost,
       baselineCostUsd: currentPlan.baselineCostUsd,
       acceptanceCriteria: currentPlan.acceptanceCriteria as string[],
-      confidenceSignals: currentPlan.confidenceSignals as object,
-      fleetContextSnapshot: currentPlan.fleetContextSnapshot as object,
-      memorySessionsUsed: currentPlan.memorySessionsUsed as object[],
+      confidenceSignals: currentPlan.confidenceSignals as NewPlan['confidenceSignals'],
+      fleetContextSnapshot: currentPlan.fleetContextSnapshot as NewPlan['fleetContextSnapshot'],
+      memorySessionsUsed: currentPlan.memorySessionsUsed as NewPlan['memorySessionsUsed'],
       previousPlanId,
     }).returning();
 
@@ -139,7 +143,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
     // Create touched files
     const filteredFiles = currentPlan.filesTouched.filter(
-      (f) => !avoidFiles?.some((af: string) => f.path.includes(af))
+      (f: TouchedFile) => !avoidFiles?.some((af: string) => f.path.includes(af))
     );
     for (const f of filteredFiles) {
       await db.insert(touchedFiles).values({

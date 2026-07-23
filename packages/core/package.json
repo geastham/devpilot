@@ -32,6 +32,11 @@
       "types": "./dist/wiki/index.d.ts",
       "import": "./dist/wiki/index.mjs",
       "require": "./dist/wiki/index.js"
+    },
+    "./wave-planner": {
+      "types": "./dist/wave-planner/index.d.ts",
+      "import": "./dist/wave-planner/index.mjs",
+      "require": "./dist/wave-planner/index.js"
     }
   },
   "files": [
@@ -54,6 +59,7 @@
     "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.112.3",
     "@linear/sdk": "^77.0.0",
     "@paralleldrive/cuid2": "^2.2.2",
     "better-sqlite3": "^11.0.0",

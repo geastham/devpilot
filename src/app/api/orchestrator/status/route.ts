@@ -5,12 +5,20 @@ import {
   activityEvents,
   eq,
 } from '@/lib/db';
-import { orchestrator, linear } from '@devpilot.sh/core';
+import { linear } from '@devpilot.sh/core';
+import type { StatusUpdate } from '@devpilot.sh/core/orchestrator';
+import { getServerOrchestrator } from '@/lib/orchestrator';
 
 // POST /api/orchestrator/status - Receive status updates from orchestrator
 export async function POST(request: Request) {
   try {
-    const update = await request.json() as orchestrator.StatusUpdate;
+    // Callback auth: when a token is configured, require the matching header.
+    const expectedToken = process.env.DEVPILOT_CALLBACK_TOKEN;
+    if (expectedToken && request.headers.get('X-DevPilot-Callback-Token') !== expectedToken) {
+      return NextResponse.json({ error: 'UNAUTHORIZED' }, { status: 401 });
+    }
+
+    const update = await request.json() as StatusUpdate;
 
     // Find the session
     const session = await db.query.rufloSessions.findFirst({
@@ -71,6 +79,13 @@ export async function POST(request: Request) {
                 update.status === 'complete' ? 'complete' : 'error',
         message: update.message,
       });
+    }
+
+    // Forward to the orchestrator service (push-adapter cache + job:progress).
+    try {
+      getServerOrchestrator().ingestStatusUpdate(update);
+    } catch (ingestError) {
+      console.error('Failed to forward status to orchestrator:', ingestError);
     }
 
     return NextResponse.json({

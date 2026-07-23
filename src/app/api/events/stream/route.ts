@@ -1,5 +1,10 @@
 import { NextRequest } from 'next/server';
 import { db, activityEvents, rufloSessions, wavePlans, gt, eq, asc, inArray } from '@/lib/db';
+import type { WaveTask } from '@/lib/db';
+
+// This is a long-lived SSE stream backed by live DB reads — it must never be
+// statically prerendered at build time.
+export const dynamic = 'force-dynamic';
 
 // GET /api/events/stream - Server-Sent Events stream for real-time updates
 export async function GET(request: NextRequest) {
@@ -92,9 +97,9 @@ export async function GET(request: NextRequest) {
                     status: wp.status,
                     currentWaveIndex: wp.currentWaveIndex,
                     totalWaves: wp.totalWaves,
-                    completedTasks: wp.waveTasks.filter((t) => t.status === 'completed').length,
-                    activeTasks: wp.waveTasks.filter((t) => t.status === 'running' || t.status === 'dispatched').length,
-                    failedTasks: wp.waveTasks.filter((t) => t.status === 'failed').length,
+                    completedTasks: wp.waveTasks.filter((t: WaveTask) => t.status === 'completed').length,
+                    activeTasks: wp.waveTasks.filter((t: WaveTask) => t.status === 'running' || t.status === 'dispatched').length,
+                    failedTasks: wp.waveTasks.filter((t: WaveTask) => t.status === 'failed').length,
                     totalTasks: wp.totalTasks,
                   })),
                   timestamp: new Date().toISOString(),

@@ -5,9 +5,11 @@ import {
   initStatusPoller,
   getOrchestratorServiceOrNull,
   getStatusPollerOrNull,
+  createDbStatusPollerCallbacks,
   type OrchestratorAdapterConfig,
   type OrchestratorMode,
 } from '@devpilot.sh/core/orchestrator';
+import { initExecutionBridge, type WaveExecutionConfig } from '@devpilot.sh/core/wave-planner';
 import { registerItemRoutes } from './api/items';
 import { registerFleetRoutes } from './api/fleet';
 import { registerScoreRoutes } from './api/score';
@@ -23,6 +25,26 @@ export interface ServerOptions {
     aoPath?: string;
     httpUrl?: string;
     apiKey?: string;
+    sessionApiUrl?: string;
+    sessionApiKey?: string;
+    sessionEnvironmentId?: string;
+    callbackToken?: string;
+  };
+}
+
+/** Wave execution config from env, mirroring the Next app's getWaveExecutionConfig(). */
+function waveExecutionConfigFromEnv(port: number): WaveExecutionConfig {
+  const failurePolicy =
+    process.env.DEVPILOT_WAVE_FAILURE_POLICY === 'continue' ? 'continue' : 'halt';
+  return {
+    maxConcurrentSubagents: Number(process.env.DEVPILOT_WAVE_MAX_CONCURRENT) || 4,
+    maxTotalActiveTasks: Number(process.env.DEVPILOT_WAVE_MAX_TOTAL) || 8,
+    subagentDispatchDelayMs: 500,
+    waveAdvanceDelayMs: 2000,
+    retryLimit: Number(process.env.DEVPILOT_WAVE_RETRY_LIMIT) || 1,
+    failurePolicy,
+    autoAdvance: process.env.DEVPILOT_WAVE_AUTO_ADVANCE !== 'false',
+    callbackUrl: `http://127.0.0.1:${port}/api/orchestrator`,
   };
 }
 
@@ -48,67 +70,25 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
       aoPath: options.orchestrator.aoPath,
       url: options.orchestrator.httpUrl,
       apiKey: options.orchestrator.apiKey,
-      callbackUrl: `http://127.0.0.1:${options.port}/api/fleet/callback`,
+      sessionApiUrl: options.orchestrator.sessionApiUrl,
+      sessionApiKey: options.orchestrator.sessionApiKey,
+      sessionEnvironmentId: options.orchestrator.sessionEnvironmentId,
+      callbackToken: options.orchestrator.callbackToken,
+      callbackUrl: `http://127.0.0.1:${options.port}/api/orchestrator`,
     };
 
     const orchestrator = initOrchestratorService(orchestratorConfig);
 
-    // Initialize status poller with callbacks to update database
+    // Status poller updates session-level rows (shared with the Next host).
     initStatusPoller(orchestrator, {
       pollIntervalMs: 5000,
-      onStatusUpdate: async (sessionId, status) => {
-        // Update session in database
-        const { rufloSessions } = await import('@devpilot.sh/core/db');
-        const { eq } = await import('drizzle-orm');
-        await db.update(rufloSessions)
-          .set({
-            progressPercent: status.progressPercent,
-            status: status.status === 'running' ? 'ACTIVE' :
-                    status.status === 'complete' ? 'COMPLETE' :
-                    status.status === 'error' ? 'ERROR' : 'ACTIVE',
-            updatedAt: new Date(),
-          })
-          .where(eq(rufloSessions.id, sessionId));
-      },
-      onComplete: async (sessionId, report) => {
-        const { rufloSessions, activityEvents } = await import('@devpilot.sh/core/db');
-        const { eq } = await import('drizzle-orm');
-        await db.update(rufloSessions)
-          .set({
-            status: report.success ? 'COMPLETE' : 'ERROR',
-            progressPercent: 100,
-            prUrl: report.prUrl,
-            tokensUsed: report.tokensUsed,
-            costUsd: Math.round(report.costUsd * 100), // Store as cents
-            updatedAt: new Date(),
-          })
-          .where(eq(rufloSessions.id, sessionId));
-
-        await db.insert(activityEvents).values({
-          type: 'SESSION_COMPLETE',
-          message: report.success
-            ? `Session completed: ${report.summary}`
-            : `Session failed: ${report.error?.message || 'Unknown error'}`,
-          metadata: { sessionId, prUrl: report.prUrl },
-        });
-      },
-      onError: async (sessionId, error) => {
-        const { rufloSessions, activityEvents } = await import('@devpilot.sh/core/db');
-        const { eq } = await import('drizzle-orm');
-        await db.update(rufloSessions)
-          .set({
-            status: 'ERROR',
-            updatedAt: new Date(),
-          })
-          .where(eq(rufloSessions.id, sessionId));
-
-        await db.insert(activityEvents).values({
-          type: 'SESSION_COMPLETE',
-          message: `Session error: ${error.message}`,
-          metadata: { sessionId, error: error.message },
-        });
-      },
+      ...createDbStatusPollerCallbacks(),
     });
+
+    // ExecutionBridge correlates job:* events to wave tasks and advances the loop.
+    initExecutionBridge(orchestrator, {
+      execution: waveExecutionConfigFromEnv(options.port),
+    }).start();
 
     console.log(`Orchestrator initialized in ${options.orchestrator.mode} mode`);
   }

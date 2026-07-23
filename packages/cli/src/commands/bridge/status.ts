@@ -19,7 +19,7 @@ export const statusCommand = new Command('status')
     try {
       // Check bridge health
       const healthRes = await fetch(`${options.bridgeUrl}/health`);
-      const health = await healthRes.json();
+      const health = (await healthRes.json()) as { status?: string };
 
       console.log(chalk.white('Bridge Status:'));
       if (health.status === 'ok') {
@@ -41,7 +41,14 @@ export const statusCommand = new Command('status')
         );
 
         if (orchRes.ok) {
-          const orch = await orchRes.json();
+          const orch = (await orchRes.json()) as {
+            id?: string;
+            name?: string;
+            isOnline?: boolean;
+            activeJobs?: number;
+            lastHeartbeat?: string;
+            repos?: string[];
+          };
           console.log(chalk.white('Orchestrator Status:'));
           console.log(chalk.gray('  ID: ') + chalk.cyan(orch.id));
           console.log(chalk.gray('  Name: ') + chalk.white(orch.name));

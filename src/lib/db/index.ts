@@ -55,7 +55,6 @@ export {
   complexityValues,
   modelValues,
   sessionStatusValues,
-  taskStatusValues,
   fileStatusValues,
   eventTypeValues,
   // Wave planner enums
@@ -71,7 +70,6 @@ export type {
   Complexity,
   Model,
   SessionStatus,
-  TaskStatus,
   FileStatus,
   EventType,
   HorizonItem,

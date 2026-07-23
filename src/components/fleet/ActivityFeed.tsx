@@ -119,7 +119,7 @@ function WaveEventMetadata({ type, metadata }: WaveEventMetadataProps) {
   if (type === 'wave_advance') {
     return (
       <div className="text-[10px] text-text-muted font-mono">
-        Wave {metadata.fromWave} → {metadata.toWave} ({metadata.tasksCompleted}/{metadata.totalTasks} tasks)
+        Wave {String(metadata.fromWave)} → {String(metadata.toWave)} ({String(metadata.tasksCompleted)}/{String(metadata.totalTasks)} tasks)
       </div>
     );
   }
@@ -127,7 +127,7 @@ function WaveEventMetadata({ type, metadata }: WaveEventMetadataProps) {
   if (type === 'wave_task_complete') {
     return (
       <div className="text-[10px] text-text-muted font-mono">
-        {metadata.taskLabel} • {metadata.duration}m • {metadata.model}
+        {String(metadata.taskLabel)} • {String(metadata.duration)}m • {String(metadata.model)}
       </div>
     );
   }
@@ -135,7 +135,7 @@ function WaveEventMetadata({ type, metadata }: WaveEventMetadataProps) {
   if (type === 'wave_plan_complete') {
     return (
       <div className="text-[10px] text-text-muted font-mono">
-        {metadata.totalTasks} tasks • {metadata.totalWaves} waves • {metadata.duration}m elapsed
+        {String(metadata.totalTasks)} tasks • {String(metadata.totalWaves)} waves • {String(metadata.duration)}m elapsed
       </div>
     );
   }
@@ -143,7 +143,7 @@ function WaveEventMetadata({ type, metadata }: WaveEventMetadataProps) {
   if (type === 'wave_plan_paused' || type === 'wave_plan_resumed') {
     return (
       <div className="text-[10px] text-text-muted font-mono">
-        Wave {metadata.currentWave}/{metadata.totalWaves} • {metadata.completedTasks}/{metadata.totalTasks} tasks
+        Wave {String(metadata.currentWave)}/{String(metadata.totalWaves)} • {String(metadata.completedTasks)}/{String(metadata.totalTasks)} tasks
       </div>
     );
   }

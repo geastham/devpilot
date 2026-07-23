@@ -40,7 +40,7 @@ export const eventTypeValues = [
 ] as const;
 export type EventType = (typeof eventTypeValues)[number];
 
-export const orchestratorModeValues = ['http', 'ao-cli', 'manual', 'disabled'] as const;
+export const orchestratorModeValues = ['claude-session', 'http', 'ao-cli', 'manual', 'disabled'] as const;
 export type OrchestratorMode = (typeof orchestratorModeValues)[number];
 
 // Wave Planner enums

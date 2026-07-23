@@ -41,6 +41,9 @@ export * from './plan-refinement-service';
 // Wave plan generation
 export * from './generator';
 
+// Plan projection (deterministic wave-plan → plans/workstreams/tasks projection)
+export * from './plan-projection';
+
 // Prompt templates
 export * from './prompt-templates';
 

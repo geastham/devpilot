@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { cn } from '@/lib/utils';
-import type { WavePlan, WaveTask, DependencyEdge } from '@devpilot.sh/core/db/schema';
+import type { WavePlan, WaveTask, DependencyEdge } from '@devpilot.sh/core/db';
 
 // ============================================================================
 // Types
@@ -59,8 +59,6 @@ function getTaskStatusColor(status: WaveTask['status']): string {
       return 'bg-green-700 border-green-600';
     case 'failed':
       return 'bg-red-700 border-red-600';
-    case 'blocked':
-      return 'bg-yellow-700 border-yellow-600';
     default:
       return 'bg-gray-700 border-gray-600';
   }

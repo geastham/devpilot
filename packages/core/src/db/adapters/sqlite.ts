@@ -9,6 +9,23 @@ export type SQLiteDatabase = BetterSQLite3Database<typeof schema>;
 let sqliteDb: SQLiteDatabase | null = null;
 let sqliteConnection: Database.Database | null = null;
 
+/**
+ * Idempotently add a column to an existing table. `CREATE TABLE IF NOT EXISTS`
+ * never alters a table that already exists, so databases created before a
+ * column was introduced must be upgraded via PRAGMA-guarded ALTER TABLE.
+ */
+function ensureColumn(
+  connection: Database.Database,
+  table: string,
+  column: string,
+  ddl: string
+): void {
+  const cols = connection.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (!cols.some((c) => c.name === column)) {
+    connection.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+}
+
 // SQL statements to create all tables
 const createTableStatements = `
 -- Horizon Items
@@ -97,6 +114,10 @@ CREATE TABLE IF NOT EXISTS ruflo_sessions (
   estimated_remaining_minutes INTEGER NOT NULL DEFAULT 30,
   in_flight_files TEXT NOT NULL DEFAULT '[]',
   pr_url TEXT,
+  external_session_id TEXT,
+  orchestrator_mode TEXT CHECK(orchestrator_mode IN ('claude-session', 'http', 'ao-cli', 'manual', 'disabled')),
+  tokens_used INTEGER,
+  cost_usd INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -216,6 +237,7 @@ CREATE TABLE IF NOT EXISTS wave_tasks (
   started_at INTEGER,
   completed_at INTEGER,
   error_message TEXT,
+  completion_summary TEXT,
   retry_count INTEGER NOT NULL DEFAULT 0
 );
 
@@ -279,11 +301,27 @@ export function createSQLiteAdapter(path: string): SQLiteDatabase {
   // Create SQLite connection
   sqliteConnection = new Database(path);
 
-  // Enable WAL mode for better concurrent access
+  // Enable WAL mode for better concurrent access, and wait (rather than throw
+  // SQLITE_BUSY) when another connection briefly holds the lock — e.g. parallel
+  // Next.js build workers each opening the DB at import time.
+  sqliteConnection.pragma('busy_timeout = 5000');
   sqliteConnection.pragma('journal_mode = WAL');
 
   // Create tables if they don't exist
   sqliteConnection.exec(createTableStatements);
+
+  // Upgrade pre-existing databases with columns added after their creation.
+  // CREATE TABLE IF NOT EXISTS above is a no-op for tables that already exist.
+  ensureColumn(sqliteConnection, 'wave_tasks', 'completion_summary', 'completion_summary TEXT');
+  ensureColumn(sqliteConnection, 'ruflo_sessions', 'external_session_id', 'external_session_id TEXT');
+  ensureColumn(
+    sqliteConnection,
+    'ruflo_sessions',
+    'orchestrator_mode',
+    "orchestrator_mode TEXT CHECK(orchestrator_mode IN ('claude-session', 'http', 'ao-cli', 'manual', 'disabled'))"
+  );
+  ensureColumn(sqliteConnection, 'ruflo_sessions', 'tokens_used', 'tokens_used INTEGER');
+  ensureColumn(sqliteConnection, 'ruflo_sessions', 'cost_usd', 'cost_usd INTEGER');
 
   // Create Drizzle instance
   sqliteDb = drizzle(sqliteConnection, { schema });

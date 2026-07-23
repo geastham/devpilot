@@ -236,7 +236,6 @@ function CollapsibleSection({
   );
 }
 
-import { useState } from 'react';
 import type { FileStatus } from '@/types';
 
 function FileStatusIndicator({ status }: { status: FileStatus }) {

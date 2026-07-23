@@ -6,7 +6,7 @@
 
 import chalk from 'chalk';
 import type {
-  BenchmarkRun,
+  RunManifest,
   ScenarioResult,
   ComparisonResult,
   WaveAnalysis,
@@ -42,7 +42,7 @@ export class ConsoleReporter {
   /**
    * Print run header.
    */
-  printHeader(run: BenchmarkRun): void {
+  printHeader(run: RunManifest): void {
     console.log('');
     console.log(chalk.bold.blue('╔════════════════════════════════════════════════════════════╗'));
     console.log(chalk.bold.blue('║') + chalk.bold.white('            DevPilot Benchmark Suite                        ') + chalk.bold.blue('║'));
@@ -57,7 +57,7 @@ export class ConsoleReporter {
   /**
    * Print run summary.
    */
-  printSummary(run: BenchmarkRun): void {
+  printSummary(run: RunManifest): void {
     const { summary } = run;
 
     console.log(chalk.bold('Summary'));
@@ -109,7 +109,7 @@ export class ConsoleReporter {
   /**
    * Print results table.
    */
-  printResultsTable(run: BenchmarkRun): void {
+  printResultsTable(run: RunManifest): void {
     console.log(chalk.bold('Results'));
     console.log('');
 
@@ -123,7 +123,7 @@ export class ConsoleReporter {
     );
     console.log(chalk.gray('  ' + '─'.repeat(65)));
 
-    for (const result of run.results) {
+    for (const result of run.benchmarks) {
       const name = result.benchmarkId.padEnd(23);
 
       const speedup = result.comparison

@@ -4,18 +4,20 @@
  * Executes benchmark using a single Claude Code session (baseline scenario).
  */
 
-import { readFile, readdir, stat } from 'fs/promises';
+import { readFile } from 'fs/promises';
 import { join } from 'path';
 import type {
   ScenarioResult,
+  ScenarioStatus,
   SessionRecord,
   ExecutionError,
   WorkspaceInfo,
   TokenUsage,
+  AcceptanceResult,
 } from '../types';
-import { ProcessManager, StreamingProcess, ProcessResult } from './process-manager';
+import { ProcessManager, ProcessResult } from './process-manager';
 import { AcceptanceRunner } from './acceptance';
-import { MetricsCollector } from '../metrics/collector';
+import { MetricsCollector, ScenarioMetrics } from '../metrics/collector';
 import { createId } from '@paralleldrive/cuid2';
 
 const DEFAULT_TIMEOUT_MS = 600000; // 10 minutes
@@ -72,55 +74,42 @@ export class BaselineExecutor {
     collector: MetricsCollector
   ): Promise<ScenarioResult> {
     const startTime = Date.now();
+    const startedAt = new Date(startTime).toISOString();
     const sessionId = createId();
     const sessions: SessionRecord[] = [];
     const errors: ExecutionError[] = [];
 
-    collector.registerSession(sessionId, this.config.model);
-
     try {
       // Read PRD
-      const prdPath = join(workspace.path, 'PRD.md');
+      const prdPath = join(workspace.rootDir, 'PRD.md');
       const prdContent = await readFile(prdPath, 'utf-8');
 
       // Build prompt
       const prompt = this.buildPrompt(prdContent);
 
       // Execute Claude Code
-      collector.getTimeline().recordEvent({
-        type: 'session_start',
-        timestamp: new Date().toISOString(),
-        sessionId,
-      });
+      collector.getTimeline().recordEvent('session_start', { sessionId });
 
       const result = await this.executeClaudeCode(workspace, prompt, sessionId);
 
-      collector.getTimeline().recordEvent({
-        type: 'session_complete',
-        timestamp: new Date().toISOString(),
-        sessionId,
-      });
+      collector.getTimeline().recordEvent('session_complete', { sessionId });
 
-      // Parse output and record tokens
+      // Parse output, build session record and record tokens
       const usage = this.parseTokenUsage(result.stdout);
-      if (usage) {
-        collector.recordTokenUsage(sessionId, usage);
-      }
-
-      // Record session
-      sessions.push({
+      const session = this.buildSession(
         sessionId,
-        model: this.config.model,
-        startTime: new Date(startTime).toISOString(),
-        endTime: new Date().toISOString(),
-        durationMs: Date.now() - startTime,
-        tokenUsage: usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-        exitCode: result.exitCode ?? 0,
-        output: result.stdout,
-      });
+        prompt,
+        startedAt,
+        usage,
+        result
+      );
+      collector.registerSession(session);
+      sessions.push(session);
 
       // Run acceptance tests
-      const acceptanceResults = await this.acceptanceRunner.run(workspace.path);
+      const acceptanceResults = await this.acceptanceRunner.run(
+        workspace.rootDir
+      );
 
       // Retry if tests failed and retry is enabled
       if (acceptanceResults.passRate < 1.0 && this.config.retryOnFailure) {
@@ -128,7 +117,8 @@ export class BaselineExecutor {
           workspace,
           acceptanceResults,
           collector,
-          sessions
+          sessions,
+          startedAt
         );
         if (retryResult) {
           return retryResult;
@@ -136,54 +126,144 @@ export class BaselineExecutor {
       }
 
       // Calculate metrics
-      const metrics = collector.aggregateScenarioMetrics();
-
-      return {
-        scenario: 'baseline',
-        benchmarkId: workspace.benchmarkId,
-        startTime: new Date(startTime).toISOString(),
-        endTime: new Date().toISOString(),
-        wallClockMs: Date.now() - startTime,
+      const metrics = collector.aggregateScenarioMetrics(
         sessions,
-        totalTokens: metrics.totalTokens,
-        totalCostUsd: metrics.totalCost,
+        acceptanceResults.passRate
+      );
+
+      return this.buildResult(
+        'completed',
+        startedAt,
+        startTime,
+        sessions,
+        metrics,
         acceptanceResults,
-        firstAttemptPassRate: acceptanceResults.passRate,
-        reworkRatio: 1.0, // Single session, no rework
+        collector,
         errors,
-      };
+        acceptanceResults.passRate,
+        1.0 // Single session, no rework
+      );
     } catch (error) {
-      const execError: ExecutionError = {
+      errors.push({
+        timestamp: new Date().toISOString(),
+        phase: 'execution',
         code: 'EXECUTION_ERROR',
         message: error instanceof Error ? error.message : String(error),
-        context: 'baseline-executor',
         recoverable: false,
-      };
-      errors.push(execError);
+      });
 
-      return {
-        scenario: 'baseline',
-        benchmarkId: workspace.benchmarkId,
-        startTime: new Date(startTime).toISOString(),
-        endTime: new Date().toISOString(),
-        wallClockMs: Date.now() - startTime,
-        sessions,
-        totalTokens: 0,
-        totalCostUsd: 0,
-        acceptanceResults: {
-          tests: [],
-          passed: 0,
-          failed: 0,
-          total: 0,
-          passRate: 0,
-          output: '',
-          durationMs: 0,
-        },
-        firstAttemptPassRate: 0,
-        reworkRatio: 1.0,
-        errors,
-      };
+      return this.buildFailedResult(startedAt, startTime, sessions, collector, errors);
     }
+  }
+
+  /**
+   * Build a canonical session record from execution output.
+   */
+  private buildSession(
+    sessionId: string,
+    prompt: string,
+    startedAt: string,
+    usage: TokenUsage | null,
+    result: ProcessResult
+  ): SessionRecord {
+    return {
+      sessionId,
+      scenario: 'baseline',
+      model: this.config.model,
+      prompt,
+      startedAt,
+      completedAt: new Date().toISOString(),
+      durationMs: Date.now() - new Date(startedAt).getTime(),
+      tokensInput: usage?.inputTokens ?? 0,
+      tokensOutput: usage?.outputTokens ?? 0,
+      cacheReadTokens: usage?.cacheReadTokens ?? 0,
+      cacheWriteTokens: usage?.cacheWriteTokens ?? 0,
+      costUsd: 0,
+      filesCreated: [],
+      filesModified: [],
+      success: (result.exitCode ?? 0) === 0,
+      stdout: result.stdout,
+    };
+  }
+
+  /**
+   * Assemble a completed scenario result from aggregated metrics.
+   */
+  private buildResult(
+    status: ScenarioStatus,
+    startedAt: string,
+    startTime: number,
+    sessions: SessionRecord[],
+    metrics: ScenarioMetrics,
+    acceptanceResults: AcceptanceResult,
+    collector: MetricsCollector,
+    errors: ExecutionError[],
+    firstAttemptPassRate: number,
+    reworkRatio: number
+  ): ScenarioResult {
+    return {
+      scenario: 'baseline',
+      status,
+      startedAt,
+      completedAt: new Date().toISOString(),
+      wallClockMs: Date.now() - startTime,
+      totalTokensInput: metrics.tokens.inputTokens,
+      totalTokensOutput: metrics.tokens.outputTokens,
+      totalTokens: metrics.tokens.totalTokens,
+      cacheReadTokens: metrics.tokens.cacheReadTokens,
+      cacheWriteTokens: metrics.tokens.cacheWriteTokens,
+      totalCostUsd: metrics.totalCostUsd,
+      costBreakdown: metrics.costBreakdown,
+      acceptanceResults,
+      firstAttemptPassRate,
+      reworkRatio,
+      sessions,
+      timeline: collector.exportTimeline(),
+      errors,
+      filesCreated: metrics.filesCreated,
+      filesModified: metrics.filesModified,
+    };
+  }
+
+  /**
+   * Assemble a failed scenario result with zeroed metrics.
+   */
+  private buildFailedResult(
+    startedAt: string,
+    startTime: number,
+    sessions: SessionRecord[],
+    collector: MetricsCollector,
+    errors: ExecutionError[]
+  ): ScenarioResult {
+    return {
+      scenario: 'baseline',
+      status: 'failed',
+      startedAt,
+      completedAt: new Date().toISOString(),
+      wallClockMs: Date.now() - startTime,
+      totalTokensInput: 0,
+      totalTokensOutput: 0,
+      totalTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalCostUsd: 0,
+      costBreakdown: [],
+      acceptanceResults: {
+        totalTests: 0,
+        passed: 0,
+        failed: 0,
+        passRate: 0,
+        details: [],
+        scriptOutput: '',
+      },
+      firstAttemptPassRate: 0,
+      reworkRatio: 1.0,
+      sessions,
+      timeline: collector.exportTimeline(),
+      errors,
+      filesCreated: [],
+      filesModified: [],
+    };
   }
 
   /**
@@ -225,7 +305,7 @@ Start implementation now.`;
     ];
 
     return this.processManager.spawn(this.config.claudeCliPath, args, {
-      cwd: workspace.path,
+      cwd: workspace.rootDir,
       workspaceId: sessionId,
       timeoutMs: this.config.timeoutMs,
       env: {
@@ -253,8 +333,8 @@ Start implementation now.`;
                 inputTokens: parsed.usage.input_tokens,
                 outputTokens: parsed.usage.output_tokens,
                 totalTokens: parsed.usage.input_tokens + parsed.usage.output_tokens,
-                cacheCreationInputTokens: parsed.usage.cache_creation_input_tokens,
-                cacheReadInputTokens: parsed.usage.cache_read_input_tokens,
+                cacheReadTokens: parsed.usage.cache_read_input_tokens ?? 0,
+                cacheWriteTokens: parsed.usage.cache_creation_input_tokens ?? 0,
               };
             }
           } catch {
@@ -272,6 +352,8 @@ Start implementation now.`;
           inputTokens: parseInt(textMatch[2], 10),
           outputTokens: parseInt(textMatch[3], 10),
           totalTokens: parseInt(textMatch[1], 10),
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
         };
       }
     } catch {
@@ -286,19 +368,19 @@ Start implementation now.`;
    */
   private async retryExecution(
     workspace: WorkspaceInfo,
-    firstAttemptResults: ScenarioResult['acceptanceResults'],
+    firstAttemptResults: AcceptanceResult,
     collector: MetricsCollector,
-    sessions: SessionRecord[]
+    sessions: SessionRecord[],
+    scenarioStartedAt: string
   ): Promise<ScenarioResult | null> {
     const retrySessionId = createId();
     const retryStartTime = Date.now();
-
-    collector.registerSession(retrySessionId, this.config.model);
+    const retryStartedAt = new Date(retryStartTime).toISOString();
 
     // Build retry prompt with failure context
-    const failedTests = firstAttemptResults.tests
-      .filter((t) => !t.passed)
-      .map((t) => `- ${t.name}${t.error ? `: ${t.error}` : ''}`)
+    const failedTests = firstAttemptResults.details
+      .filter((t) => t.status !== 'pass')
+      .map((t) => `- ${t.name}${t.output ? `: ${t.output}` : ''}`)
       .join('\n');
 
     const retryPrompt = `The following acceptance tests failed:
@@ -308,56 +390,49 @@ ${failedTests}
 Please fix the issues and ensure all tests pass. Review the error messages and make the necessary corrections.`;
 
     try {
-      collector.getTimeline().recordEvent({
-        type: 'session_start',
-        timestamp: new Date().toISOString(),
+      collector.getTimeline().recordEvent('session_start', {
         sessionId: retrySessionId,
       });
 
       const result = await this.executeClaudeCode(workspace, retryPrompt, retrySessionId);
 
-      collector.getTimeline().recordEvent({
-        type: 'session_complete',
-        timestamp: new Date().toISOString(),
+      collector.getTimeline().recordEvent('session_complete', {
         sessionId: retrySessionId,
       });
 
       const usage = this.parseTokenUsage(result.stdout);
-      if (usage) {
-        collector.recordTokenUsage(retrySessionId, usage);
-      }
-
-      sessions.push({
-        sessionId: retrySessionId,
-        model: this.config.model,
-        startTime: new Date(retryStartTime).toISOString(),
-        endTime: new Date().toISOString(),
-        durationMs: Date.now() - retryStartTime,
-        tokenUsage: usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-        exitCode: result.exitCode ?? 0,
-        output: result.stdout,
-      });
+      const session = this.buildSession(
+        retrySessionId,
+        retryPrompt,
+        retryStartedAt,
+        usage,
+        result
+      );
+      collector.registerSession(session);
+      sessions.push(session);
 
       // Run acceptance tests again
-      const retryAcceptanceResults = await this.acceptanceRunner.run(workspace.path);
+      const retryAcceptanceResults = await this.acceptanceRunner.run(
+        workspace.rootDir
+      );
 
-      const metrics = collector.aggregateScenarioMetrics();
-      const totalWallClockMs = sessions.reduce((sum, s) => sum + s.durationMs, 0);
-
-      return {
-        scenario: 'baseline',
-        benchmarkId: workspace.benchmarkId,
-        startTime: sessions[0].startTime,
-        endTime: new Date().toISOString(),
-        wallClockMs: totalWallClockMs,
+      const metrics = collector.aggregateScenarioMetrics(
         sessions,
-        totalTokens: metrics.totalTokens,
-        totalCostUsd: metrics.totalCost,
-        acceptanceResults: retryAcceptanceResults,
-        firstAttemptPassRate: firstAttemptResults.passRate,
-        reworkRatio: sessions.length, // Number of attempts
-        errors: [],
-      };
+        firstAttemptResults.passRate
+      );
+
+      return this.buildResult(
+        'completed',
+        scenarioStartedAt,
+        new Date(scenarioStartedAt).getTime(),
+        sessions,
+        metrics,
+        retryAcceptanceResults,
+        collector,
+        [],
+        firstAttemptResults.passRate,
+        sessions.length // Number of attempts
+      );
     } catch (error) {
       // Retry failed, return null to use first attempt results
       return null;

@@ -8,7 +8,9 @@ import {
   eq,
   or,
 } from '@/lib/db';
-import type { Model, Complexity } from '@/lib/db';
+import type { Model, Complexity, Workstream, Task } from '@/lib/db';
+
+type WorkstreamWithTasks = Workstream & { tasks: Task[] };
 
 interface RouteParams {
   params: Promise<{ id: string; taskId: string }>;
@@ -46,7 +48,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
 
     // Find the task in workstreams or sequential tasks
     const allTasks = [
-      ...item.plan.workstreams.flatMap((ws) => ws.tasks),
+      ...item.plan.workstreams.flatMap((ws: WorkstreamWithTasks) => ws.tasks),
       ...item.plan.sequentialTasks,
     ];
 
