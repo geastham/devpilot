@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="188" viewBox="0 0 1280 188" role="img" aria-label="DevPilot design tokens: surfaces, zone tints, signals and model routing colors">
+  <defs>
+    <linearGradient id="pBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0F1F3D"/>
+      <stop offset="100%" stop-color="#060F1E"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="188" rx="0" fill="url(#pBg)"/>
+
+  <g font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif">
+    <text x="40" y="34" font-size="11" font-weight="700" letter-spacing="2.6" fill="#475569">SURFACES</text>
+    <text x="352" y="34" font-size="11" font-weight="700" letter-spacing="2.6" fill="#475569">ZONE TINTS</text>
+    <text x="664" y="34" font-size="11" font-weight="700" letter-spacing="2.6" fill="#475569">SIGNALS</text>
+    <text x="1024" y="34" font-size="11" font-weight="700" letter-spacing="2.6" fill="#475569">MODEL ROUTING</text>
+  </g>
+
+  <!-- Surfaces -->
+  <g font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="9.5">
+    <rect x="40" y="48" width="88" height="64" rx="8" fill="#0F1F3D" stroke="#FFFFFF" stroke-opacity="0.14"/>
+    <text x="40" y="130" fill="#94A3B8">#0F1F3D</text>
+    <text x="40" y="146" fill="#475569">bg-base</text>
+
+    <rect x="140" y="48" width="88" height="64" rx="8" fill="#060F1E" stroke="#FFFFFF" stroke-opacity="0.14"/>
+    <text x="140" y="130" fill="#94A3B8">#060F1E</text>
+    <text x="140" y="146" fill="#475569">bg-panel</text>
+
+    <rect x="240" y="48" width="88" height="64" rx="8" fill="#1A2E4A" stroke="#FFFFFF" stroke-opacity="0.14"/>
+    <text x="240" y="130" fill="#94A3B8">#1A2E4A</text>
+    <text x="240" y="146" fill="#475569">bg-surface</text>
+  </g>
+
+  <line x1="344" y1="48" x2="344" y2="152" stroke="#FFFFFF" stroke-opacity="0.07"/>
+
+  <!-- Zone tints -->
+  <g font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="9.5">
+    <rect x="360" y="48" width="66" height="64" rx="8" fill="#FFFFFF"/>
+    <text x="360" y="130" fill="#94A3B8">#FFFFFF</text>
+    <text x="360" y="146" fill="#475569">ready</text>
+
+    <rect x="436" y="48" width="66" height="64" rx="8" fill="#DBEAFE"/>
+    <text x="436" y="130" fill="#94A3B8">#DBEAFE</text>
+    <text x="436" y="146" fill="#475569">refining</text>
+
+    <rect x="512" y="48" width="66" height="64" rx="8" fill="#EDE9FE"/>
+    <text x="512" y="130" fill="#94A3B8">#EDE9FE</text>
+    <text x="512" y="146" fill="#475569">shaping</text>
+
+    <rect x="588" y="48" width="66" height="64" rx="8" fill="#F3F4F6" fill-opacity="0.55"/>
+    <text x="588" y="130" fill="#94A3B8">#F3F4F6</text>
+    <text x="588" y="146" fill="#475569">directional</text>
+  </g>
+
+  <line x1="656" y1="48" x2="656" y2="152" stroke="#FFFFFF" stroke-opacity="0.07"/>
+
+  <!-- Signals -->
+  <g font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="9.5">
+    <rect x="672" y="48" width="76" height="64" rx="8" fill="#3B82F6"/>
+    <text x="672" y="130" fill="#94A3B8">#3B82F6</text>
+    <text x="672" y="146" fill="#475569">dispatch</text>
+
+    <rect x="758" y="48" width="76" height="64" rx="8" fill="#F59E0B"/>
+    <text x="758" y="130" fill="#94A3B8">#F59E0B</text>
+    <text x="758" y="146" fill="#475569">warning</text>
+
+    <rect x="844" y="48" width="76" height="64" rx="8" fill="#EF4444"/>
+    <text x="844" y="130" fill="#94A3B8">#EF4444</text>
+    <text x="844" y="146" fill="#475569">idle risk</text>
+
+    <rect x="930" y="48" width="76" height="64" rx="8" fill="#10B981"/>
+    <text x="930" y="130" fill="#94A3B8">#10B981</text>
+    <text x="930" y="146" fill="#475569">healthy</text>
+  </g>
+
+  <line x1="1014" y1="48" x2="1014" y2="152" stroke="#FFFFFF" stroke-opacity="0.07"/>
+
+  <!-- Model routing -->
+  <g font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="9.5">
+    <rect x="1030" y="48" width="70" height="64" rx="8" fill="#10B981"/>
+    <text x="1065" y="84" text-anchor="middle" font-size="10" font-weight="700" fill="#022C22">HAIKU</text>
+    <text x="1030" y="130" fill="#94A3B8">#10B981</text>
+    <text x="1030" y="146" fill="#475569">cheap · fast</text>
+
+    <rect x="1110" y="48" width="70" height="64" rx="8" fill="#3B82F6"/>
+    <text x="1145" y="84" text-anchor="middle" font-size="10" font-weight="700" fill="#0B1E3F">SONNET</text>
+    <text x="1110" y="130" fill="#94A3B8">#3B82F6</text>
+    <text x="1110" y="146" fill="#475569">balanced</text>
+
+    <rect x="1190" y="48" width="70" height="64" rx="8" fill="#8B5CF6"/>
+    <text x="1225" y="84" text-anchor="middle" font-size="10" font-weight="700" fill="#20124D">OPUS</text>
+    <text x="1190" y="130" fill="#94A3B8">#8B5CF6</text>
+    <text x="1190" y="146" fill="#475569">hardest</text>
+  </g>
+
+  <text x="40" y="176" font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif" font-size="10.5" fill="#475569">Tokens live in tailwind.config.ts and design/07-DESIGN-SYSTEM-TOKENS.md — one source of truth for every surface.</text>
+</svg>

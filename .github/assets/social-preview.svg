@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="DevPilot — The Agent Conductor Platform">
+  <defs>
+    <linearGradient id="sBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#060F1E"/>
+      <stop offset="50%" stop-color="#0F1F3D"/>
+      <stop offset="100%" stop-color="#0A1730"/>
+    </linearGradient>
+    <radialGradient id="sGlowB" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#3B82F6" stop-opacity="0.34"/>
+      <stop offset="100%" stop-color="#3B82F6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="sGlowP" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#8B5CF6" stop-opacity="0.30"/>
+      <stop offset="100%" stop-color="#8B5CF6" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="sWord" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#60A5FA"/>
+      <stop offset="55%" stop-color="#818CF8"/>
+      <stop offset="100%" stop-color="#A78BFA"/>
+    </linearGradient>
+    <pattern id="sGrid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M48 0 L0 0 0 48" fill="none" stroke="#FFFFFF" stroke-opacity="0.04" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#sBg)"/>
+  <rect width="1280" height="640" fill="url(#sGrid)"/>
+  <ellipse cx="220" cy="90" rx="640" ry="360" fill="url(#sGlowB)"/>
+  <ellipse cx="1120" cy="600" rx="480" ry="300" fill="url(#sGlowP)"/>
+
+  <g font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif" text-anchor="middle">
+    <text x="640" y="146" font-size="14" font-weight="600" letter-spacing="5" fill="#64748B">OPEN CONJECTURE</text>
+    <text x="640" y="270" font-size="118" font-weight="800" letter-spacing="-4" fill="#F8FAFC">Dev<tspan fill="url(#sWord)">Pilot</tspan></text>
+    <text x="640" y="322" font-size="30" font-weight="650" fill="#93C5FD">The Agent Conductor Platform</text>
+    <text x="640" y="366" font-size="19" fill="#94A3B8">Your agents are faster than your specs. This is the cockpit.</text>
+  </g>
+
+  <!-- Zone strip: the signature mental model, right to left -->
+  <g font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif" text-anchor="middle">
+    <rect x="176" y="424" width="216" height="76" rx="12" fill="#FFFFFF"/>
+    <text x="284" y="456" font-size="13" font-weight="700" letter-spacing="2.4" fill="#0F172A">READY</text>
+    <text x="284" y="478" font-size="11.5" fill="#475569">one click to dispatch</text>
+
+    <rect x="404" y="432" width="196" height="60" rx="12" fill="#DBEAFE"/>
+    <text x="502" y="460" font-size="12.5" font-weight="700" letter-spacing="2.2" fill="#0F172A">REFINING</text>
+    <text x="502" y="479" font-size="11" fill="#1E40AF">plan under review</text>
+
+    <rect x="612" y="438" width="176" height="48" rx="12" fill="#EDE9FE"/>
+    <text x="700" y="460" font-size="12" font-weight="700" letter-spacing="2" fill="#0F172A">SHAPING</text>
+    <text x="700" y="477" font-size="10.5" fill="#6D28D9">agent planning</text>
+
+    <rect x="800" y="444" width="152" height="36" rx="10" fill="#F3F4F6" fill-opacity="0.14" stroke="#FFFFFF" stroke-opacity="0.10"/>
+    <text x="876" y="466" font-size="11" font-weight="700" letter-spacing="1.8" fill="#94A3B8">DIRECTIONAL</text>
+
+    <rect x="964" y="450" width="140" height="26" rx="8" fill="#FFFFFF" fill-opacity="0.04" stroke="#FFFFFF" stroke-opacity="0.08" stroke-dasharray="4 4"/>
+    <text x="1034" y="467" font-size="10.5" fill="#475569">+ capture an idea</text>
+  </g>
+
+  <!-- Flow arrow under the strip -->
+  <g>
+    <rect x="176" y="528" width="928" height="2" rx="1" fill="#3B82F6" fill-opacity="0.30"/>
+    <path d="M176 529 L196 519 L196 539 Z" fill="#60A5FA"/>
+  </g>
+
+  <g font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" text-anchor="middle">
+    <text x="640" y="572" font-size="13" fill="#64748B">runway · wave planning · fleet status · idle detection</text>
+    <text x="640" y="600" font-size="13" fill="#3B82F6">github.com/geastham/devpilot</text>
+  </g>
+</svg>
