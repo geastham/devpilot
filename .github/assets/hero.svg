@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="340" viewBox="0 0 1280 340" role="img" aria-label="DevPilot — The Agent Conductor Platform">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#060F1E"/>
+      <stop offset="55%" stop-color="#0F1F3D"/>
+      <stop offset="100%" stop-color="#0A1730"/>
+    </linearGradient>
+    <radialGradient id="glowBlue" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#3B82F6" stop-opacity="0.30"/>
+      <stop offset="100%" stop-color="#3B82F6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowPurple" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#8B5CF6" stop-opacity="0.26"/>
+      <stop offset="100%" stop-color="#8B5CF6" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="wordmark" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#60A5FA"/>
+      <stop offset="55%" stop-color="#818CF8"/>
+      <stop offset="100%" stop-color="#A78BFA"/>
+    </linearGradient>
+    <linearGradient id="rule" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#3B82F6" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#8B5CF6" stop-opacity="0"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0 L0 0 0 40" fill="none" stroke="#FFFFFF" stroke-opacity="0.035" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="340" fill="url(#bg)"/>
+  <rect width="1280" height="340" fill="url(#grid)"/>
+  <ellipse cx="240" cy="60" rx="620" ry="300" fill="url(#glowBlue)"/>
+  <ellipse cx="1160" cy="330" rx="420" ry="240" fill="url(#glowPurple)"/>
+
+  <!-- Left: wordmark + positioning -->
+  <text x="80" y="88" font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif" font-size="11" font-weight="600" letter-spacing="3.4" fill="#64748B">OPEN CONJECTURE · MIT LICENSED</text>
+
+  <text x="78" y="172" font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif" font-size="74" font-weight="800" letter-spacing="-2.5" fill="#F8FAFC">Dev<tspan fill="url(#wordmark)">Pilot</tspan></text>
+
+  <rect x="82" y="192" width="180" height="2" rx="1" fill="url(#rule)"/>
+
+  <text x="80" y="228" font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif" font-size="21" font-weight="650" fill="#93C5FD">The Agent Conductor Platform</text>
+  <text x="80" y="256" font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif" font-size="15" fill="#94A3B8">One human. A fleet of AI coding agents. Zero idle time.</text>
+
+  <!-- Capability chips -->
+  <g font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif" font-size="11.5" font-weight="600">
+    <rect x="80" y="278" width="112" height="26" rx="13" fill="#3B82F6" fill-opacity="0.12" stroke="#3B82F6" stroke-opacity="0.45"/>
+    <text x="136" y="295" text-anchor="middle" fill="#93C5FD">Wave Planner</text>
+
+    <rect x="200" y="278" width="146" height="26" rx="13" fill="#8B5CF6" fill-opacity="0.12" stroke="#8B5CF6" stroke-opacity="0.45"/>
+    <text x="273" y="295" text-anchor="middle" fill="#C4B5FD">Claude Code Plan Mode</text>
+
+    <rect x="354" y="278" width="104" height="26" rx="13" fill="#10B981" fill-opacity="0.12" stroke="#10B981" stroke-opacity="0.45"/>
+    <text x="406" y="295" text-anchor="middle" fill="#6EE7B7">Linear Bridge</text>
+  </g>
+
+  <!-- Right: live fleet panel -->
+  <g>
+    <rect x="760" y="62" width="440" height="216" rx="14" fill="#0B1729" fill-opacity="0.86" stroke="#FFFFFF" stroke-opacity="0.10"/>
+
+    <text x="784" y="92" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="10.5" letter-spacing="2.2" fill="#475569">FLEET STATUS</text>
+    <text x="1176" y="88" text-anchor="end" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="10" letter-spacing="2" fill="#475569">RUNWAY</text>
+    <text x="1176" y="112" text-anchor="end" font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif" font-size="23" font-weight="700" fill="#F59E0B">3h 40m</text>
+
+    <g font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="11.5">
+      <!-- row 1 -->
+      <text x="784" y="146" fill="#94A3B8">ng-pipelines</text>
+      <rect x="918" y="139" width="196" height="6" rx="3" fill="#1A2E4A"/>
+      <rect x="918" y="139" width="90" height="6" rx="3" fill="#10B981">
+        <animate attributeName="width" from="0" to="90" dur="1.4s" fill="freeze"/>
+      </rect>
+      <text x="1176" y="147" text-anchor="end" fill="#64748B">46%</text>
+
+      <!-- row 2 -->
+      <text x="784" y="176" fill="#94A3B8">fishewear-web</text>
+      <rect x="918" y="169" width="196" height="6" rx="3" fill="#1A2E4A"/>
+      <rect x="918" y="169" width="153" height="6" rx="3" fill="#F59E0B">
+        <animate attributeName="width" from="0" to="153" dur="1.7s" fill="freeze"/>
+      </rect>
+      <circle cx="1084" cy="172" r="0" fill="#F59E0B" fill-opacity="0.35">
+        <animate attributeName="r" values="3;9;3" dur="2.4s" repeatCount="indefinite"/>
+      </circle>
+      <text x="1176" y="177" text-anchor="end" fill="#F59E0B">78%</text>
+
+      <!-- row 3 -->
+      <text x="784" y="206" fill="#94A3B8">devpilot-core</text>
+      <rect x="918" y="199" width="196" height="6" rx="3" fill="#1A2E4A"/>
+      <rect x="918" y="199" width="180" height="6" rx="3" fill="#EF4444">
+        <animate attributeName="width" from="0" to="180" dur="2s" fill="freeze"/>
+      </rect>
+      <circle cx="1111" cy="202" r="0" fill="#EF4444" fill-opacity="0.4">
+        <animate attributeName="r" values="3;10;3" dur="1.5s" repeatCount="indefinite"/>
+      </circle>
+      <text x="1176" y="207" text-anchor="end" fill="#EF4444">92%</text>
+
+      <!-- row 4 -->
+      <text x="784" y="236" fill="#94A3B8">rtk-proxy</text>
+      <rect x="918" y="229" width="196" height="6" rx="3" fill="#1A2E4A"/>
+      <rect x="918" y="229" width="61" height="6" rx="3" fill="#3B82F6">
+        <animate attributeName="width" from="0" to="61" dur="1.2s" fill="freeze"/>
+      </rect>
+      <text x="1176" y="237" text-anchor="end" fill="#64748B">31%</text>
+    </g>
+
+    <line x1="784" y1="252" x2="1176" y2="252" stroke="#FFFFFF" stroke-opacity="0.07"/>
+    <text x="784" y="268" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="10.5" fill="#475569">4 hives · 11 agents · 2 waves in flight</text>
+    <text x="1176" y="268" text-anchor="end" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="10.5" fill="#10B981">● live</text>
+  </g>
+</svg>

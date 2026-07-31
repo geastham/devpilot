@@ -8,3 +8,8 @@ node_modules
 out/
 *.tsbuildinfo
 .turbo/
+
+# Local runtime database created by db:push / devpilot init
+/.devpilot/
+*.db-shm
+*.db-wal

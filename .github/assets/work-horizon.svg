@@ -1,0 +1,148 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="440" viewBox="0 0 1280 440" role="img" aria-label="The Work Horizon: work flows right to left through DIRECTIONAL, SHAPING, REFINING and READY zones, then dispatches to the agent fleet">
+  <defs>
+    <linearGradient id="whBg" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#0F1F3D"/>
+      <stop offset="100%" stop-color="#060F1E"/>
+    </linearGradient>
+    <linearGradient id="flow" x1="1" y1="0" x2="0" y2="0">
+      <stop offset="0%" stop-color="#475569" stop-opacity="0.15"/>
+      <stop offset="50%" stop-color="#3B82F6" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#3B82F6" stop-opacity="1"/>
+    </linearGradient>
+    <linearGradient id="readyGlow" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#3B82F6" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#3B82F6" stop-opacity="0.02"/>
+    </linearGradient>
+    <pattern id="whGrid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0 L0 0 0 40" fill="none" stroke="#FFFFFF" stroke-opacity="0.03" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="440" fill="url(#whBg)"/>
+  <rect width="1280" height="440" fill="url(#whGrid)"/>
+
+  <!-- READY zone glow -->
+  <rect x="40" y="72" width="360" height="290" rx="14" fill="url(#readyGlow)"/>
+
+  <!-- Column headers -->
+  <g font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif">
+    <text x="40" y="44" font-size="13" font-weight="700" letter-spacing="2.6" fill="#F8FAFC">READY</text>
+    <text x="112" y="44" font-size="11" font-weight="600" fill="#3B82F6">3</text>
+    <text x="40" y="62" font-size="11" fill="#64748B">dispatch on one click</text>
+
+    <text x="440" y="44" font-size="13" font-weight="700" letter-spacing="2.6" fill="#DBEAFE">REFINING</text>
+    <text x="540" y="44" font-size="11" font-weight="600" fill="#3B82F6">2</text>
+    <text x="440" y="62" font-size="11" fill="#64748B">plan generated · you review</text>
+
+    <text x="760" y="44" font-size="13" font-weight="700" letter-spacing="2.6" fill="#EDE9FE">SHAPING</text>
+    <text x="852" y="44" font-size="11" font-weight="600" fill="#8B5CF6">2</text>
+    <text x="760" y="62" font-size="11" fill="#64748B">intent · agent gathering context</text>
+
+    <text x="1040" y="44" font-size="13" font-weight="700" letter-spacing="2.6" fill="#94A3B8">DIRECTIONAL</text>
+    <text x="1040" y="62" font-size="11" fill="#475569">raw ideas</text>
+  </g>
+
+  <!-- Zone dividers -->
+  <line x1="420" y1="28" x2="420" y2="372" stroke="#FFFFFF" stroke-opacity="0.07" stroke-dasharray="3 5"/>
+  <line x1="740" y1="28" x2="740" y2="372" stroke="#FFFFFF" stroke-opacity="0.07" stroke-dasharray="3 5"/>
+  <line x1="1020" y1="28" x2="1020" y2="372" stroke="#FFFFFF" stroke-opacity="0.07" stroke-dasharray="3 5"/>
+
+  <!-- ============ READY cards (largest, full white) ============ -->
+  <g font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif">
+    <rect x="40" y="80" width="356" height="92" rx="10" fill="#FFFFFF"/>
+    <rect x="56" y="96" width="92" height="18" rx="9" fill="#3B82F6" fill-opacity="0.14"/>
+    <text x="102" y="109" text-anchor="middle" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="10" fill="#1D4ED8">ng-pipelines</text>
+    <text x="158" y="109" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="10" fill="#64748B">ENG-394</text>
+    <rect x="296" y="94" width="22" height="20" rx="6" fill="#3B82F6"/>
+    <text x="307" y="108" text-anchor="middle" font-size="11" font-weight="700" fill="#FFFFFF">M</text>
+    <text x="380" y="108" text-anchor="end" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="10" fill="#475569">~$0.26</text>
+    <text x="56" y="136" font-size="14.5" font-weight="650" fill="#0F172A">Multi-touch attribution modeling</text>
+    <rect x="266" y="146" width="114" height="20" rx="6" fill="#3B82F6"/>
+    <text x="323" y="160" text-anchor="middle" font-size="10.5" font-weight="700" letter-spacing="0.6" fill="#FFFFFF">DISPATCH →</text>
+    <text x="56" y="160" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="10" fill="#10B981">3 waves · 7 tasks</text>
+
+    <rect x="40" y="184" width="356" height="80" rx="10" fill="#FFFFFF" fill-opacity="0.94"/>
+    <rect x="56" y="200" width="100" height="18" rx="9" fill="#8B5CF6" fill-opacity="0.14"/>
+    <text x="106" y="213" text-anchor="middle" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="10" fill="#6D28D9">fishewear-web</text>
+    <text x="166" y="213" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="10" fill="#64748B">ENG-401</text>
+    <rect x="296" y="198" width="22" height="20" rx="6" fill="#F59E0B"/>
+    <text x="307" y="212" text-anchor="middle" font-size="11" font-weight="700" fill="#FFFFFF">L</text>
+    <text x="380" y="212" text-anchor="end" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="10" fill="#475569">~$1.14</text>
+    <text x="56" y="240" font-size="14" font-weight="650" fill="#0F172A">Persona graph cache layer</text>
+    <circle cx="61" cy="253" r="3.5" fill="#F59E0B"/>
+    <text x="72" y="257" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="10" fill="#B45309">file conflict: schema.ts in flight</text>
+
+    <rect x="40" y="276" width="356" height="52" rx="10" fill="#FFFFFF" fill-opacity="0.88"/>
+    <text x="56" y="298" font-size="13.5" font-weight="650" fill="#0F172A">Retry budget for wave dispatch</text>
+    <text x="56" y="316" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="10" fill="#64748B">devpilot-core · ENG-388 · S · ~$0.08</text>
+  </g>
+
+  <!-- ============ REFINING cards (soft blue) ============ -->
+  <g font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif">
+    <rect x="440" y="80" width="272" height="136" rx="10" fill="#DBEAFE"/>
+    <text x="456" y="102" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="10" fill="#1E40AF">rtk-proxy · ENG-407</text>
+    <text x="456" y="126" font-size="13.5" font-weight="650" fill="#0F172A">Token budget dashboard</text>
+    <line x1="456" y1="138" x2="696" y2="138" stroke="#1E3A8A" stroke-opacity="0.12"/>
+    <!-- mini wave DAG -->
+    <g>
+      <circle cx="464" cy="158" r="5" fill="#10B981"/>
+      <circle cx="500" cy="150" r="5" fill="#3B82F6"/>
+      <circle cx="500" cy="168" r="5" fill="#3B82F6"/>
+      <circle cx="536" cy="158" r="5" fill="#8B5CF6"/>
+      <path d="M469 158 L495 151 M469 158 L495 167 M505 151 L531 157 M505 167 L531 159" stroke="#1E40AF" stroke-opacity="0.35" stroke-width="1.4" fill="none"/>
+      <text x="556" y="162" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="10" fill="#1E40AF">wave 1 → 2 → 3</text>
+    </g>
+    <text x="456" y="184" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="10" fill="#1D4ED8">critical path 2h 10m · 68% parallel</text>
+    <rect x="584" y="192" width="112" height="20" rx="6" fill="#1D4ED8"/>
+    <text x="640" y="206" text-anchor="middle" font-size="9.5" font-weight="700" fill="#FFFFFF">APPROVE PLAN</text>
+
+    <rect x="440" y="228" width="272" height="62" rx="10" fill="#DBEAFE" fill-opacity="0.82"/>
+    <text x="456" y="250" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="10" fill="#1E40AF">ng-pipelines · ENG-412</text>
+    <text x="456" y="272" font-size="13" font-weight="650" fill="#0F172A">Backfill job idempotency</text>
+    <text x="456" y="284" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="9.5" fill="#1D4ED8">replan requested · 2 constraints added</text>
+  </g>
+
+  <!-- ============ SHAPING tiles (soft purple) ============ -->
+  <g font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif">
+    <rect x="760" y="80" width="228" height="72" rx="10" fill="#EDE9FE"/>
+    <text x="776" y="102" font-size="12.5" font-weight="650" fill="#0F172A">Streaming ingest for RTK</text>
+    <text x="776" y="120" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="9.5" fill="#6D28D9">planning agent · gathering context</text>
+    <rect x="776" y="130" width="196" height="5" rx="2.5" fill="#8B5CF6" fill-opacity="0.2"/>
+    <rect x="776" y="130" width="72" height="5" rx="2.5" fill="#8B5CF6">
+      <animate attributeName="width" values="24;172;24" dur="3.2s" repeatCount="indefinite"/>
+    </rect>
+
+    <rect x="760" y="164" width="228" height="56" rx="10" fill="#EDE9FE" fill-opacity="0.8"/>
+    <text x="776" y="186" font-size="12.5" font-weight="650" fill="#0F172A">Wiki search reranking</text>
+    <text x="776" y="204" font-family="JetBrains Mono, SFMono-Regular, Consolas, monospace" font-size="9.5" fill="#6D28D9">awaiting plan mode slot</text>
+  </g>
+
+  <!-- ============ DIRECTIONAL rows (muted) ============ -->
+  <g font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif" font-size="12">
+    <rect x="1040" y="80" width="200" height="34" rx="8" fill="#F3F4F6" fill-opacity="0.10" stroke="#FFFFFF" stroke-opacity="0.08"/>
+    <text x="1054" y="101" fill="#94A3B8">MemPalace eviction policy</text>
+
+    <rect x="1040" y="122" width="200" height="34" rx="8" fill="#F3F4F6" fill-opacity="0.09" stroke="#FFFFFF" stroke-opacity="0.07"/>
+    <text x="1054" y="143" fill="#94A3B8">Cost alerts per repo</text>
+
+    <rect x="1040" y="164" width="200" height="34" rx="8" fill="#F3F4F6" fill-opacity="0.07" stroke="#FFFFFF" stroke-opacity="0.06"/>
+    <text x="1054" y="185" fill="#64748B">Bench 04: mobile app?</text>
+
+    <rect x="1040" y="206" width="200" height="30" rx="8" fill="#FFFFFF" fill-opacity="0.03" stroke="#FFFFFF" stroke-opacity="0.06" stroke-dasharray="4 4"/>
+    <text x="1140" y="225" text-anchor="middle" font-size="11" fill="#475569">+ capture an idea…</text>
+  </g>
+
+  <!-- ============ Flow arrow ============ -->
+  <g>
+    <rect x="40" y="392" width="1200" height="3" rx="1.5" fill="url(#flow)"/>
+    <path d="M40 393.5 L58 384 L58 403 Z" fill="#3B82F6"/>
+    <text x="1240" y="382" text-anchor="end" font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif" font-size="11.5" font-weight="600" letter-spacing="0.4" fill="#64748B">fuzzy intent enters here</text>
+    <text x="40" y="382" font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif" font-size="11.5" font-weight="600" letter-spacing="0.4" fill="#93C5FD">structure increases →  agents dispatch here</text>
+    <circle cx="0" cy="393.5" r="4" fill="#60A5FA">
+      <animate attributeName="cx" values="1230;60" dur="4.5s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.15;0.85;1" dur="4.5s" repeatCount="indefinite"/>
+    </circle>
+  </g>
+
+  <text x="640" y="428" text-anchor="middle" font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif" font-size="11.5" fill="#475569">If the READY column empties before your agents finish, the fleet idles. DevPilot's whole job is to stop that from happening.</text>
+</svg>
