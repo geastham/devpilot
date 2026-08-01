@@ -1,3 +1,11 @@
 packages:
   - "packages/*"
   - "apps/*"
+
+# pnpm 10 blocks dependency build scripts by default. better-sqlite3 compiles a
+# native binding in its postinstall; without this allowlist the binding is never
+# built and packages/cli/tests/e2e/server.test.ts fails at import. That went
+# unnoticed because CI ran `pnpm run test || true`.
+onlyBuiltDependencies:
+  - better-sqlite3
+  - esbuild

@@ -65,7 +65,8 @@
     "better-sqlite3": "^11.0.0",
     "drizzle-orm": "^0.30.0",
     "postgres": "^3.4.0",
-    "zod": "^3.22.0"
+    "zod": "^3.22.0",
+    "@devpilot.sh/bridge-protocol": "workspace:*"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.9",
