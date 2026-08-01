@@ -658,7 +658,7 @@ file. Complexity S/M/L. **All tasks in `devpilot-website` unless marked.**
 | ID | Title | Files | Description | Deps | Cx | Done-check |
 |---|---|---|---|---|---|---|
 | T4-W4-T1 | CI | create `.github/workflows/ci.yml` | typecheck + lint + `next build` + `supabase test db` + `supabase db diff --linked` (fails if non-empty). **No `\|\| true` anywhere** | W1-T5 | M | T4-AC-11; a Studio drift makes CI red |
-| T4-W4-T2 | Env contract | create `.env.example` (website); edit `.env.example` (**`devpilot` repo**) | §7 names only, zero values. devpilot gains `DEVPILOT_BRIDGE_URL`/`DEVPILOT_BRIDGE_TOKEN`, loses `GCP_PROJECT_ID` | — | S | T4-AC-12; both files names-only |
+| T4-W4-T2 | Env contract | create `.env.example` (website); edit `.env.example` (**`devpilot` repo**) | §7 names only, zero values. devpilot gains `DEVPILOT_BRIDGE_URL` / `DEVPILOT_BRIDGE_TOKEN` / `DEVPILOT_BRIDGE_TRANSPORT`. **Correction:** `GCP_PROJECT_ID` was never in devpilot's `.env.example` — it lives only in `packages/bridge` (`config.ts:7`, `cloudbuild.yaml:26`, `README.md:30`), which TRD 05 T5-W4-T4 deletes wholesale. Nothing to remove here | — | S | T4-AC-12; both files names-only |
 | T4-W4-T3 | Secret scan | create `.github/workflows/secret-scan.yml`, `.gitignore` audit | Block `.env.local`; grep gate from T4-AC-12 | W4-T1 | S | Committing a fake service_role key fails CI |
 | T4-W4-T4 | Docs | create `docs/HOSTED-ARCHITECTURE.md` (website) | Tenancy model, RLS matrix, migration loop, the two credential classes, and the three deployment modes | all | M | Every §5 route and §7 var documented |
 
