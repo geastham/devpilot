@@ -290,6 +290,24 @@ it.** Never a follow-up.
 **`workspaces` is the dangerous one.** It holds `webhook_secret` and
 `api_key_encrypted`. Do **not** grant table-wide SELECT to `authenticated`:
 
+> **⚠ The column grant is NOT sufficient on its own — verified against the live
+> project on 2026-08-01.** It constrains the `authenticated` role, i.e. the
+> browser/PostgREST path. It does **nothing** for the portal itself:
+> `DATABASE_URL` connects as `postgres` (`bypassrls = true`), for which
+> `has_column_privilege('webhook_secret')` returns **true**. A server component
+> doing `db.select().from(workspaces)` gets every column — and anything a server
+> component puts into props is serialized into the RSC payload and shipped to
+> the browser.
+>
+> So there are **two** controls, and only the second covers server-side reads:
+> 1. the column grant (browser/PostgREST path), and
+> 2. an **explicit select list** in every server-side query touching
+>    `workspaces`, enforced mechanically by `pnpm check:secrets`
+>    (`scripts/check-secret-columns.mjs`), which fails CI on any reference to
+>    those columns outside `lib/db/schema`.
+>
+> Do not describe the grant alone as protecting these columns.
+
 ```sql
 REVOKE ALL ON public.workspaces FROM anon, authenticated;
 GRANT SELECT (id, org_id, linear_org_id, linear_org_name, is_active, settings,
@@ -688,6 +706,12 @@ file. Complexity S/M/L. **All tasks in `devpilot-website` unless marked.**
   `drizzle-kit push`. No Studio schema edits.
 - **service_role never leaves server-side code.** `lib/supabase/admin.ts` is the
   only module permitted to read it.
+- **Ciphertext columns are protected by an explicit select list, not by the
+  column grant.** The grant only binds the `authenticated` role; the portal's
+  own connection runs as `postgres` with `bypassrls`, and RSC props are
+  serialized to the browser. Every server-side query touching `workspaces` names
+  its columns, and `pnpm check:secrets` fails CI otherwise. Any TRD adding a
+  secret-bearing column inherits this rule.
 - **Every `app/api` handler calls a guard as its first statement** (T4-AC-09).
   Guards throw; they never return a falsy value a caller might ignore.
 - **Local mode owes nothing to this TRD.** `devpilot` must run with no bridge, no
