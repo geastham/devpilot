@@ -6,7 +6,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/geastham/devpilot/ci.yml?branch=main&style=flat-square&label=CI&labelColor=0F1F3D&color=10B981)](https://github.com/geastham/devpilot/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-alpha-F59E0B?style=flat-square&labelColor=0F1F3D)](docs/ROADMAP.md)
-[![License](https://img.shields.io/badge/license-MIT-3B82F6?style=flat-square&labelColor=0F1F3D)](#license)
+[![License](https://img.shields.io/badge/license-MIT-3B82F6?style=flat-square&labelColor=0F1F3D)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.3-3178C6?style=flat-square&labelColor=0F1F3D&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Next.js](https://img.shields.io/badge/Next.js-14-F8FAFC?style=flat-square&labelColor=0F1F3D&logo=nextdotjs&logoColor=white)](https://nextjs.org/)
 [![Node](https://img.shields.io/badge/node-%E2%89%A520-10B981?style=flat-square&labelColor=0F1F3D&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
@@ -385,7 +385,8 @@ pnpm build         # turbo build
 
 ## License
 
-MIT — see the `license` field on each package in [`packages/`](packages).
+[MIT](LICENSE) © Open Conjecture. Every published package carries the same
+license — see the `license` field in each [`packages/`](packages) manifest.
 
 <div align="center">
 <br>
