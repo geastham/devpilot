@@ -3,17 +3,25 @@
 
 set -e
 
+# The SQLite path resolves relative to the working directory, and `pnpm --filter`
+# runs package scripts from that package's directory. Without an absolute path,
+# db:push/db:seed write to packages/core/.devpilot/data.db while the Next app
+# reads ./.devpilot/data.db from the repo root — leaving the UI pointed at an
+# empty database. Pin every command in this script to one file.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export DEVPILOT_SQLITE_PATH="${DEVPILOT_SQLITE_PATH:-$REPO_ROOT/.devpilot/data.db}"
+mkdir -p "$(dirname "$DEVPILOT_SQLITE_PATH")"
+
 case "$1" in
   "start")
     echo "🚀 Starting DevPilot development environment..."
-    mkdir -p packages/core/.devpilot
-    pnpm --filter @devpilot/core run db:push
+    pnpm --filter @devpilot.sh/core run db:push
     pnpm run dev
     ;;
 
   "ui")
     echo "🎨 Starting UI only..."
-    pnpm --filter @devpilot/ui dev
+    pnpm --filter @devpilot.sh/ui dev
     ;;
 
   "web")
@@ -23,7 +31,7 @@ case "$1" in
 
   "cli")
     echo "⌨️  Starting CLI development..."
-    pnpm --filter @devpilot/cli dev
+    pnpm --filter @devpilot.sh/cli dev
     ;;
 
   "db")
@@ -41,16 +49,14 @@ case "$1" in
         pnpm run db:studio
         ;;
       "reset")
-        echo "🗑️  Resetting database..."
-        rm -f packages/core/.devpilot/data.db
-        mkdir -p packages/core/.devpilot
-        pnpm --filter @devpilot/core run db:push
-        pnpm --filter @devpilot/core run db:seed
+        echo "🗑️  Resetting database at $DEVPILOT_SQLITE_PATH..."
+        rm -f "$DEVPILOT_SQLITE_PATH" "$DEVPILOT_SQLITE_PATH-shm" "$DEVPILOT_SQLITE_PATH-wal"
+        pnpm --filter @devpilot.sh/core run db:push
+        pnpm --filter @devpilot.sh/core run db:seed
         ;;
       "push")
         echo "📤 Pushing schema to database..."
-        mkdir -p packages/core/.devpilot
-        pnpm --filter @devpilot/core run db:push
+        pnpm --filter @devpilot.sh/core run db:push
         ;;
       "check-sync")
         echo "🔄 Checking schema sync..."

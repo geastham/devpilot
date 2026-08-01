@@ -27,7 +27,7 @@ export function DirectionalRow({ item }: DirectionalRowProps) {
   return (
     <div
       className={cn(
-        'group flex items-center justify-between rounded-lg px-3 py-2 transition-all duration-150',
+        'group relative rounded-lg px-3 py-2 transition-all duration-150',
         'hover:bg-white/5',
         isSelected && 'bg-white/10'
       )}
@@ -35,38 +35,47 @@ export function DirectionalRow({ item }: DirectionalRowProps) {
       onMouseLeave={() => setIsHovered(false)}
       onClick={() => setSelectedItem(item.id)}
     >
-      {/* Title */}
-      <span className="text-sm text-text-secondary truncate flex-1 mr-2">
+      {/* Title — owns the full row width. DIRECTIONAL is the narrowest zone
+          (20% of the surface), so sharing a line with the repo badge left
+          nothing but an ellipsis. */}
+      <span className="block text-sm text-text-secondary line-clamp-2">
         {item.title}
       </span>
 
-      {/* Right Side */}
-      <div className="flex items-center gap-2">
-        <RepoBadge repo={item.repo} className="text-[10px] px-2 py-0" />
+      {/* Meta row */}
+      <div className="mt-1.5 flex items-center">
+        <RepoBadge
+          repo={item.repo}
+          className="max-w-full truncate text-[10px] px-2 py-0"
+        />
+      </div>
 
-        {/* Promote Button */}
-        <div
-          className={cn(
-            'transition-opacity duration-150',
-            isHovered || isSelected ? 'opacity-100' : 'opacity-0'
-          )}
+      {/* Promote button — absolutely positioned so the hidden state reserves no
+          width. In flow it ate ~85px of this narrow column and clipped the
+          repo badge. */}
+      <div
+        className={cn(
+          'absolute bottom-2 right-3 transition-opacity duration-150',
+          isHovered || isSelected
+            ? 'opacity-100'
+            : 'pointer-events-none opacity-0'
+        )}
+      >
+        <Dropdown
+          trigger={
+            <Button variant="ghost" size="sm" className="text-xs h-7">
+              → Promote
+            </Button>
+          }
+          align="right"
         >
-          <Dropdown
-            trigger={
-              <Button variant="ghost" size="sm" className="text-xs h-7">
-                → Promote
-              </Button>
-            }
-            align="right"
-          >
-            <DropdownItem onClick={() => handlePromote('SHAPING')}>
-              Shaping
-            </DropdownItem>
-            <DropdownItem onClick={() => handlePromote('REFINING')}>
-              Refining
-            </DropdownItem>
-          </Dropdown>
-        </div>
+          <DropdownItem onClick={() => handlePromote('SHAPING')}>
+            Shaping
+          </DropdownItem>
+          <DropdownItem onClick={() => handlePromote('REFINING')}>
+            Refining
+          </DropdownItem>
+        </Dropdown>
       </div>
     </div>
   );

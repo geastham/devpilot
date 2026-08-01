@@ -143,13 +143,30 @@ export const useUIStore = create<UIState>()(
         inlineResponse: null,
         inlineResponseChips: [],
 
+        // Upsert by id. Suggestion ids are stable and derived from their
+        // trigger condition, and useAssistTriggers can run from more than one
+        // mounted panel (Mission Control renders an inline panel alongside the
+        // route-level overlay). Appending blindly produced duplicate ids, which
+        // collided as React keys and made a single dismiss remove both copies.
         addAssistSuggestion: (suggestion) =>
-          set((state) => ({
-            assistSuggestions: [suggestion, ...state.assistSuggestions].slice(
-              0,
-              20
-            ),
-          })),
+          set((state) => {
+            const index = state.assistSuggestions.findIndex(
+              (s) => s.id === suggestion.id
+            );
+
+            if (index !== -1) {
+              const next = [...state.assistSuggestions];
+              next[index] = suggestion;
+              return { assistSuggestions: next };
+            }
+
+            return {
+              assistSuggestions: [suggestion, ...state.assistSuggestions].slice(
+                0,
+                20
+              ),
+            };
+          }),
 
         removeAssistSuggestion: (id) =>
           set((state) => ({
