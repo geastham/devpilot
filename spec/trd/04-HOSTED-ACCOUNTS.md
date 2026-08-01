@@ -674,6 +674,16 @@ file. Complexity S/M/L. **All tasks in `devpilot-website` unless marked.**
   either side; do not add a second heterogeneous seam.
 - **RLS is enabled in the creating migration, over the §4.5 REVOKE baseline.** A
   migration that adds a table without RLS is a defect, caught by T4-AC-02.
+- **`text('col', { enum: [...] })` in Drizzle is a TypeScript-only constraint.**
+  It narrows the inferred type and **emits no DDL** — Postgres will accept any
+  text. Migration 0000 shipped four such columns (`memberships.role`,
+  `organizations.plan`, `dispatch_sessions.status`, `session_events.type`) with
+  no database-level enforcement; a test wrote `role = 'superuser'` successfully.
+  Fixed in `20260801193005_enum_check_constraints.sql`.
+  **Every enum-typed column must get a matching `CHECK` in the hand-edit step**
+  (§6.5 step 3). Prefer `CHECK` over a native enum type: adding a value to a
+  CHECK is one `ALTER`, whereas `ALTER TYPE … ADD VALUE` cannot run inside a
+  transaction and cannot be reversed.
 - **Drizzle is canonical; drizzle-kit generates, Supabase CLI applies.** No
   `drizzle-kit push`. No Studio schema edits.
 - **service_role never leaves server-side code.** `lib/supabase/admin.ts` is the
