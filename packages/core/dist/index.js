@@ -6803,6 +6803,7 @@ function verifyLinearWebhookSignature(payload, signature, secret) {
 }
 
 // src/integrations/linear/sync.ts
+var import_bridge_protocol = require("@devpilot.sh/bridge-protocol");
 async function syncSessionToLinear(input) {
   if (!isLinearConfigured()) {
     return { success: false, error: "Linear not configured" };
@@ -6833,7 +6834,7 @@ async function syncProgressToLinear(input) {
   }
   try {
     const client = getLinearClient();
-    const progressMessage = buildProgressComment(input);
+    const progressMessage = (0, import_bridge_protocol.buildProgressComment)(input);
     await client.addComment(input.linearTicketId, progressMessage);
     if (input.status === "complete") {
       await client.moveIssueToState(input.linearTicketId, "In Review");
@@ -6852,7 +6853,7 @@ async function syncCompletionToLinear(input) {
   }
   try {
     const client = getLinearClient();
-    const completionMessage = buildCompletionComment(input);
+    const completionMessage = (0, import_bridge_protocol.buildCompletionComment)(input);
     await client.addComment(input.linearTicketId, completionMessage);
     const targetState = input.success ? "Done" : "Blocked";
     await client.moveIssueToState(input.linearTicketId, targetState);
@@ -6920,54 +6921,6 @@ function buildSessionDescription(input) {
     lines.push(`**Plan:** [View Plan](${input.planUrl})`);
   }
   lines.push("", "---", "*This ticket was created by DevPilot*");
-  return lines.join("\n");
-}
-function buildProgressComment(input) {
-  const statusEmoji = {
-    running: ":hourglass:",
-    waiting: ":pause_button:",
-    complete: ":white_check_mark:",
-    error: ":x:"
-  }[input.status];
-  const lines = [
-    `${statusEmoji} **Progress Update: ${input.progressPercent}%**`,
-    ""
-  ];
-  if (input.currentWorkstream) {
-    lines.push(`Working on: ${input.currentWorkstream}`);
-  }
-  if (input.message) {
-    lines.push("", input.message);
-  }
-  if (input.filesModified && input.filesModified.length > 0) {
-    lines.push("", "**Files modified:**");
-    input.filesModified.slice(0, 5).forEach((f) => lines.push(`- \`${f}\``));
-    if (input.filesModified.length > 5) {
-      lines.push(`- ... and ${input.filesModified.length - 5} more`);
-    }
-  }
-  return lines.join("\n");
-}
-function buildCompletionComment(input) {
-  const emoji = input.success ? ":rocket:" : ":warning:";
-  const status = input.success ? "Completed Successfully" : "Failed";
-  const lines = [
-    `${emoji} **Session ${status}**`,
-    ""
-  ];
-  if (input.prUrl) {
-    lines.push(`**Pull Request:** [View PR](${input.prUrl})`);
-  }
-  if (input.completionMessage) {
-    lines.push("", input.completionMessage);
-  }
-  if (input.filesModified.length > 0) {
-    lines.push("", "**Files modified:**");
-    input.filesModified.slice(0, 10).forEach((f) => lines.push(`- \`${f}\``));
-    if (input.filesModified.length > 10) {
-      lines.push(`- ... and ${input.filesModified.length - 10} more`);
-    }
-  }
   return lines.join("\n");
 }
 

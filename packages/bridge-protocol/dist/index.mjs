@@ -65,6 +65,14 @@ var RegisterRequestSchema = z3.object({
   maxConcurrentJobs: z3.number().int().min(1).max(64).default(4)
 });
 var RealtimeCredentialsSchema = z3.object({
+  /**
+   * Everything the client needs to open the channel, returned by the bridge so
+   * a machine does not have to be told out-of-band where the realtime endpoint
+   * lives. Both URL and anon key are public by design — the dispatch_queue RLS
+   * policy plus the scoped `jwt` are what constrain access.
+   */
+  supabaseUrl: z3.string().url(),
+  anonKey: z3.string().min(1),
   jwt: z3.string().min(1),
   expiresAt: z3.string().datetime(),
   channel: z3.string().min(1),

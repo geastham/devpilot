@@ -21,6 +21,14 @@ export const RegisterRequestSchema = z.object({
 export type RegisterRequest = z.infer<typeof RegisterRequestSchema>;
 
 export const RealtimeCredentialsSchema = z.object({
+  /**
+   * Everything the client needs to open the channel, returned by the bridge so
+   * a machine does not have to be told out-of-band where the realtime endpoint
+   * lives. Both URL and anon key are public by design — the dispatch_queue RLS
+   * policy plus the scoped `jwt` are what constrain access.
+   */
+  supabaseUrl: z.string().url(),
+  anonKey: z.string().min(1),
   jwt: z.string().min(1),
   expiresAt: z.string().datetime(),
   channel: z.string().min(1),

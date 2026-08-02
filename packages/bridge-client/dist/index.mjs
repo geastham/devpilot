@@ -1,119 +1,307 @@
 // src/client.ts
+import {
+  RegisterRequestSchema,
+  RegisterResponseSchema,
+  formatApiError
+} from "@devpilot.sh/bridge-protocol";
+var BridgeError = class extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+    this.name = "BridgeError";
+  }
+};
 var BridgeClient = class {
   constructor(config) {
-    this.orchestratorId = null;
     this.config = config;
-    this.orchestratorId = config.orchestratorId || null;
+    this.orchestratorId = null;
+    this.fetchImpl = config.fetchImpl ?? globalThis.fetch;
   }
-  async register(capabilities) {
-    const response = await fetch(`${this.config.bridgeUrl}/api/orchestrators/register`, {
-      method: "POST",
+  url(path) {
+    return `${this.config.bridgeUrl.replace(/\/+$/, "")}${path}`;
+  }
+  async request(path, init = {}) {
+    const res = await this.fetchImpl(this.url(path), {
+      ...init,
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.config.apiKey}`
-      },
-      body: JSON.stringify(capabilities)
+        Authorization: `Bearer ${this.config.token}`,
+        ...init.headers ?? {}
+      }
     });
-    if (!response.ok) {
-      throw new Error(`Registration failed: ${response.statusText}`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new BridgeError(
+        formatApiError(
+          body,
+          `${init.method ?? "GET"} ${path} failed: ${res.status} ${res.statusText}`
+        ),
+        res.status
+      );
     }
-    const result = await response.json();
-    this.orchestratorId = result.orchestratorId;
-    return result;
+    return res.status === 204 ? void 0 : await res.json();
+  }
+  /**
+   * Register this machine.
+   *
+   * `name` is REQUIRED and validated locally before the request goes out. In
+   * 0.1.x the client sent `{repos, maxConcurrentJobs}` while the bridge
+   * required `name`, so this call returned 400 every single time and the
+   * pipeline never once connected end to end.
+   */
+  async register(capabilities) {
+    const body = RegisterRequestSchema.parse(capabilities);
+    const raw = await this.request("/api/orchestrators/register", {
+      method: "POST",
+      body: JSON.stringify(body)
+    });
+    const parsed = RegisterResponseSchema.parse(raw);
+    this.orchestratorId = parsed.orchestratorId;
+    return parsed;
+  }
+  async heartbeat(activeJobs) {
+    if (!this.orchestratorId) throw new BridgeError("Not registered", 400);
+    await this.request(`/api/orchestrators/${this.orchestratorId}/heartbeat`, {
+      method: "POST",
+      body: JSON.stringify({ activeJobs })
+    });
+  }
+  /** Unclaimed work for this machine. The fallback transport and the sweep. */
+  async poll() {
+    const res = await this.request("/api/dispatch/poll");
+    return res.messages;
+  }
+  /** Claim. Returns null when another worker won the race. */
+  async claim(queueId) {
+    try {
+      const res = await this.request(
+        `/api/dispatch/${queueId}/claim`,
+        { method: "POST" }
+      );
+      return res.message;
+    } catch (err) {
+      if (err instanceof BridgeError && err.status === 409) return null;
+      throw err;
+    }
+  }
+  /** Nack, so a claimed row is not stranded until the stale sweep. */
+  async release(queueId, error) {
+    await this.request(`/api/dispatch/${queueId}/release`, {
+      method: "POST",
+      body: JSON.stringify({ error })
+    });
   }
   async reportSessionStatus(sessionId, status) {
-    await fetch(`${this.config.bridgeUrl}/api/sessions/${sessionId}/status`, {
+    await this.request(`/api/sessions/${sessionId}/status`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.config.apiKey}`
-      },
       body: JSON.stringify(status)
     });
   }
   async reportSessionComplete(sessionId, report) {
-    await fetch(`${this.config.bridgeUrl}/api/sessions/${sessionId}/complete`, {
+    await this.request(`/api/sessions/${sessionId}/complete`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.config.apiKey}`
-      },
       body: JSON.stringify(report)
     });
   }
-  getOrchestatorId() {
+  /** Fixes the `getOrchestatorId` typo from 0.1.x. */
+  getOrchestratorId() {
     return this.orchestratorId;
+  }
+  setOrchestratorId(id) {
+    this.orchestratorId = id;
   }
 };
 
-// src/pubsub.ts
-var PubSubSubscriber = class {
+// src/realtime.ts
+var RealtimeSubscriber = class {
   constructor(config) {
-    this.isRunning = false;
     this.config = config;
+    this.client = null;
+    this.channel = null;
+    this.running = false;
   }
   async start() {
-    const { PubSub } = await import("@google-cloud/pubsub");
-    const pubsub = new PubSub({ projectId: this.config.projectId });
-    const subscription = pubsub.subscription(this.config.subscriptionName);
-    this.isRunning = true;
-    subscription.on("message", async (message) => {
-      try {
-        const data = JSON.parse(message.data.toString());
-        await this.config.onMessage(data);
-        message.ack();
-      } catch (error) {
-        console.error("Error processing message:", error);
-        message.nack();
+    if (this.running) return;
+    const { createClient } = await import("@supabase/supabase-js");
+    this.client = createClient(this.config.supabaseUrl, this.config.anonKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+      realtime: { params: { eventsPerSecond: 10 } }
+    });
+    await this.client.realtime.setAuth(this.config.jwt);
+    this.running = true;
+    this.channel = this.client.channel(`dispatch:${this.config.orchestratorId}`).on(
+      "postgres_changes",
+      {
+        event: "INSERT",
+        schema: "public",
+        table: "dispatch_queue",
+        filter: `orchestrator_id=eq.${this.config.orchestratorId}`
+      },
+      (payload) => {
+        const id = payload.new?.id;
+        if (id) this.config.onNotify(id);
+      }
+    ).subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        this.config.onReconnect();
+      } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+        this.config.onError?.(new Error(`Realtime channel ${status}`));
       }
     });
-    subscription.on("error", (error) => {
-      console.error("Subscription error:", error);
-    });
   }
-  stop() {
-    this.isRunning = false;
+  /** Refresh before the 1h JWT expires, or the channel silently goes deaf. */
+  async updateAuth(jwt) {
+    if (this.client) await this.client.realtime.setAuth(jwt);
+  }
+  async stop() {
+    this.running = false;
+    if (this.channel) await this.channel.unsubscribe();
+    if (this.client) await this.client.realtime.disconnect();
+    this.channel = null;
+    this.client = null;
+  }
+  get isRunning() {
+    return this.running;
+  }
+};
+
+// src/dispatch-loop.ts
+var DispatchLoop = class {
+  constructor(config) {
+    this.config = config;
+    this.subscriber = null;
+    this.timer = null;
+    this.running = false;
+    this.sweeping = false;
+    /** Claimed and not yet settled — used only to respect maxConcurrent. */
+    this.inFlight = /* @__PURE__ */ new Set();
+  }
+  get activeJobs() {
+    return this.inFlight.size;
+  }
+  async start() {
+    if (this.running) return;
+    this.running = true;
+    if (this.config.realtime) {
+      this.subscriber = new RealtimeSubscriber({
+        supabaseUrl: this.config.realtime.supabaseUrl,
+        anonKey: this.config.realtime.anonKey,
+        jwt: this.config.realtime.jwt,
+        orchestratorId: this.config.orchestratorId,
+        onNotify: (queueId) => void this.take(queueId),
+        onReconnect: () => void this.sweep(),
+        onError: (err) => {
+          this.config.onLog?.(`realtime: ${err.message} \u2014 continuing on the sweep timer`);
+        }
+      });
+      try {
+        await this.subscriber.start();
+      } catch (err) {
+        this.config.onLog?.(
+          `realtime unavailable (${err instanceof Error ? err.message : String(err)}); polling instead`
+        );
+        this.subscriber = null;
+      }
+    }
+    const interval = this.config.sweepIntervalMs ?? (this.subscriber ? 3e4 : 5e3);
+    this.timer = setInterval(() => void this.sweep(), interval);
+    await this.sweep();
+  }
+  async stop() {
+    this.running = false;
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    if (this.subscriber) await this.subscriber.stop();
+    this.subscriber = null;
+  }
+  /** Ask for unclaimed work and take what we have capacity for. */
+  async sweep() {
+    if (!this.running || this.sweeping) return;
+    this.sweeping = true;
+    try {
+      const messages = await this.config.client.poll();
+      for (const message of messages) {
+        if (!this.hasCapacity()) break;
+        await this.take(message.queueId);
+      }
+    } catch (err) {
+      this.config.onError?.(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      this.sweeping = false;
+    }
+  }
+  hasCapacity() {
+    return this.inFlight.size < (this.config.maxConcurrent ?? 4);
+  }
+  /**
+   * Claim then run. The claim is server-side and conditional, so losing a race
+   * is a normal outcome (null) rather than an error — that is how two machines
+   * can watch the same queue safely.
+   */
+  async take(queueId) {
+    if (!this.running || !this.hasCapacity() || this.inFlight.has(queueId)) return;
+    let message;
+    try {
+      message = await this.config.client.claim(queueId);
+    } catch (err) {
+      this.config.onError?.(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
+    if (!message) return;
+    this.inFlight.add(queueId);
+    try {
+      await this.config.handler(message);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.config.onError?.(new Error(`handler threw for ${message.linearIdentifier}: ${reason}`));
+      try {
+        await this.config.client.release(queueId, reason);
+      } catch {
+      }
+    } finally {
+      this.inFlight.delete(queueId);
+    }
   }
 };
 
 // src/heartbeat.ts
 var HeartbeatService = class {
   constructor(config) {
-    this.intervalId = null;
     this.config = config;
+    this.timer = null;
   }
   start() {
-    if (this.intervalId) return;
-    this.intervalId = setInterval(async () => {
+    if (this.timer) return;
+    const interval = this.config.intervalMs ?? 3e4;
+    const beat = async () => {
       try {
-        await this.sendHeartbeat();
-      } catch (error) {
-        console.error("Heartbeat failed:", error);
+        await this.config.client.heartbeat(this.config.activeJobs?.());
+      } catch (err) {
+        this.config.onError?.(err instanceof Error ? err : new Error(String(err)));
       }
-    }, this.config.intervalMs);
-    this.sendHeartbeat().catch(console.error);
+    };
+    this.timer = setInterval(beat, interval);
+    void beat();
   }
   stop() {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-    }
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
   }
-  async sendHeartbeat() {
-    await fetch(
-      `${this.config.bridgeUrl}/api/orchestrators/${this.config.orchestratorId}/heartbeat`,
-      {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${this.config.apiKey}`
-        }
-      }
-    );
+};
+
+// src/pubsub.ts
+var REMOVED = "@devpilot.sh/bridge-client: the Pub/Sub transport was removed in 0.2.0. Upgrade the DevPilot CLI (npm i -g @devpilot.sh/cli) and use `devpilot bridge connect`. GCP credentials are no longer required.";
+var PubSubSubscriber = class {
+  constructor() {
+    throw new Error(REMOVED);
   }
 };
 export {
   BridgeClient,
+  BridgeError,
+  DispatchLoop,
   HeartbeatService,
-  PubSubSubscriber
+  PubSubSubscriber,
+  RealtimeSubscriber
 };
 //# sourceMappingURL=index.mjs.map

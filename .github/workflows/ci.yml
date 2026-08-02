@@ -27,14 +27,18 @@ jobs:
       - name: Build packages
         run: pnpm run build
 
+      # NOTE: these three ran with `|| true` until 2026-08. That made the job
+      # green regardless of outcome, which is how nine known defects — including
+      # an auth bypass and an unencrypted credential column — sat unnoticed
+      # while CI reported success. A gate that cannot fail is worse than no gate.
       - name: Type check
-        run: pnpm run typecheck || true
+        run: pnpm run typecheck
 
       - name: Lint
-        run: pnpm run lint || true
+        run: pnpm run lint
 
       - name: Test
-        run: pnpm run test || true
+        run: pnpm run test
 
   test-cli:
     runs-on: ubuntu-latest

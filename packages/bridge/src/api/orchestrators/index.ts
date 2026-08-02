@@ -1,1 +1,0 @@
-export { registerOrchestratorRoutes } from './routes';

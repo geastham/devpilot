@@ -148,16 +148,28 @@ declare const RegisterRequestSchema: z.ZodObject<{
 }>;
 type RegisterRequest = z.infer<typeof RegisterRequestSchema>;
 declare const RealtimeCredentialsSchema: z.ZodObject<{
+    /**
+     * Everything the client needs to open the channel, returned by the bridge so
+     * a machine does not have to be told out-of-band where the realtime endpoint
+     * lives. Both URL and anon key are public by design — the dispatch_queue RLS
+     * policy plus the scoped `jwt` are what constrain access.
+     */
+    supabaseUrl: z.ZodString;
+    anonKey: z.ZodString;
     jwt: z.ZodString;
     expiresAt: z.ZodString;
     channel: z.ZodString;
     table: z.ZodString;
 }, "strip", z.ZodTypeAny, {
+    supabaseUrl: string;
+    anonKey: string;
     jwt: string;
     expiresAt: string;
     channel: string;
     table: string;
 }, {
+    supabaseUrl: string;
+    anonKey: string;
     jwt: string;
     expiresAt: string;
     channel: string;
@@ -168,16 +180,28 @@ declare const RegisterResponseSchema: z.ZodObject<{
     orgId: z.ZodString;
     /** null when SUPABASE_JWT_SECRET is unavailable — the client falls back to polling. */
     realtime: z.ZodNullable<z.ZodObject<{
+        /**
+         * Everything the client needs to open the channel, returned by the bridge so
+         * a machine does not have to be told out-of-band where the realtime endpoint
+         * lives. Both URL and anon key are public by design — the dispatch_queue RLS
+         * policy plus the scoped `jwt` are what constrain access.
+         */
+        supabaseUrl: z.ZodString;
+        anonKey: z.ZodString;
         jwt: z.ZodString;
         expiresAt: z.ZodString;
         channel: z.ZodString;
         table: z.ZodString;
     }, "strip", z.ZodTypeAny, {
+        supabaseUrl: string;
+        anonKey: string;
         jwt: string;
         expiresAt: string;
         channel: string;
         table: string;
     }, {
+        supabaseUrl: string;
+        anonKey: string;
         jwt: string;
         expiresAt: string;
         channel: string;
@@ -187,6 +211,8 @@ declare const RegisterResponseSchema: z.ZodObject<{
     orgId: string;
     orchestratorId: string;
     realtime: {
+        supabaseUrl: string;
+        anonKey: string;
         jwt: string;
         expiresAt: string;
         channel: string;
@@ -196,6 +222,8 @@ declare const RegisterResponseSchema: z.ZodObject<{
     orgId: string;
     orchestratorId: string;
     realtime: {
+        supabaseUrl: string;
+        anonKey: string;
         jwt: string;
         expiresAt: string;
         channel: string;

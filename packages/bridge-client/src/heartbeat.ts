@@ -1,49 +1,41 @@
+import type { BridgeClient } from './client';
+
 export interface HeartbeatConfig {
-  bridgeUrl: string;
-  apiKey: string;
-  orchestratorId: string;
-  intervalMs: number;
+  client: BridgeClient;
+  intervalMs?: number;
+  /** Reports current load so the bridge can respect concurrency limits. */
+  activeJobs?: () => number;
+  onError?: (err: Error) => void;
 }
 
+/**
+ * Periodic liveness. The portal derives online/offline from heartbeat recency
+ * rather than trusting a boolean, so stopping this makes a machine go stale
+ * rather than lying about being online forever.
+ */
 export class HeartbeatService {
-  private config: HeartbeatConfig;
-  private intervalId: NodeJS.Timeout | null = null;
+  private timer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(config: HeartbeatConfig) {
-    this.config = config;
-  }
+  constructor(private readonly config: HeartbeatConfig) {}
 
   start(): void {
-    if (this.intervalId) return;
-
-    this.intervalId = setInterval(async () => {
+    if (this.timer) return;
+    const interval = this.config.intervalMs ?? 30_000;
+    const beat = async () => {
       try {
-        await this.sendHeartbeat();
-      } catch (error) {
-        console.error('Heartbeat failed:', error);
+        await this.config.client.heartbeat(this.config.activeJobs?.());
+      } catch (err) {
+        // Never throw out of a timer: an unhandled rejection here would take
+        // down a long-running connect session over a transient network blip.
+        this.config.onError?.(err instanceof Error ? err : new Error(String(err)));
       }
-    }, this.config.intervalMs);
-
-    // Send initial heartbeat
-    this.sendHeartbeat().catch(console.error);
+    };
+    this.timer = setInterval(beat, interval);
+    void beat();
   }
 
   stop(): void {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-    }
-  }
-
-  private async sendHeartbeat(): Promise<void> {
-    await fetch(
-      `${this.config.bridgeUrl}/api/orchestrators/${this.config.orchestratorId}/heartbeat`,
-      {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this.config.apiKey}`,
-        },
-      }
-    );
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
   }
 }

@@ -1,98 +1,126 @@
+import os from 'os';
 import { Command } from 'commander';
 import chalk from 'chalk';
-import { BridgeClient, HeartbeatService, PubSubSubscriber } from '@devpilot.sh/bridge-client';
+import { BridgeClient, DispatchLoop, HeartbeatService } from '@devpilot.sh/bridge-client';
+import { createBridgeDispatchHandler } from './dispatch-handler';
 
 interface ConnectOptions {
-  bridgeUrl: string;
-  apiKey?: string;
+  url?: string;
+  token?: string;
+  name: string;
   repos?: string;
-  project?: string;
+  mode: 'ao-cli' | 'http' | 'claude-session';
+  transport: 'realtime' | 'poll';
+  maxJobs: string;
 }
 
 export const connectCommand = new Command('connect')
-  .description('Connect to DevPilot cloud bridge')
-  .option('-u, --bridge-url <url>', 'Bridge service URL', process.env.DEVPILOT_BRIDGE_URL)
-  .option('-k, --api-key <key>', 'API key for authentication', process.env.DEVPILOT_BRIDGE_API_KEY)
-  .option('-r, --repos <repos>', 'Comma-separated list of repos to handle')
-  .option('-p, --project <project>', 'GCP project ID for Pub/Sub', process.env.GCP_PROJECT_ID)
+  .description('Connect this machine to a DevPilot bridge and run dispatched work locally')
+  .option('-u, --url <url>', 'Bridge URL', process.env.DEVPILOT_BRIDGE_URL)
+  .option('-t, --token <token>', 'Orchestrator token (dp_orch_…)', process.env.DEVPILOT_BRIDGE_TOKEN)
+  .option('-n, --name <name>', 'Name for this machine', os.hostname())
+  .option('-r, --repos <repos>', 'Comma-separated repos this machine handles')
+  .option('-m, --mode <mode>', 'Local orchestrator mode (ao-cli|http|claude-session)', 'ao-cli')
+  .option(
+    '--transport <transport>',
+    'realtime | poll — polling is fully correct, just higher latency',
+    process.env.DEVPILOT_BRIDGE_TRANSPORT || 'realtime',
+  )
+  .option('-j, --max-jobs <n>', 'Max concurrent local jobs', '4')
   .action(async (options: ConnectOptions) => {
-    if (!options.bridgeUrl) {
-      console.error(chalk.red('✗ Error: Bridge URL is required (--bridge-url or DEVPILOT_BRIDGE_URL)'));
+    if (!options.url) {
+      console.error(chalk.red('✗ Bridge URL required (--url or DEVPILOT_BRIDGE_URL)'));
+      process.exit(1);
+    }
+    if (!options.token) {
+      console.error(chalk.red('✗ Token required (--token or DEVPILOT_BRIDGE_TOKEN)'));
+      console.error(chalk.gray('  Mint one in the dashboard under Settings → Tokens.'));
       process.exit(1);
     }
 
-    console.log(chalk.cyan('🌉 Connecting to DevPilot Bridge'));
-    console.log('');
-    console.log(chalk.gray(`   Bridge URL: ${options.bridgeUrl}`));
+    const repos = options.repos?.split(',').map((r) => r.trim()).filter(Boolean) ?? [];
+    const maxConcurrentJobs = Math.max(1, parseInt(options.maxJobs, 10) || 4);
+
+    console.log(chalk.cyan('🌉 DevPilot bridge'));
+    console.log(chalk.gray(`   ${options.url}`));
+    console.log(chalk.gray(`   machine: ${options.name}`));
     console.log('');
 
-    const client = new BridgeClient({
-      bridgeUrl: options.bridgeUrl,
-      apiKey: options.apiKey || '',
-      gcpProjectId: options.project,
+    const client = new BridgeClient({ bridgeUrl: options.url, token: options.token });
+
+    let registration;
+    try {
+      registration = await client.register({ name: options.name, repos, maxConcurrentJobs });
+    } catch (err) {
+      console.error(chalk.red('✗ Registration failed'));
+      console.error(chalk.red(`   ${err instanceof Error ? err.message : err}`));
+      process.exit(1);
+    }
+
+    console.log(chalk.green('✓ Registered'));
+    console.log(chalk.gray(`   orchestrator: ${registration.orchestratorId}`));
+    console.log(chalk.gray(`   repos: ${repos.join(', ') || '(none)'}`));
+    if (repos.length === 0) {
+      console.log(chalk.yellow('   ⚠ No repos specified — nothing can route to this machine.'));
+      console.log(chalk.gray('     Re-run with --repos owner/name to receive dispatches.'));
+    }
+    console.log('');
+
+    // The bridge returns realtime credentials only when it can mint a scoped
+    // JWT. If it could not, or the user asked for polling, we poll — which is
+    // fully correct, because the delivery guarantee is in the queue table.
+    const useRealtime = options.transport !== 'poll' && registration.realtime !== null;
+    if (options.transport !== 'poll' && !registration.realtime) {
+      console.log(chalk.yellow('   Realtime unavailable from this bridge — polling instead.'));
+    }
+
+    const loop = new DispatchLoop({
+      client,
+      orchestratorId: registration.orchestratorId,
+      realtime: useRealtime && registration.realtime
+        ? {
+            supabaseUrl: registration.realtime.supabaseUrl,
+            anonKey: registration.realtime.anonKey,
+            jwt: registration.realtime.jwt,
+          }
+        : null,
+      maxConcurrent: maxConcurrentJobs,
+      handler: createBridgeDispatchHandler({
+        client,
+        orchestratorMode: options.mode,
+        onLog: (line) => console.log(chalk.blue(`   ${line}`)),
+      }),
+      onLog: (line) => console.log(chalk.gray(`   ${line}`)),
+      onError: (e) => console.log(chalk.yellow(`   ${e.message}`)),
     });
 
-    try {
-      // Register with bridge
-      const repos = options.repos?.split(',').map(r => r.trim()) || [];
-      const result = await client.register({
-        repos,
-        maxConcurrentJobs: 4,
-      });
+    const heartbeat = new HeartbeatService({
+      client,
+      activeJobs: () => loop.activeJobs,
+      onError: (e) => console.log(chalk.gray(`   heartbeat: ${e.message}`)),
+    });
 
-      console.log(chalk.green('✓ Registered with bridge'));
-      console.log(chalk.gray(`   Orchestrator ID: ${result.orchestratorId}`));
-      console.log(chalk.gray(`   Repos: ${repos.join(', ') || 'None specified'}`));
+    await loop.start();
+    heartbeat.start();
+
+    console.log(chalk.green(`✓ Listening (${useRealtime ? 'realtime' : 'poll'})`));
+    console.log(chalk.gray('   Agents run on THIS machine. Ctrl+C to disconnect.'));
+    console.log('');
+
+    let shuttingDown = false;
+    const shutdown = async () => {
+      if (shuttingDown) return;
+      shuttingDown = true;
       console.log('');
+      console.log(chalk.yellow('Disconnecting…'));
+      heartbeat.stop();
+      await loop.stop();
+      console.log(chalk.green('✓ Disconnected'));
+      process.exit(0);
+    };
 
-      // Start heartbeat
-      const heartbeat = new HeartbeatService({
-        bridgeUrl: options.bridgeUrl,
-        apiKey: options.apiKey || '',
-        orchestratorId: result.orchestratorId,
-        intervalMs: 30000,
-      });
-      heartbeat.start();
-      console.log(chalk.green('✓ Heartbeat service started'));
-      console.log('');
+    process.on('SIGINT', () => void shutdown());
+    process.on('SIGTERM', () => void shutdown());
 
-      // Start Pub/Sub subscriber if project is configured
-      if (options.project) {
-        const subscriber = new PubSubSubscriber({
-          projectId: options.project,
-          subscriptionName: `devpilot-dispatch-${result.orchestratorId}`,
-          onMessage: async (message) => {
-            console.log(chalk.blue(`📨 Received dispatch: ${message.linearIdentifier} - ${message.title}`));
-            // TODO: Trigger local orchestrator dispatch
-          },
-        });
-        await subscriber.start();
-        console.log(chalk.green('✓ Pub/Sub subscriber started'));
-        console.log('');
-      }
-
-      console.log(chalk.cyan('Connected to bridge. Press Ctrl+C to disconnect.'));
-      console.log('');
-
-      // Keep process alive
-      process.on('SIGINT', () => {
-        console.log('');
-        console.log(chalk.yellow('Disconnecting from bridge...'));
-        heartbeat.stop();
-        console.log(chalk.green('✓ Disconnected'));
-        process.exit(0);
-      });
-
-      process.on('SIGTERM', () => {
-        heartbeat.stop();
-        process.exit(0);
-      });
-
-      // Keep the process running
-      await new Promise(() => {});
-    } catch (error) {
-      console.error(chalk.red('✗ Failed to connect:'));
-      console.error(chalk.red(`   ${error instanceof Error ? error.message : error}`));
-      process.exit(1);
-    }
+    await new Promise<never>(() => {});
   });

@@ -1,1 +1,0 @@
-export { registerSessionRoutes } from './routes';
