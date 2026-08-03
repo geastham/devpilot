@@ -1,4 +1,4 @@
-import { O as OrchestratorConfig, a as OrchestratorHealth, D as DispatchRequest, b as DispatchResponse, I as IOrchestratorAdapter, c as OrchestratorMode, d as OrchestratorAdapterConfig, J as JobStatus, S as SendMessageResult, C as CompletionReport, e as OrchestratorService, f as ClaudeSessionAdapter, g as CreateSessionParams, h as CreateSessionResult, H as HttpSessionTransport, i as IPushCapableAdapter, j as OrchestratorEvent, k as OrchestratorEventCallback, l as OrchestratorEventType, m as SessionTransport, n as StatusUpdate, T as TaskSpec, o as createClaudeSessionAdapter, p as getOrchestratorService, q as getOrchestratorServiceOrNull, r as initOrchestratorService, s as isOrchestratorServiceInitialized, t as isPushCapableAdapter } from './service-CmLM9G-i.mjs';
+import { O as OrchestratorConfig, a as OrchestratorHealth, D as DispatchRequest, b as DispatchResponse, C as CompletionReport, I as IOrchestratorAdapter, c as OrchestratorMode, d as OrchestratorAdapterConfig, J as JobStatus, S as SendMessageResult, e as OrchestratorService, f as ClaudeSessionAdapter, g as CreateSessionParams, h as CreateSessionResult, H as HttpSessionTransport, i as IPushCapableAdapter, j as OrchestratorEvent, k as OrchestratorEventCallback, l as OrchestratorEventType, m as SessionTransport, n as StatusUpdate, T as TaskSpec, o as createClaudeSessionAdapter, p as getOrchestratorService, q as getOrchestratorServiceOrNull, r as initOrchestratorService, s as isOrchestratorServiceInitialized, t as isPushCapableAdapter } from './service-CmLM9G-i.mjs';
 
 /**
  * HTTP client for communicating with the external agent-orchestrator
@@ -15,6 +15,20 @@ declare class OrchestratorClient {
      * Dispatch a task to the orchestrator
      */
     dispatch(request: DispatchRequest): Promise<DispatchResponse>;
+    /**
+     * Fetch the completion report for a finished job.
+     *
+     * The ao-cli and claude-session adapters both implement this; the HTTP
+     * adapter did not, and `OrchestratorAdapter.getCompletionReport` is optional —
+     * so StatusPoller.handleCompletion received null and NEVER invoked its
+     * onComplete callback. In practice that meant an http-mode job could run to
+     * completion locally and the host would never be told: the session sat at its
+     * last polled status forever.
+     *
+     * Returns null (rather than throwing) when the job is unknown or not yet
+     * finished, which is what the poller expects.
+     */
+    getCompletionReport(externalJobId: string): Promise<CompletionReport | null>;
     /**
      * Cancel a running job
      */

@@ -3,12 +3,14 @@ import { orchestrator } from '@devpilot.sh/core';
 
 /**
  * Derived structurally rather than imported by name: core's dts rollup does not
- * re-export the `OrchestratorEvent` interface or the `OrchestratorService`
- * class through its public surface, and this file should not depend on that
- * being fixed. Deriving from the function signatures tracks core automatically.
+ * re-export this through its public surface, and this file should not depend on
+ * that being fixed.
  */
 type OrchestratorService = ReturnType<typeof orchestrator.getOrchestratorService>;
-type OrchestratorEvent = Parameters<Parameters<OrchestratorService['onEvent']>[0]>[0];
+// initStatusPoller(service, config) — the service is arg 0, config is arg 1.
+type PollerConfig = NonNullable<Parameters<typeof orchestrator.initStatusPoller>[1]>;
+type JobStatus = Parameters<NonNullable<PollerConfig['onStatusUpdate']>>[1];
+type CompletionReport = Parameters<NonNullable<PollerConfig['onComplete']>>[1];
 
 export interface DispatchHandlerOptions {
   client: BridgeClient;
@@ -17,43 +19,112 @@ export interface DispatchHandlerOptions {
   httpUrl?: string;
   apiKey?: string;
   callbackUrl?: string;
+  /** Status poll cadence. Core defaults to 5s. */
+  pollIntervalMs?: number;
   onLog?: (line: string) => void;
 }
 
+/** Resolvers for sessions currently in flight, keyed by sessionId. */
+type Settler = (outcome: { ok: boolean; error?: string }) => void;
+const inFlight = new Map<string, Settler>();
+
 function service(opts: DispatchHandlerOptions): OrchestratorService {
-  // Lazily initialised: a connect session that never receives work should not
-  // require a configured orchestrator just to sit idle.
   const existing = orchestrator.getOrchestratorServiceOrNull();
   if (existing) return existing;
 
+  // NOTE: the config field is `url`, not `httpUrl`. This previously passed
+  // `httpUrl` behind an `as` cast, which silenced the mismatch entirely — http
+  // mode could never have reached an orchestrator. No cast now, so the compiler
+  // checks it.
   return orchestrator.initOrchestratorService({
     mode: opts.orchestratorMode,
-    aoProjectName: opts.aoProjectName,
-    httpUrl: opts.httpUrl,
+    url: opts.httpUrl,
     apiKey: opts.apiKey,
-  } as Parameters<typeof orchestrator.initOrchestratorService>[0]);
+    callbackUrl: opts.callbackUrl,
+    aoProjectName: opts.aoProjectName,
+    pollIntervalMs: opts.pollIntervalMs,
+  });
+}
+
+/**
+ * Wire the status poller ONCE, with callbacks that report to the bridge.
+ *
+ * This corrects TRD 05 §6.6, which said to subscribe to `service.onEvent`. That
+ * does not work: OrchestratorService.dispatch simply forwards to the adapter and
+ * emits nothing itself. Status feedback comes from StatusPoller, which the HOST
+ * must wire — the Next app does exactly this via orchestrator/host-wiring.ts,
+ * and the CLI had no equivalent. Observed before this fix: the stub agent ran to
+ * completion and the session stayed `pending` forever, because nobody was
+ * polling.
+ */
+function ensurePoller(opts: DispatchHandlerOptions, svc: OrchestratorService): void {
+  if (orchestrator.isStatusPollerInitialized()) return;
+  const log = opts.onLog ?? (() => {});
+
+  const poller = orchestrator.initStatusPoller(svc, {
+    pollIntervalMs: opts.pollIntervalMs ?? 2000,
+    maxRetries: 3,
+
+    onStatusUpdate: async (sessionId: string, status: JobStatus) => {
+      if (!inFlight.has(sessionId)) return;
+      try {
+        await opts.client.reportSessionStatus(sessionId, {
+          status: status.status === 'queued' ? 'dispatched' : 'running',
+          progressPercent: Math.max(0, Math.min(100, status.progressPercent ?? 0)),
+          message: status.message ?? status.currentStep,
+        });
+      } catch (e) {
+        log(`status report failed: ${e instanceof Error ? e.message : e}`);
+      }
+    },
+
+    onComplete: async (sessionId: string, report: CompletionReport) => {
+      const settle = inFlight.get(sessionId);
+      try {
+        await opts.client.reportSessionComplete(sessionId, {
+          success: report.success,
+          ...(report.prUrl ? { prUrl: report.prUrl } : {}),
+          ...(report.summary ? { summary: report.summary } : {}),
+          ...(report.tokensUsed !== undefined ? { tokensUsed: report.tokensUsed } : {}),
+          ...(report.costUsd !== undefined ? { costUsd: report.costUsd } : {}),
+          ...(report.success ? {} : { errorMessage: report.error?.message ?? 'Agent failed' }),
+        });
+        settle?.({ ok: true });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        log(`completion report failed: ${msg}`);
+        settle?.({ ok: false, error: msg });
+      }
+    },
+
+    onError: async (sessionId: string, error: Error) => {
+      const settle = inFlight.get(sessionId);
+      try {
+        await opts.client.reportSessionComplete(sessionId, {
+          success: false,
+          errorMessage: error.message,
+        });
+      } catch {
+        /* the settle below still releases the claim */
+      }
+      settle?.({ ok: false, error: error.message });
+    },
+  });
+
+  poller.start();
 }
 
 /**
  * Bridge dispatch → local execution — TRD 05 §6.6.
  *
- * Failure protocol — note this differs from TRD 05 §6.6 as originally written.
+ * Failure protocol, corrected from the TRD: it said the handler must never
+ * throw, reasoning from Pub/Sub where a throw meant nack-and-redeliver. Here
+ * DispatchLoop catches a throw and calls release(queueId), re-arming the row
+ * with backoff. So the contract is: report to the bridge, THEN throw, so the
+ * claim is released rather than stranded until the stale sweep.
  *
- * The TRD said the handler must never throw, because under Pub/Sub a throw meant
- * nack-and-redeliver and would loop. That reasoning does not carry over: here
- * DispatchLoop catches a throw and calls `release(queueId)`, which re-arms the
- * row with backoff and counts an attempt toward DISPATCH_MAX_ATTEMPTS. So the
- * contract is:
- *
- *   - report `error` status to the bridge (best-effort), THEN
- *   - throw, so the loop releases the claim rather than stranding it.
- *
- * Swallowing the error would leave the row claimed until the server-side stale
- * sweep — up to 30 minutes of invisible work. Throwing is the safe direction.
- *
- * This is the local half of the invariant: the agent runs HERE, on this
- * machine, against this checkout. The bridge sent a title and a repo name; it
- * never sees the code.
+ * The agent runs HERE, on this machine, against this checkout. The bridge sent
+ * a title and a repo name; it never sees the code.
  */
 export function createBridgeDispatchHandler(
   opts: DispatchHandlerOptions,
@@ -66,6 +137,7 @@ export function createBridgeDispatchHandler(
 
     try {
       const svc = service(opts);
+      ensurePoller(opts, svc);
 
       const request = orchestrator.buildDispatchRequest({
         sessionId,
@@ -76,69 +148,37 @@ export function createBridgeDispatchHandler(
         callbackUrl: opts.callbackUrl ?? '',
       });
 
-      // Report 'dispatched' before awaiting the agent: a long-running job
-      // should not look pending in the dashboard for its entire duration.
+      const settled = new Promise<{ ok: boolean; error?: string }>((resolve) => {
+        inFlight.set(sessionId, resolve);
+      });
+
+      const response = await svc.dispatch(request);
+      if (!response.accepted) {
+        inFlight.delete(sessionId);
+        throw new Error(response.error ?? 'Orchestrator rejected the dispatch');
+      }
+
       await opts.client.reportSessionStatus(sessionId, {
         status: 'dispatched',
         progressPercent: 0,
         message: `Dispatched to local orchestrator (${opts.orchestratorMode})`,
       });
 
-      const settled = new Promise<void>((resolve) => {
-        const unsubscribe = svc.onEvent((event: OrchestratorEvent) => {
-          if (event.sessionId !== sessionId) return;
+      // The poller reports progress and resolves `settled` on a terminal state.
+      orchestrator
+        .getStatusPoller()
+        .trackSession(sessionId, response.orchestratorJobId ?? sessionId);
 
-          if (event.type === 'job:started' || event.type === 'job:progress') {
-            const data = event.data as { progressPercent?: number; message?: string };
-            void opts.client
-              .reportSessionStatus(sessionId, {
-                status: 'running',
-                progressPercent: Math.max(0, Math.min(100, data.progressPercent ?? 0)),
-                message: data.message,
-              })
-              .catch((e) => log(`status report failed: ${e instanceof Error ? e.message : e}`));
-            return;
-          }
+      const outcome = await settled;
+      inFlight.delete(sessionId);
 
-          if (
-            event.type === 'job:complete' ||
-            event.type === 'job:error' ||
-            event.type === 'job:cancelled'
-          ) {
-            const data = event.data as {
-              success?: boolean;
-              prUrl?: string;
-              summary?: string;
-              tokensUsed?: number;
-              costUsd?: number;
-              error?: string;
-            };
-            // A cancelled job is not a success, but it is terminal — the queue
-            // row must settle either way or the work is dispatched forever.
-            const success = event.type === 'job:complete' && data.success !== false;
-
-            void opts.client
-              .reportSessionComplete(sessionId, {
-                success,
-                ...(data.prUrl ? { prUrl: data.prUrl } : {}),
-                ...(data.summary ? { summary: data.summary } : {}),
-                ...(data.tokensUsed !== undefined ? { tokensUsed: data.tokensUsed } : {}),
-                ...(data.costUsd !== undefined ? { costUsd: data.costUsd } : {}),
-                ...(success ? {} : { errorMessage: data.error ?? 'Agent reported failure' }),
-              })
-              .catch((e) => log(`completion report failed: ${e instanceof Error ? e.message : e}`))
-              .finally(() => {
-                unsubscribe();
-                resolve();
-              });
-          }
-        });
-      });
-
-      await svc.dispatch(request);
-      await settled;
-      log(`${linearIdentifier} finished`);
+      if (!outcome.ok) throw new Error(outcome.error ?? 'Session failed');
+      // The dispatch completed and was reported. Whether the AGENT succeeded is
+      // recorded in the session, not here — an agent that ran and failed is a
+      // finished dispatch, not one to retry.
+      log(`${linearIdentifier} reported`);
     } catch (err) {
+      inFlight.delete(sessionId);
       const reason = err instanceof Error ? err.message : String(err);
       log(`${linearIdentifier} failed: ${reason}`);
 
@@ -155,7 +195,7 @@ export function createBridgeDispatchHandler(
         /* nothing further we can do from here */
       }
 
-      throw new Error(reason); // DispatchLoop catches this and releases the row
+      throw new Error(reason);
     }
   };
 }

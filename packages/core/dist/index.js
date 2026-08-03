@@ -4811,6 +4811,28 @@ var OrchestratorClient = class {
     return response.json();
   }
   /**
+   * Fetch the completion report for a finished job.
+   *
+   * The ao-cli and claude-session adapters both implement this; the HTTP
+   * adapter did not, and `OrchestratorAdapter.getCompletionReport` is optional —
+   * so StatusPoller.handleCompletion received null and NEVER invoked its
+   * onComplete callback. In practice that meant an http-mode job could run to
+   * completion locally and the host would never be told: the session sat at its
+   * last polled status forever.
+   *
+   * Returns null (rather than throwing) when the job is unknown or not yet
+   * finished, which is what the poller expects.
+   */
+  async getCompletionReport(externalJobId) {
+    const response = await this.fetch(`/jobs/${encodeURIComponent(externalJobId)}/result`);
+    if (!response.ok) return null;
+    try {
+      return await response.json();
+    } catch {
+      return null;
+    }
+  }
+  /**
    * Cancel a running job
    */
   async cancel(sessionId) {
@@ -5600,6 +5622,19 @@ var HttpAdapter = class {
   }
   async dispatch(request) {
     return this.client.dispatch(request);
+  }
+  /**
+   * Forwarded so http mode can actually finish.
+   *
+   * IOrchestratorAdapter.getCompletionReport is OPTIONAL, and this adapter did
+   * not implement it — so OrchestratorService.getCompletionReport always
+   * returned null for http mode, StatusPoller.handleCompletion never invoked
+   * onComplete, and a job that finished locally was never reported to the host.
+   * The ao-cli and claude-session adapters both implement it; this was the odd
+   * one out.
+   */
+  async getCompletionReport(externalJobId) {
+    return this.client.getCompletionReport(externalJobId);
   }
   async getJobStatus(externalJobId) {
     const status = await this.client.getJobStatus(externalJobId);

@@ -12,6 +12,8 @@ interface ConnectOptions {
   mode: 'ao-cli' | 'http' | 'claude-session';
   transport: 'realtime' | 'poll';
   maxJobs: string;
+  httpUrl?: string;
+  aoProject?: string;
 }
 
 export const connectCommand = new Command('connect')
@@ -27,6 +29,8 @@ export const connectCommand = new Command('connect')
     process.env.DEVPILOT_BRIDGE_TRANSPORT || 'realtime',
   )
   .option('-j, --max-jobs <n>', 'Max concurrent local jobs', '4')
+  .option('--http-url <url>', 'Orchestrator URL (required for --mode http)')
+  .option('--ao-project <name>', 'ao project name (for --mode ao-cli)')
   .action(async (options: ConnectOptions) => {
     if (!options.url) {
       console.error(chalk.red('✗ Bridge URL required (--url or DEVPILOT_BRIDGE_URL)'));
@@ -45,6 +49,11 @@ export const connectCommand = new Command('connect')
     console.log(chalk.gray(`   ${options.url}`));
     console.log(chalk.gray(`   machine: ${options.name}`));
     console.log('');
+
+    if (options.mode === 'http' && !options.httpUrl) {
+      console.error(chalk.red('✗ --mode http requires --http-url'));
+      process.exit(1);
+    }
 
     const client = new BridgeClient({ bridgeUrl: options.url, token: options.token });
 
@@ -88,6 +97,8 @@ export const connectCommand = new Command('connect')
       handler: createBridgeDispatchHandler({
         client,
         orchestratorMode: options.mode,
+        httpUrl: options.httpUrl,
+        aoProjectName: options.aoProject,
         onLog: (line) => console.log(chalk.blue(`   ${line}`)),
       }),
       onLog: (line) => console.log(chalk.gray(`   ${line}`)),

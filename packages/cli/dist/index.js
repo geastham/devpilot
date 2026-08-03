@@ -1893,15 +1893,69 @@ var import_bridge_client = require("@devpilot.sh/bridge-client");
 
 // src/commands/bridge/dispatch-handler.ts
 var import_core3 = require("@devpilot.sh/core");
+var inFlight = /* @__PURE__ */ new Map();
 function service(opts) {
   const existing = import_core3.orchestrator.getOrchestratorServiceOrNull();
   if (existing) return existing;
   return import_core3.orchestrator.initOrchestratorService({
     mode: opts.orchestratorMode,
+    url: opts.httpUrl,
+    apiKey: opts.apiKey,
+    callbackUrl: opts.callbackUrl,
     aoProjectName: opts.aoProjectName,
-    httpUrl: opts.httpUrl,
-    apiKey: opts.apiKey
+    pollIntervalMs: opts.pollIntervalMs
   });
+}
+function ensurePoller(opts, svc) {
+  if (import_core3.orchestrator.isStatusPollerInitialized()) return;
+  const log = opts.onLog ?? (() => {
+  });
+  const poller = import_core3.orchestrator.initStatusPoller(svc, {
+    pollIntervalMs: opts.pollIntervalMs ?? 2e3,
+    maxRetries: 3,
+    onStatusUpdate: async (sessionId, status) => {
+      if (!inFlight.has(sessionId)) return;
+      try {
+        await opts.client.reportSessionStatus(sessionId, {
+          status: status.status === "queued" ? "dispatched" : "running",
+          progressPercent: Math.max(0, Math.min(100, status.progressPercent ?? 0)),
+          message: status.message ?? status.currentStep
+        });
+      } catch (e) {
+        log(`status report failed: ${e instanceof Error ? e.message : e}`);
+      }
+    },
+    onComplete: async (sessionId, report) => {
+      const settle = inFlight.get(sessionId);
+      try {
+        await opts.client.reportSessionComplete(sessionId, {
+          success: report.success,
+          ...report.prUrl ? { prUrl: report.prUrl } : {},
+          ...report.summary ? { summary: report.summary } : {},
+          ...report.tokensUsed !== void 0 ? { tokensUsed: report.tokensUsed } : {},
+          ...report.costUsd !== void 0 ? { costUsd: report.costUsd } : {},
+          ...report.success ? {} : { errorMessage: report.error?.message ?? "Agent failed" }
+        });
+        settle?.({ ok: true });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        log(`completion report failed: ${msg}`);
+        settle?.({ ok: false, error: msg });
+      }
+    },
+    onError: async (sessionId, error) => {
+      const settle = inFlight.get(sessionId);
+      try {
+        await opts.client.reportSessionComplete(sessionId, {
+          success: false,
+          errorMessage: error.message
+        });
+      } catch {
+      }
+      settle?.({ ok: false, error: error.message });
+    }
+  });
+  poller.start();
 }
 function createBridgeDispatchHandler(opts) {
   const log = opts.onLog ?? (() => {
@@ -1911,6 +1965,7 @@ function createBridgeDispatchHandler(opts) {
     log(`${linearIdentifier} \u2192 ${repo}: ${title}`);
     try {
       const svc = service(opts);
+      ensurePoller(opts, svc);
       const request = import_core3.orchestrator.buildDispatchRequest({
         sessionId,
         repo,
@@ -1919,44 +1974,26 @@ function createBridgeDispatchHandler(opts) {
         linearTicketId: linearIdentifier,
         callbackUrl: opts.callbackUrl ?? ""
       });
+      const settled = new Promise((resolve) => {
+        inFlight.set(sessionId, resolve);
+      });
+      const response = await svc.dispatch(request);
+      if (!response.accepted) {
+        inFlight.delete(sessionId);
+        throw new Error(response.error ?? "Orchestrator rejected the dispatch");
+      }
       await opts.client.reportSessionStatus(sessionId, {
         status: "dispatched",
         progressPercent: 0,
         message: `Dispatched to local orchestrator (${opts.orchestratorMode})`
       });
-      const settled = new Promise((resolve) => {
-        const unsubscribe = svc.onEvent((event) => {
-          if (event.sessionId !== sessionId) return;
-          if (event.type === "job:started" || event.type === "job:progress") {
-            const data = event.data;
-            void opts.client.reportSessionStatus(sessionId, {
-              status: "running",
-              progressPercent: Math.max(0, Math.min(100, data.progressPercent ?? 0)),
-              message: data.message
-            }).catch((e) => log(`status report failed: ${e instanceof Error ? e.message : e}`));
-            return;
-          }
-          if (event.type === "job:complete" || event.type === "job:error" || event.type === "job:cancelled") {
-            const data = event.data;
-            const success = event.type === "job:complete" && data.success !== false;
-            void opts.client.reportSessionComplete(sessionId, {
-              success,
-              ...data.prUrl ? { prUrl: data.prUrl } : {},
-              ...data.summary ? { summary: data.summary } : {},
-              ...data.tokensUsed !== void 0 ? { tokensUsed: data.tokensUsed } : {},
-              ...data.costUsd !== void 0 ? { costUsd: data.costUsd } : {},
-              ...success ? {} : { errorMessage: data.error ?? "Agent reported failure" }
-            }).catch((e) => log(`completion report failed: ${e instanceof Error ? e.message : e}`)).finally(() => {
-              unsubscribe();
-              resolve();
-            });
-          }
-        });
-      });
-      await svc.dispatch(request);
-      await settled;
-      log(`${linearIdentifier} finished`);
+      import_core3.orchestrator.getStatusPoller().trackSession(sessionId, response.orchestratorJobId ?? sessionId);
+      const outcome = await settled;
+      inFlight.delete(sessionId);
+      if (!outcome.ok) throw new Error(outcome.error ?? "Session failed");
+      log(`${linearIdentifier} reported`);
     } catch (err) {
+      inFlight.delete(sessionId);
       const reason = err instanceof Error ? err.message : String(err);
       log(`${linearIdentifier} failed: ${reason}`);
       try {
@@ -1977,7 +2014,7 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
   "--transport <transport>",
   "realtime | poll \u2014 polling is fully correct, just higher latency",
   process.env.DEVPILOT_BRIDGE_TRANSPORT || "realtime"
-).option("-j, --max-jobs <n>", "Max concurrent local jobs", "4").action(async (options) => {
+).option("-j, --max-jobs <n>", "Max concurrent local jobs", "4").option("--http-url <url>", "Orchestrator URL (required for --mode http)").option("--ao-project <name>", "ao project name (for --mode ao-cli)").action(async (options) => {
   if (!options.url) {
     console.error(import_chalk7.default.red("\u2717 Bridge URL required (--url or DEVPILOT_BRIDGE_URL)"));
     process.exit(1);
@@ -1993,6 +2030,10 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
   console.log(import_chalk7.default.gray(`   ${options.url}`));
   console.log(import_chalk7.default.gray(`   machine: ${options.name}`));
   console.log("");
+  if (options.mode === "http" && !options.httpUrl) {
+    console.error(import_chalk7.default.red("\u2717 --mode http requires --http-url"));
+    process.exit(1);
+  }
   const client = new import_bridge_client.BridgeClient({ bridgeUrl: options.url, token: options.token });
   let registration;
   try {
@@ -2026,6 +2067,8 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
     handler: createBridgeDispatchHandler({
       client,
       orchestratorMode: options.mode,
+      httpUrl: options.httpUrl,
+      aoProjectName: options.aoProject,
       onLog: (line) => console.log(import_chalk7.default.blue(`   ${line}`))
     }),
     onLog: (line) => console.log(import_chalk7.default.gray(`   ${line}`)),
