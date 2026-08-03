@@ -1,6 +1,18 @@
 # TRD 06 — Shared Agent Sessions
 ## Cross-Machine Agent Coordination · End-to-End Encrypted Transcripts · Join Links · MCP Bridge
-### v1.2 · August 2026 · Status: WAVES 1–2 SHIPPED
+### v1.3 · August 2026 · Status: WAVES 1–3 SHIPPED
+
+> **Change log — v1.3 (3 Aug 2026)**
+> - Wave 3 complete: seven routes, participant tokens, rate limits. Verified
+>   against a live deployment over HTTPS, not only in-process.
+> - **T6-AC-07 REWRITTEN.** Rotation ends access for the old key. Option (a) —
+>   keeping superseded verifiers alive for read-only history — was rejected
+>   because it would have defeated the only revocation mechanism the design has.
+> - §3.2 corrected: server-authored `system` messages are PLAINTEXT. The server
+>   cannot encrypt, so it could never have been otherwise; the table now says so.
+> - §5 participant tokens are signed with a key derived from
+>   BRIDGE_ENCRYPTION_KEY, not SUPABASE_JWT_SECRET. Rationale in §5.
+> - Rate limits are counted from `session_messages` itself, exactly.
 
 > **Change log — v1.2 (3 Aug 2026)**
 > - Wave 2 complete: three tables, RLS, policies, `seq` trigger, ciphertext
@@ -137,6 +149,16 @@ This is the load-bearing table for the whole design. It must stay accurate.
 Traffic analysis is possible and we should say so rather than imply perfect
 privacy: message *sizes and timing* leak activity patterns. What does not leak
 is content.
+
+**One correction, added in Wave 3.** Messages of kind `system` are PLAINTEXT and
+the server can read them. It has to be that way: T6-AC-06 requires the server to
+announce that `auto` has exhausted its budget or TTL, and the server holds no
+session key, so it cannot produce ciphertext. These notices are stored with a
+`system:` prefix that cannot be confused with the `iv.ct.tag` format, they
+contain nothing but a mode transition and its cause, and a participant who tries
+to post one gets a 400. Every message a PARTICIPANT writes remains opaque — but
+"the server cannot read the transcript" is now precise rather than absolute, and
+the marketing copy (§7.6, T6-AC-12) must match this wording, not the old one.
 
 ### 3.3 Turn discipline — DECISION A ✅ CONFIRMED 2026-08-03
 
@@ -316,20 +338,26 @@ So:
 and stay readable to holders of the old key. This is honest: rotation stops
 future leakage, it does not retract past access.
 
-> **OPEN — resolve in Wave 3.** As specified, `shared_sessions` holds exactly one
-> `joinKeyHash`, so after rotation a holder of only the old key cannot
-> authenticate at all — and therefore cannot *fetch* the pre-rotation ciphertext
-> they are supposedly still able to read. T6-AC-07 is unsatisfiable as written;
-> it is true only for someone who already downloaded the messages.
+> **RESOLVED IN WAVE 3 — option (b).** As specified, `shared_sessions` holds
+> exactly one `joinKeyHash`, so after rotation a holder of only the old key
+> cannot authenticate and therefore cannot *fetch* the pre-rotation ciphertext
+> T6-AC-07 said they could still read.
 >
-> Two ways out, to be chosen when the routes are built:
-> **(a)** keep superseded `joinKeyHash` values in a `session_key_versions` table
-> and let an old proof authenticate read-only requests bounded to
-> `seq <= <rotation seq>`; or **(b)** accept that rotation ends access outright
-> and reword T6-AC-07 to say so.
+> The choice was between (a) keeping superseded verifiers valid for read-only
+> requests bounded to the rotation seq, and (b) accepting that rotation ends
+> access outright.
 >
-> (a) matches what §4.4 currently promises. (b) is simpler and arguably the
-> better security story. Either is defensible; silently shipping neither is not.
+> **(b), and not merely because it is simpler.** Rotation is the ONLY revocation
+> mechanism this design has, and the reason anyone reaches for it is that a link
+> leaked. Option (a) would have left the leaked credential able to fetch the
+> entire pre-rotation transcript — which is not revocation, so (a) would have
+> defeated the feature rather than softened it.
+>
+> Rotation therefore cuts the old link off from the server completely: the old
+> verifier stops matching, and every outstanding participant token carries the
+> old `key_version` and is rejected on its next request. What rotation still
+> cannot do is retract bytes someone already downloaded. That is stated below
+> and remains true.
 
 ---
 
@@ -544,8 +572,13 @@ by link and post, and can read *nothing else* in that org.
 - **T6-AC-05** Default mode is `observe`; agents do not post unprompted.
 - **T6-AC-06** `auto` stops at its budget and at its TTL, dropping to `observe`
   with a system message.
-- **T6-AC-07** Rotation issues a new link; the old proof 401s; pre-rotation
-  messages remain readable with the old key.
+- **T6-AC-07** *(rewritten in v1.3 — the original was unsatisfiable, see §4.4)*
+  Rotation issues a new link and **ends access for the old one**: the old proof
+  is rejected, and every outstanding participant token is invalidated on its
+  next request. Pre-rotation messages remain in the transcript under their old
+  `keyVersion` — still undecryptable by a holder of only the new key, and still
+  decryptable by anyone who retained the old one *and already has the bytes*.
+  Rotation stops future access; it does not unsee.
 - **T6-AC-08** Rate limits return 429 and record nothing.
 - **T6-AC-09** `seq` is strictly increasing with no gaps under concurrent posts.
 - **T6-AC-10** Claude Code joins via MCP, posts, and reads — with no change to
@@ -665,15 +698,53 @@ claim is only as good as the Wave 3 minting code that sets it, and nothing here
 verifies that code — because it does not exist. Rate limits (§5) are likewise
 Wave 3: the database caps message *size*, not rate.
 
-### Wave 3 — Routes (website)
+### Wave 3 — Routes (website) ✅ COMPLETE
 
 | ID | Title | Files | Cx | Done-check |
 |---|---|---|---|---|
-| T6-W3-T1 | Create/list/get | `app/api/sessions/shared/**` | M | Guards pass |
-| T6-W3-T2 | Join + participant tokens | `.../[id]/join` | M | §8.3 |
-| T6-W3-T3 | Messages + `seq` | `.../[id]/messages` | L | §8.4 |
-| T6-W3-T4 | Mode/rotate/close | `.../[id]/{mode,rotate,close}` | M | §8.5, T6-AC-07 |
-| T6-W3-T5 | Rate limits | `lib/sessions/rate-limit.ts` | M | §8.6 |
+| T6-W3-T1 | Create/list/get | `app/api/sessions/shared/**` | M | ✅ |
+| T6-W3-T2 | Join + participant tokens | `.../[id]/join` | M | ✅ §8.3 |
+| T6-W3-T3 | Messages + `seq` | `.../[id]/messages` | L | ✅ §8.4 |
+| T6-W3-T4 | Mode/rotate/close | `.../[id]/{mode,rotate,close}` | M | ✅ §8.5, T6-AC-07 |
+| T6-W3-T5 | Rate limits | `lib/sessions/rate-limit.ts` | M | ✅ §8.6 |
+
+305 vitest tests (was 258), 35 pgTAP. All gates green. Verified against a live
+Vercel deployment over HTTPS with `tests/harness/run-shared-session.mjs`, which
+drives the real routes with the real `sessionCrypto` as the client — the
+in-process suite proves the code is right and proves nothing about whether the
+deployed application serves it.
+
+**Participant tokens are not Supabase JWTs.** §5 did not say what signs them.
+They are signed with a key derived from `BRIDGE_ENCRYPTION_KEY` by HKDF with its
+own info string. `SUPABASE_JWT_SECRET` is unset in this project and Supabase is
+migrating off shared HS256 secrets, so building on it would make the feature
+undeployable today; and the routes reach Postgres as `postgres` (BYPASSRLS), so
+RLS was never the enforcement path for this API — the guard is. The Wave 2
+policies stay as the second line, and the JWT claim names match
+`public.current_shared_session()` exactly so a future direct-to-Supabase read
+needs no second vocabulary. Reusing one key for both encryption and
+authentication is the mistake Wave 1 avoided with its content/verify split.
+
+**Rate limits are counted from `session_messages`, exactly.** In-memory counters
+are per-instance-per-lifetime on Vercel, i.e. absent; there is no KV on Hobby.
+Counting the trailing minute from the table makes the limit a property of the
+data rather than of a cache that can drift from it. It is exact rather than
+approximate because the transaction takes the session row lock FIRST — the lock
+the seq trigger takes anyway — so a rejection costs no extra contention and
+rolls back, which is what §8.6's "is not recorded" requires.
+
+**`auto` TTL is enforced on read as well as on write.** Clients read `mode` to
+decide whether to respond autonomously, so a lapsed TTL must not keep granting
+autonomy to whoever polls before the next post reconciles the row. Reads report
+a lapsed `auto` as `observe`; the stored row is settled by the next message and
+by the maintenance cron.
+
+**Not proven in Wave 3.** No MCP server or CLI exists yet, so nothing has
+exercised these routes as an actual agent would — that is Wave 4. The join page
+does not exist, so `sessionCrypto` still has not run in a real browser engine
+(Wave 1's outstanding gap, closed by T6-W5-T1). And T6-AC-12 — the marketing
+copy — is Wave 5 and is now MORE load-bearing than when written, because §3.2
+gained the `system`-message correction.
 
 ### Wave 4 — Clients (public repo)
 
@@ -703,4 +774,4 @@ Wave 3: the database caps message *size*, not rate.
 - **Ciphertext is never rendered server-side**, encrypted or not.
 - The invariant from TRD 05 stands: **agents run locally.**
 
-*TRD 06 · v1.2 · August 2026 · Waves 1–2 shipped*
+*TRD 06 · v1.3 · August 2026 · Waves 1–3 shipped*
