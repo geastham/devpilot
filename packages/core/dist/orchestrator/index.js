@@ -1276,6 +1276,7 @@ var StatusPoller = class {
   constructor(orchestrator, config = {}) {
     this.trackedSessions = /* @__PURE__ */ new Map();
     this.pollInterval = null;
+    this.isPolling = false;
     this.isRunning = false;
     this.orchestrator = orchestrator;
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -1347,6 +1348,15 @@ var StatusPoller = class {
    * Poll all tracked sessions for status
    */
   async poll() {
+    if (this.isPolling) return;
+    this.isPolling = true;
+    try {
+      await this.pollOnce();
+    } finally {
+      this.isPolling = false;
+    }
+  }
+  async pollOnce() {
     const sessions = Array.from(this.trackedSessions.values());
     if (sessions.length === 0) return;
     await Promise.all(

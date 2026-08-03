@@ -45,6 +45,7 @@ export class StatusPoller {
   private config: StatusPollerConfig;
   private trackedSessions: Map<string, TrackedSession> = new Map();
   private pollInterval: NodeJS.Timeout | null = null;
+  private isPolling = false;
   private isRunning: boolean = false;
   private unsubscribe?: () => void;
 
@@ -137,6 +138,22 @@ export class StatusPoller {
    * Poll all tracked sessions for status
    */
   private async poll(): Promise<void> {
+    // Reentrancy guard. setInterval fires on a fixed schedule regardless of how
+    // long the previous cycle took, and a cycle includes the host's callbacks —
+    // which typically make network calls. Without this, cycles overlap and a
+    // slow status report can land AFTER the completion report, so a finished
+    // session flips back to `running`. Observed as a `progress` event appearing
+    // after `complete` in the session event trail.
+    if (this.isPolling) return;
+    this.isPolling = true;
+    try {
+      await this.pollOnce();
+    } finally {
+      this.isPolling = false;
+    }
+  }
+
+  private async pollOnce(): Promise<void> {
     const sessions = Array.from(this.trackedSessions.values());
     if (sessions.length === 0) return;
 

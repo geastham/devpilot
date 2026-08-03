@@ -16,6 +16,7 @@ export interface DispatchHandlerOptions {
   client: BridgeClient;
   orchestratorMode: 'ao-cli' | 'http' | 'claude-session';
   aoProjectName?: string;
+  aoPath?: string;
   httpUrl?: string;
   apiKey?: string;
   callbackUrl?: string;
@@ -25,7 +26,8 @@ export interface DispatchHandlerOptions {
 }
 
 /** Resolvers for sessions currently in flight, keyed by sessionId. */
-type Settler = (outcome: { ok: boolean; error?: string }) => void;
+type Outcome = { ok: boolean; error?: string; reported?: boolean };
+type Settler = (outcome: Outcome) => void;
 const inFlight = new Map<string, Settler>();
 
 function service(opts: DispatchHandlerOptions): OrchestratorService {
@@ -42,6 +44,7 @@ function service(opts: DispatchHandlerOptions): OrchestratorService {
     apiKey: opts.apiKey,
     callbackUrl: opts.callbackUrl,
     aoProjectName: opts.aoProjectName,
+    aoPath: opts.aoPath,
     pollIntervalMs: opts.pollIntervalMs,
   });
 }
@@ -67,6 +70,17 @@ function ensurePoller(opts: DispatchHandlerOptions, svc: OrchestratorService): v
 
     onStatusUpdate: async (sessionId: string, status: JobStatus) => {
       if (!inFlight.has(sessionId)) return;
+
+      // StatusPoller fires onStatusUpdate for EVERY status change, including
+      // the terminal one, and only then calls handleCompletion. Reporting a
+      // terminal status here would post `running` for a job that just finished
+      // — observed as a `progress` event landing AFTER `complete` in the event
+      // trail, which makes a finished session flicker back to running in the
+      // dashboard. Terminal states belong to onComplete/onError alone.
+      if (status.status === 'complete' || status.status === 'error' || status.status === 'cancelled') {
+        return;
+      }
+
       try {
         await opts.client.reportSessionStatus(sessionId, {
           status: status.status === 'queued' ? 'dispatched' : 'running',
@@ -89,7 +103,10 @@ function ensurePoller(opts: DispatchHandlerOptions, svc: OrchestratorService): v
           ...(report.costUsd !== undefined ? { costUsd: report.costUsd } : {}),
           ...(report.success ? {} : { errorMessage: report.error?.message ?? 'Agent failed' }),
         });
-        settle?.({ ok: true });
+        // Reported successfully — including a reported FAILURE. Either way the
+        // bridge now knows the terminal state, so the catch block below must
+        // not report it a second time.
+        settle?.({ ok: report.success, error: report.error?.message, reported: true });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         log(`completion report failed: ${msg}`);
@@ -107,7 +124,7 @@ function ensurePoller(opts: DispatchHandlerOptions, svc: OrchestratorService): v
       } catch {
         /* the settle below still releases the claim */
       }
-      settle?.({ ok: false, error: error.message });
+      settle?.({ ok: false, error: error.message, reported: true });
     },
   });
 
@@ -148,7 +165,7 @@ export function createBridgeDispatchHandler(
         callbackUrl: opts.callbackUrl ?? '',
       });
 
-      const settled = new Promise<{ ok: boolean; error?: string }>((resolve) => {
+      const settled = new Promise<Outcome>((resolve) => {
         inFlight.set(sessionId, resolve);
       });
 
@@ -172,7 +189,13 @@ export function createBridgeDispatchHandler(
       const outcome = await settled;
       inFlight.delete(sessionId);
 
-      if (!outcome.ok) throw new Error(outcome.error ?? 'Session failed');
+      if (!outcome.ok) {
+        const e = new Error(outcome.error ?? 'Session failed');
+        // Mark it so the catch block does not re-report a state the bridge
+        // already has. Without this the failure is posted twice.
+        (e as Error & { alreadyReported?: boolean }).alreadyReported = outcome.reported;
+        throw e;
+      }
       // The dispatch completed and was reported. Whether the AGENT succeeded is
       // recorded in the session, not here — an agent that ran and failed is a
       // finished dispatch, not one to retry.
@@ -185,14 +208,16 @@ export function createBridgeDispatchHandler(
       // Best-effort. If the bridge is unreachable too, the throw below still
       // makes DispatchLoop release the claim, and the server-side stale sweep
       // is the final backstop.
-      try {
-        await opts.client.reportSessionStatus(sessionId, {
-          status: 'error',
-          progressPercent: 0,
-          message: reason,
-        });
-      } catch {
-        /* nothing further we can do from here */
+      if (!(err as Error & { alreadyReported?: boolean })?.alreadyReported) {
+        try {
+          await opts.client.reportSessionStatus(sessionId, {
+            status: 'error',
+            progressPercent: 0,
+            message: reason,
+          });
+        } catch {
+          /* nothing further we can do from here */
+        }
       }
 
       throw new Error(reason);

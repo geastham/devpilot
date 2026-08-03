@@ -14,6 +14,7 @@ interface ConnectOptions {
   maxJobs: string;
   httpUrl?: string;
   aoProject?: string;
+  aoPath?: string;
 }
 
 export const connectCommand = new Command('connect')
@@ -31,6 +32,7 @@ export const connectCommand = new Command('connect')
   .option('-j, --max-jobs <n>', 'Max concurrent local jobs', '4')
   .option('--http-url <url>', 'Orchestrator URL (required for --mode http)')
   .option('--ao-project <name>', 'ao project name (for --mode ao-cli)')
+  .option('--ao-path <path>', 'Path to the ao binary (default: ao on PATH)')
   .action(async (options: ConnectOptions) => {
     if (!options.url) {
       console.error(chalk.red('✗ Bridge URL required (--url or DEVPILOT_BRIDGE_URL)'));
@@ -99,6 +101,7 @@ export const connectCommand = new Command('connect')
         orchestratorMode: options.mode,
         httpUrl: options.httpUrl,
         aoProjectName: options.aoProject,
+        aoPath: options.aoPath,
         onLog: (line) => console.log(chalk.blue(`   ${line}`)),
       }),
       onLog: (line) => console.log(chalk.gray(`   ${line}`)),

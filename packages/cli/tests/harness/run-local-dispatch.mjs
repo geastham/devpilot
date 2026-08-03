@@ -20,13 +20,21 @@
  *   5. delete everything it created
  *
  * Usage:
- *   node run-local-dispatch.mjs            # happy path
- *   node run-local-dispatch.mjs --fail     # agent fails; assert error + release
+ *   node run-local-dispatch.mjs                  # http mode, happy path
+ *   node run-local-dispatch.mjs --fail           # agent fails
+ *   node run-local-dispatch.mjs --mode ao-cli    # exercise the ao CLI wrapper
+ *   node run-local-dispatch.mjs --mode ao-cli --fail
+ *
+ * ao-cli mode runs against tests/harness/fake-ao.mjs, which speaks the exact
+ * stdout format AoCliAdapter parses. That proves OUR argv construction and
+ * parsing; it does not prove the real `ao` emits that format — see the note in
+ * fake-ao.mjs.
  */
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
 
@@ -35,6 +43,12 @@ const REPO_ROOT = path.resolve(HERE, '../../../..');
 const WEBSITE = path.resolve(REPO_ROOT, '../devpilot-website');
 
 const SHOULD_FAIL = process.argv.includes('--fail');
+const MODE = (() => {
+  const i = process.argv.indexOf('--mode');
+  return i === -1 ? 'http' : process.argv[i + 1];
+})();
+const AO_CALLS = path.join(os.tmpdir(), `fake-ao-calls-${Date.now()}.jsonl`);
+const AO_STATE = path.join(os.tmpdir(), `fake-ao-state-${Date.now()}.json`);
 const STUB_PORT = 7717;
 const SUFFIX = randomBytes(4).toString('hex');
 const ORG = `org_h_${SUFFIX}`;
@@ -74,6 +88,7 @@ async function cleanup() {
     if (cli && !cli.killed) cli.kill('SIGTERM');
     if (stub && !stub.killed) stub.kill('SIGTERM');
     await sql`DELETE FROM public.organizations WHERE id = ${ORG}`;
+    for (const f of [AO_STATE, AO_CALLS]) fs.rmSync(f, { force: true });
     log('cleaned up');
   } catch (e) {
     console.error('[harness] cleanup failed:', e.message);
@@ -125,7 +140,17 @@ async function enqueue(orchestratorId) {
 }
 
 function start(cmd, args, name) {
-  const p = spawn(cmd, args, { cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+  const p = spawn(cmd, args, {
+    cwd: REPO_ROOT,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      FAKE_AO_STATE: AO_STATE,
+      FAKE_AO_CALLS: AO_CALLS,
+      FAKE_AO_STEPS: '2',
+      ...(SHOULD_FAIL ? { FAKE_AO_FAIL: '1' } : {}),
+    },
+  });
   const tag = (d) =>
     d
       .toString()
@@ -154,12 +179,16 @@ async function waitFor(label, check, timeoutMs = 60_000) {
 async function main() {
   const token = await seed();
 
-  stub = start('node', [
-    path.join(HERE, 'stub-orchestrator.mjs'),
-    '--port', String(STUB_PORT),
-    ...(SHOULD_FAIL ? ['--fail'] : []),
-  ], 'stub');
-  await sleep(700);
+  if (MODE === 'http') {
+    stub = start('node', [
+      path.join(HERE, 'stub-orchestrator.mjs'),
+      '--port', String(STUB_PORT),
+      ...(SHOULD_FAIL ? ['--fail'] : []),
+    ], 'stub');
+    await sleep(700);
+  } else {
+    log(`ao-cli mode — using fake ao at ${path.join(HERE, 'fake-ao.mjs')}`);
+  }
 
   cli = start('node', [
     path.join(REPO_ROOT, 'packages/cli/bin/devpilot.js'),
@@ -168,9 +197,11 @@ async function main() {
     '--token', token,
     '--name', ORCH_NAME,
     '--repos', REPO,
-    '--mode', 'http',
-    '--http-url', `http://127.0.0.1:${STUB_PORT}`,
     '--transport', 'poll',
+    ...(MODE === 'http'
+      ? ['--mode', 'http', '--http-url', `http://127.0.0.1:${STUB_PORT}`]
+      : ['--mode', 'ao-cli', '--ao-project', 'harness-project',
+         '--ao-path', path.join(HERE, 'fake-ao.mjs')]),
   ], 'cli');
 
   const orchestratorId = await waitFor('registration', async () => {
@@ -207,6 +238,21 @@ async function main() {
   console.log('events        :', events.map((e) => e.type).join(' → '));
   console.log('queue rows    :', queued);
   console.log('linear sync   :', linearNote ? `skipped — ${linearNote.message}` : 'n/a');
+  if (MODE === 'ao-cli' && fs.existsSync(AO_CALLS)) {
+    const calls = fs.readFileSync(AO_CALLS, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    console.log('ao invocations (argv as received — quoting matters here):');
+    for (const c of calls) console.log('   ' + JSON.stringify(c));
+    // The prompt must survive as ONE argv entry. AoCliAdapter wraps it in
+    // quotes inside a shell string; if that ever regresses, `ao` receives the
+    // prompt split across argv and the agent gets garbage.
+    const spawnCall = calls.find((c) => c[0] === 'spawn');
+    if (spawnCall) {
+      const prompt = spawnCall[3];
+      const intact = typeof prompt === 'string' && prompt.includes(' ');
+      console.log(`   prompt intact as one arg: ${intact ? 'YES' : 'NO — SHELL SPLIT IT'}`);
+      if (!intact) process.exitCode = 1;
+    }
+  }
   console.log('========================================\n');
 
   const problems = [];

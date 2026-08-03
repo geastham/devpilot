@@ -31,7 +31,8 @@
     "start": "node bin/devpilot.js",
     "prepublishOnly": "pnpm run build",
     "test": "vitest run --passWithNoTests",
-    "harness:dispatch": "node tests/harness/run-local-dispatch.mjs"
+    "harness:dispatch": "node tests/harness/run-local-dispatch.mjs",
+    "harness:ao": "node tests/harness/run-local-dispatch.mjs --mode ao-cli"
   },
   "publishConfig": {
     "access": "public",

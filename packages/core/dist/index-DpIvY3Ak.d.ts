@@ -204,6 +204,7 @@ declare class StatusPoller {
     private config;
     private trackedSessions;
     private pollInterval;
+    private isPolling;
     private isRunning;
     private unsubscribe?;
     constructor(orchestrator: OrchestratorService, config?: Partial<StatusPollerConfig>);
@@ -231,6 +232,7 @@ declare class StatusPoller {
      * Poll all tracked sessions for status
      */
     private poll;
+    private pollOnce;
     /**
      * Poll a single session for status
      */

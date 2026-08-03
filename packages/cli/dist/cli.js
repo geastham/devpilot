@@ -1900,6 +1900,7 @@ function service(opts) {
     apiKey: opts.apiKey,
     callbackUrl: opts.callbackUrl,
     aoProjectName: opts.aoProjectName,
+    aoPath: opts.aoPath,
     pollIntervalMs: opts.pollIntervalMs
   });
 }
@@ -1912,6 +1913,9 @@ function ensurePoller(opts, svc) {
     maxRetries: 3,
     onStatusUpdate: async (sessionId, status) => {
       if (!inFlight.has(sessionId)) return;
+      if (status.status === "complete" || status.status === "error" || status.status === "cancelled") {
+        return;
+      }
       try {
         await opts.client.reportSessionStatus(sessionId, {
           status: status.status === "queued" ? "dispatched" : "running",
@@ -1933,7 +1937,7 @@ function ensurePoller(opts, svc) {
           ...report.costUsd !== void 0 ? { costUsd: report.costUsd } : {},
           ...report.success ? {} : { errorMessage: report.error?.message ?? "Agent failed" }
         });
-        settle?.({ ok: true });
+        settle?.({ ok: report.success, error: report.error?.message, reported: true });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         log(`completion report failed: ${msg}`);
@@ -1949,7 +1953,7 @@ function ensurePoller(opts, svc) {
         });
       } catch {
       }
-      settle?.({ ok: false, error: error.message });
+      settle?.({ ok: false, error: error.message, reported: true });
     }
   });
   poller.start();
@@ -1987,19 +1991,25 @@ function createBridgeDispatchHandler(opts) {
       import_core3.orchestrator.getStatusPoller().trackSession(sessionId, response.orchestratorJobId ?? sessionId);
       const outcome = await settled;
       inFlight.delete(sessionId);
-      if (!outcome.ok) throw new Error(outcome.error ?? "Session failed");
+      if (!outcome.ok) {
+        const e = new Error(outcome.error ?? "Session failed");
+        e.alreadyReported = outcome.reported;
+        throw e;
+      }
       log(`${linearIdentifier} reported`);
     } catch (err) {
       inFlight.delete(sessionId);
       const reason = err instanceof Error ? err.message : String(err);
       log(`${linearIdentifier} failed: ${reason}`);
-      try {
-        await opts.client.reportSessionStatus(sessionId, {
-          status: "error",
-          progressPercent: 0,
-          message: reason
-        });
-      } catch {
+      if (!err?.alreadyReported) {
+        try {
+          await opts.client.reportSessionStatus(sessionId, {
+            status: "error",
+            progressPercent: 0,
+            message: reason
+          });
+        } catch {
+        }
       }
       throw new Error(reason);
     }
@@ -2011,7 +2021,7 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
   "--transport <transport>",
   "realtime | poll \u2014 polling is fully correct, just higher latency",
   process.env.DEVPILOT_BRIDGE_TRANSPORT || "realtime"
-).option("-j, --max-jobs <n>", "Max concurrent local jobs", "4").option("--http-url <url>", "Orchestrator URL (required for --mode http)").option("--ao-project <name>", "ao project name (for --mode ao-cli)").action(async (options) => {
+).option("-j, --max-jobs <n>", "Max concurrent local jobs", "4").option("--http-url <url>", "Orchestrator URL (required for --mode http)").option("--ao-project <name>", "ao project name (for --mode ao-cli)").option("--ao-path <path>", "Path to the ao binary (default: ao on PATH)").action(async (options) => {
   if (!options.url) {
     console.error(import_chalk7.default.red("\u2717 Bridge URL required (--url or DEVPILOT_BRIDGE_URL)"));
     process.exit(1);
@@ -2066,6 +2076,7 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
       orchestratorMode: options.mode,
       httpUrl: options.httpUrl,
       aoProjectName: options.aoProject,
+      aoPath: options.aoPath,
       onLog: (line) => console.log(import_chalk7.default.blue(`   ${line}`))
     }),
     onLog: (line) => console.log(import_chalk7.default.gray(`   ${line}`)),
