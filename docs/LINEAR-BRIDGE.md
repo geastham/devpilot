@@ -13,34 +13,34 @@ The Linear integration enables:
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                              LINEAR                                      │
-│  ┌─────────────────────────────────────────────────────────────────────┐│
-│  │  Issues ←→ Comments ←→ State Changes ←→ Assignments                 ││
-│  └─────────────────────────────────────────────────────────────────────┘│
-└──────────────────────────────┬──────────────────────────────────────────┘
-                               │ Webhooks
-                               ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│                    GCP CLOUD RUN - LINEAR BRIDGE                          │
-│  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │  Webhook Receiver → Signature Verify → Bot Check → Pub/Sub Dispatch│  │
-│  └────────────────────────────────────────────────────────────────────┘  │
-│                                                                           │
-│  ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐            │
-│  │   CloudSQL      │ │    Pub/Sub      │ │   BigQuery      │            │
-│  │  (PostgreSQL)   │ │ (Task Dispatch) │ │  (Analytics)    │            │
-│  └─────────────────┘ └────────┬────────┘ └─────────────────┘            │
-└───────────────────────────────┼──────────────────────────────────────────┘
-                                │ Pull Subscription
-                                ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│                         LOCAL DEVPILOT CLI                                │
-│  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │  Bridge Client ← Pub/Sub ← Task → Orchestrator → ao spawn          │  │
-│  └────────────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                              LINEAR                                  │
+└────────────────────────────────┬────────────────────────────────────┘
+                                 │ signed webhook (HMAC-SHA256, mandatory)
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│         HOSTED BRIDGE — Next.js on Vercel + Supabase Postgres        │
+│                                                                      │
+│  verify signature → route by repo → ONE TRANSACTION:                │
+│     dispatch_sessions + session_events + dispatch_queue             │
+│                                                                      │
+│  Realtime is a latency optimization. The GUARANTEE is the queue      │
+│  table: a client that reconnects sweeps for unclaimed rows.          │
+└────────────────────────────────┬────────────────────────────────────┘
+                                 │ claim = conditional UPDATE (the ack)
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    YOUR MACHINE — devpilot bridge connect            │
+│   local orchestrator runs the agent · reports status + completion    │
+│   The control plane never clones a repo and never sees source.       │
+└─────────────────────────────────────────────────────────────────────┘
 ```
+
+> **Superseded:** this previously described GCP Cloud Run + CloudSQL + Pub/Sub.
+> That design required every user's laptop to hold credentials into DevPilot's
+> GCP project, which is why it was never completed. See
+> `spec/trd/05-HOSTED-BRIDGE.md` §3.2 for the full rationale.
+
 
 ## Local Setup (Direct API)
 
@@ -180,23 +180,25 @@ linear:
 
 For production deployments with multiple orchestrators:
 
-### 1. Deploy Bridge Service
+### 1. Connect a Linear workspace
 
-The bridge package (`@devpilot.sh/bridge`) deploys to GCP Cloud Run:
+`packages/bridge` is gone — the bridge is a Next.js app deployed on Vercel
+(private repo `devpilot-website`), not a Cloud Run service.
 
-```bash
-cd packages/bridge
-gcloud run deploy devpilot-bridge \
-  --source . \
-  --region us-central1 \
-  --allow-unauthenticated
-```
+In the dashboard: **Settings → Linear → Connect a Linear workspace**. Supply your
+Linear API key, bot user id and organization id. The key is encrypted with
+AES-256-GCM before it is stored and is never readable again — not by the
+dashboard, not by any browser-facing route.
+
+You are shown a **signing secret exactly once**. Copy it.
 
 ### 2. Configure Linear Webhook
 
 Point your Linear workspace webhook to the bridge:
 ```
-URL: https://devpilot-bridge-xxx.run.app/api/webhooks/linear
+URL:    https://<your-devpilot-host>/api/webhooks/linear
+Secret: the signing secret shown when you connected the workspace
+Events: Issues
 ```
 
 ### 3. Connect Local Orchestrator

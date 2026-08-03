@@ -176,8 +176,8 @@ devpilot serve         # DevPilot server on port 3847
 <br>
 
 DevPilot dispatches through an orchestrator adapter. Point it at an agent runner with
-`@composio/ao-cli` — see **[docs/AO-INTEGRATION.md](docs/AO-INTEGRATION.md)** — and mirror
-horizon items into Linear tickets via the Cloud Run relay in
+a local orchestrator — see **[docs/AO-INTEGRATION.md](docs/AO-INTEGRATION.md)** — and mirror
+horizon items into Linear tickets via the hosted bridge in
 **[docs/LINEAR-BRIDGE.md](docs/LINEAR-BRIDGE.md)**. Copy `.env.example` to `.env` for API
 keys. Optional: [RTK](https://github.com/rtk-ai/rtk) proxies agent traffic for large token
 savings.
@@ -308,8 +308,8 @@ flowchart TD
 | [`@devpilot.sh/cli`](packages/cli) | `devpilot` command + Fastify server (`devpilot serve`) |
 | [`@devpilot.sh/ui`](packages/ui) | Shared component library |
 | [`@devpilot.sh/benchmarks`](packages/benchmarks) | `devpilot-bench` harness, scoring, trend analysis |
-| [`@devpilot.sh/bridge`](packages/bridge) | Cloud Run webhook relay for Linear |
-| [`@devpilot.sh/bridge-client`](packages/bridge-client) | Local orchestrator ↔ cloud bridge connection |
+| [`@devpilot.sh/bridge-protocol`](packages/bridge-protocol) | The bridge wire contract (MIT) — implement it to run your own bridge |
+| [`@devpilot.sh/bridge-client`](packages/bridge-client) | Connects a machine to a DevPilot bridge |
 
 Stack: TypeScript · Next.js 14 (App Router) · React 18 · Tailwind · Zustand · Drizzle ORM ·
 SQLite · Turborepo · Vitest · SSE for live fleet updates.
@@ -360,7 +360,7 @@ to contribute something that matters.
 | [docs/API-REFERENCE.md](docs/API-REFERENCE.md) | HTTP surface |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Current state and prioritized next work |
 | [docs/AO-INTEGRATION.md](docs/AO-INTEGRATION.md) | Wiring an agent orchestrator |
-| [docs/LINEAR-BRIDGE.md](docs/LINEAR-BRIDGE.md) | Linear sync via Cloud Run relay |
+| [docs/LINEAR-BRIDGE.md](docs/LINEAR-BRIDGE.md) | Linear sync via the hosted bridge |
 | [spec/DESIGN.md](spec/DESIGN.md) | The full TRD — mental model, data model, every surface |
 | [spec/WAVE-PLANNER.md](spec/WAVE-PLANNER.md) | Wave planning algorithm and phases |
 | [spec/BENCHMARK-SUITE.md](spec/BENCHMARK-SUITE.md) | Benchmark methodology and scoring |
