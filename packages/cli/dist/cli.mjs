@@ -631,8 +631,8 @@ async function registerFleetRoutes(app) {
       estimatedRemainingMinutes: estimatedMinutes,
       inFlightFiles: filePaths
     }).returning();
-    const orchestrator = getOrchestratorServiceOrNull();
-    if (orchestrator && orchestrator.isEnabled) {
+    const orchestrator2 = getOrchestratorServiceOrNull();
+    if (orchestrator2 && orchestrator2.isEnabled) {
       const dispatchRequest = buildDispatchRequest({
         sessionId: session.id,
         repo: item.repo,
@@ -645,7 +645,7 @@ async function registerFleetRoutes(app) {
         // Will use the one from orchestrator config
         estimatedMinutes
       });
-      const dispatchResult = await orchestrator.dispatch(dispatchRequest);
+      const dispatchResult = await orchestrator2.dispatch(dispatchRequest);
       if (dispatchResult.accepted && dispatchResult.orchestratorJobId) {
         await db2.update(rufloSessions).set({
           externalSessionId: dispatchResult.orchestratorJobId,
@@ -1040,12 +1040,12 @@ async function createServer(options) {
       callbackToken: options.orchestrator.callbackToken,
       callbackUrl: `http://127.0.0.1:${options.port}/api/orchestrator`
     };
-    const orchestrator = initOrchestratorService(orchestratorConfig);
-    initStatusPoller(orchestrator, {
+    const orchestrator2 = initOrchestratorService(orchestratorConfig);
+    initStatusPoller(orchestrator2, {
       pollIntervalMs: 5e3,
       ...createDbStatusPollerCallbacks()
     });
-    initExecutionBridge(orchestrator, {
+    initExecutionBridge(orchestrator2, {
       execution: waveExecutionConfigFromEnv(options.port)
     }).start();
     console.log(`Orchestrator initialized in ${options.orchestrator.mode} mode`);
@@ -1102,7 +1102,7 @@ var serveCommand = new Command2("serve").description("Start the local DevPilot C
 ).option("--session-api-url <url>", "claude-session dispatcher base URL").option("--session-api-key <key>", "claude-session dispatcher bearer token").option("--ao-project <name>", "ao-cli project name").option("--ao-path <path>", "Path to the ao binary").option("--orchestrator-url <url>", "Remote orchestrator base URL (http mode)").action(async (options) => {
   const port = parseInt(options.port, 10);
   const orchestratorMode = options.orchestratorMode || process.env.DEVPILOT_ORCHESTRATOR_MODE;
-  const orchestrator = orchestratorMode ? {
+  const orchestrator2 = orchestratorMode ? {
     mode: orchestratorMode,
     sessionApiUrl: options.sessionApiUrl || process.env.DEVPILOT_SESSION_API_URL,
     sessionApiKey: options.sessionApiKey || process.env.DEVPILOT_SESSION_API_KEY,
@@ -1129,7 +1129,7 @@ var serveCommand = new Command2("serve").description("Start the local DevPilot C
     const { url, close } = await startServer({
       port,
       dbPath,
-      orchestrator
+      orchestrator: orchestrator2
     });
     console.log(chalk2.green("\u2713 Server started successfully"));
     console.log("");
@@ -1876,74 +1876,237 @@ async function configureOrchestrator(cwd, configPath, nonInteractive = false) {
 import { Command as Command9 } from "commander";
 
 // src/commands/bridge/connect.ts
+import os from "os";
 import { Command as Command6 } from "commander";
 import chalk7 from "chalk";
-import { BridgeClient, HeartbeatService, PubSubSubscriber } from "@devpilot.sh/bridge-client";
-var connectCommand = new Command6("connect").description("Connect to DevPilot cloud bridge").option("-u, --bridge-url <url>", "Bridge service URL", process.env.DEVPILOT_BRIDGE_URL).option("-k, --api-key <key>", "API key for authentication", process.env.DEVPILOT_BRIDGE_API_KEY).option("-r, --repos <repos>", "Comma-separated list of repos to handle").option("-p, --project <project>", "GCP project ID for Pub/Sub", process.env.GCP_PROJECT_ID).action(async (options) => {
-  if (!options.bridgeUrl) {
-    console.error(chalk7.red("\u2717 Error: Bridge URL is required (--bridge-url or DEVPILOT_BRIDGE_URL)"));
-    process.exit(1);
-  }
-  console.log(chalk7.cyan("\u{1F309} Connecting to DevPilot Bridge"));
-  console.log("");
-  console.log(chalk7.gray(`   Bridge URL: ${options.bridgeUrl}`));
-  console.log("");
-  const client = new BridgeClient({
-    bridgeUrl: options.bridgeUrl,
-    apiKey: options.apiKey || "",
-    gcpProjectId: options.project
+import { BridgeClient, DispatchLoop, HeartbeatService } from "@devpilot.sh/bridge-client";
+
+// src/commands/bridge/dispatch-handler.ts
+import { orchestrator } from "@devpilot.sh/core";
+var inFlight = /* @__PURE__ */ new Map();
+function service(opts) {
+  const existing = orchestrator.getOrchestratorServiceOrNull();
+  if (existing) return existing;
+  return orchestrator.initOrchestratorService({
+    mode: opts.orchestratorMode,
+    url: opts.httpUrl,
+    apiKey: opts.apiKey,
+    callbackUrl: opts.callbackUrl,
+    aoProjectName: opts.aoProjectName,
+    aoPath: opts.aoPath,
+    pollIntervalMs: opts.pollIntervalMs
   });
-  try {
-    const repos = options.repos?.split(",").map((r) => r.trim()) || [];
-    const result = await client.register({
-      repos,
-      maxConcurrentJobs: 4
-    });
-    console.log(chalk7.green("\u2713 Registered with bridge"));
-    console.log(chalk7.gray(`   Orchestrator ID: ${result.orchestratorId}`));
-    console.log(chalk7.gray(`   Repos: ${repos.join(", ") || "None specified"}`));
-    console.log("");
-    const heartbeat = new HeartbeatService({
-      bridgeUrl: options.bridgeUrl,
-      apiKey: options.apiKey || "",
-      orchestratorId: result.orchestratorId,
-      intervalMs: 3e4
-    });
-    heartbeat.start();
-    console.log(chalk7.green("\u2713 Heartbeat service started"));
-    console.log("");
-    if (options.project) {
-      const subscriber = new PubSubSubscriber({
-        projectId: options.project,
-        subscriptionName: `devpilot-dispatch-${result.orchestratorId}`,
-        onMessage: async (message) => {
-          console.log(chalk7.blue(`\u{1F4E8} Received dispatch: ${message.linearIdentifier} - ${message.title}`));
-        }
-      });
-      await subscriber.start();
-      console.log(chalk7.green("\u2713 Pub/Sub subscriber started"));
-      console.log("");
+}
+function ensurePoller(opts, svc) {
+  if (orchestrator.isStatusPollerInitialized()) return;
+  const log = opts.onLog ?? (() => {
+  });
+  const poller = orchestrator.initStatusPoller(svc, {
+    pollIntervalMs: opts.pollIntervalMs ?? 2e3,
+    maxRetries: 3,
+    onStatusUpdate: async (sessionId, status) => {
+      if (!inFlight.has(sessionId)) return;
+      if (status.status === "complete" || status.status === "error" || status.status === "cancelled") {
+        return;
+      }
+      try {
+        await opts.client.reportSessionStatus(sessionId, {
+          status: status.status === "queued" ? "dispatched" : "running",
+          progressPercent: Math.max(0, Math.min(100, status.progressPercent ?? 0)),
+          message: status.message ?? status.currentStep
+        });
+      } catch (e) {
+        log(`status report failed: ${e instanceof Error ? e.message : e}`);
+      }
+    },
+    onComplete: async (sessionId, report) => {
+      const settle = inFlight.get(sessionId);
+      try {
+        await opts.client.reportSessionComplete(sessionId, {
+          success: report.success,
+          ...report.prUrl ? { prUrl: report.prUrl } : {},
+          ...report.summary ? { summary: report.summary } : {},
+          ...report.tokensUsed !== void 0 ? { tokensUsed: report.tokensUsed } : {},
+          ...report.costUsd !== void 0 ? { costUsd: report.costUsd } : {},
+          ...report.success ? {} : { errorMessage: report.error?.message ?? "Agent failed" }
+        });
+        settle?.({ ok: report.success, error: report.error?.message, reported: true });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        log(`completion report failed: ${msg}`);
+        settle?.({ ok: false, error: msg });
+      }
+    },
+    onError: async (sessionId, error) => {
+      const settle = inFlight.get(sessionId);
+      try {
+        await opts.client.reportSessionComplete(sessionId, {
+          success: false,
+          errorMessage: error.message
+        });
+      } catch {
+      }
+      settle?.({ ok: false, error: error.message, reported: true });
     }
-    console.log(chalk7.cyan("Connected to bridge. Press Ctrl+C to disconnect."));
-    console.log("");
-    process.on("SIGINT", () => {
-      console.log("");
-      console.log(chalk7.yellow("Disconnecting from bridge..."));
-      heartbeat.stop();
-      console.log(chalk7.green("\u2713 Disconnected"));
-      process.exit(0);
-    });
-    process.on("SIGTERM", () => {
-      heartbeat.stop();
-      process.exit(0);
-    });
-    await new Promise(() => {
-    });
-  } catch (error) {
-    console.error(chalk7.red("\u2717 Failed to connect:"));
-    console.error(chalk7.red(`   ${error instanceof Error ? error.message : error}`));
+  });
+  poller.start();
+}
+function createBridgeDispatchHandler(opts) {
+  const log = opts.onLog ?? (() => {
+  });
+  return async function handle(message) {
+    const { sessionId, linearIdentifier, title, repo } = message;
+    log(`${linearIdentifier} \u2192 ${repo}: ${title}`);
+    try {
+      const svc = service(opts);
+      ensurePoller(opts, svc);
+      const request = orchestrator.buildDispatchRequest({
+        sessionId,
+        repo,
+        title,
+        filePaths: [],
+        linearTicketId: linearIdentifier,
+        callbackUrl: opts.callbackUrl ?? ""
+      });
+      const settled = new Promise((resolve) => {
+        inFlight.set(sessionId, resolve);
+      });
+      const response = await svc.dispatch(request);
+      if (!response.accepted) {
+        inFlight.delete(sessionId);
+        throw new Error(response.error ?? "Orchestrator rejected the dispatch");
+      }
+      await opts.client.reportSessionStatus(sessionId, {
+        status: "dispatched",
+        progressPercent: 0,
+        message: `Dispatched to local orchestrator (${opts.orchestratorMode})`
+      });
+      orchestrator.getStatusPoller().trackSession(sessionId, response.orchestratorJobId ?? sessionId);
+      const outcome = await settled;
+      inFlight.delete(sessionId);
+      if (!outcome.ok) {
+        const e = new Error(outcome.error ?? "Session failed");
+        e.alreadyReported = outcome.reported;
+        throw e;
+      }
+      log(`${linearIdentifier} reported`);
+    } catch (err) {
+      inFlight.delete(sessionId);
+      const reason = err instanceof Error ? err.message : String(err);
+      log(`${linearIdentifier} failed: ${reason}`);
+      if (!err?.alreadyReported) {
+        try {
+          await opts.client.reportSessionStatus(sessionId, {
+            status: "error",
+            progressPercent: 0,
+            message: reason
+          });
+        } catch {
+        }
+      }
+      throw new Error(reason);
+    }
+  };
+}
+
+// src/commands/bridge/connect.ts
+var connectCommand = new Command6("connect").description("Connect this machine to a DevPilot bridge and run dispatched work locally").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-n, --name <name>", "Name for this machine", os.hostname()).option("-r, --repos <repos>", "Comma-separated repos this machine handles").option("-m, --mode <mode>", "Local orchestrator mode (http|claude-session)", "http").option(
+  "--transport <transport>",
+  "realtime | poll \u2014 polling is fully correct, just higher latency",
+  process.env.DEVPILOT_BRIDGE_TRANSPORT || "realtime"
+).option("-j, --max-jobs <n>", "Max concurrent local jobs", "4").option("--http-url <url>", "Orchestrator URL (required for --mode http)").option("--ao-project <name>", "ao project name (for --mode ao-cli)").option("--ao-path <path>", "Path to the ao binary (default: ao on PATH)").action(async (options) => {
+  if (!options.url) {
+    console.error(chalk7.red("\u2717 Bridge URL required (--url or DEVPILOT_BRIDGE_URL)"));
     process.exit(1);
   }
+  if (!options.token) {
+    console.error(chalk7.red("\u2717 Token required (--token or DEVPILOT_BRIDGE_TOKEN)"));
+    console.error(chalk7.gray("  Mint one in the dashboard under Settings \u2192 Tokens."));
+    process.exit(1);
+  }
+  const repos = options.repos?.split(",").map((r) => r.trim()).filter(Boolean) ?? [];
+  const maxConcurrentJobs = Math.max(1, parseInt(options.maxJobs, 10) || 4);
+  console.log(chalk7.cyan("\u{1F309} DevPilot bridge"));
+  console.log(chalk7.gray(`   ${options.url}`));
+  console.log(chalk7.gray(`   machine: ${options.name}`));
+  console.log("");
+  if (options.mode === "ao-cli") {
+    console.error(chalk7.red("\u2717 --mode ao-cli is deprecated and non-functional."));
+    console.error(chalk7.gray("  `ao` is now a daemon on 127.0.0.1:3001; point http mode at it:"));
+    console.error(chalk7.gray("    devpilot bridge connect --mode http --http-url http://127.0.0.1:3001"));
+    process.exit(1);
+  }
+  if (options.mode === "http" && !options.httpUrl) {
+    console.error(chalk7.red("\u2717 --mode http requires --http-url"));
+    console.error(chalk7.gray("  For the ao daemon: --http-url http://127.0.0.1:3001"));
+    process.exit(1);
+  }
+  const client = new BridgeClient({ bridgeUrl: options.url, token: options.token });
+  let registration;
+  try {
+    registration = await client.register({ name: options.name, repos, maxConcurrentJobs });
+  } catch (err) {
+    console.error(chalk7.red("\u2717 Registration failed"));
+    console.error(chalk7.red(`   ${err instanceof Error ? err.message : err}`));
+    process.exit(1);
+  }
+  console.log(chalk7.green("\u2713 Registered"));
+  console.log(chalk7.gray(`   orchestrator: ${registration.orchestratorId}`));
+  console.log(chalk7.gray(`   repos: ${repos.join(", ") || "(none)"}`));
+  if (repos.length === 0) {
+    console.log(chalk7.yellow("   \u26A0 No repos specified \u2014 nothing can route to this machine."));
+    console.log(chalk7.gray("     Re-run with --repos owner/name to receive dispatches."));
+  }
+  console.log("");
+  const useRealtime = options.transport !== "poll" && registration.realtime !== null;
+  if (options.transport !== "poll" && !registration.realtime) {
+    console.log(chalk7.yellow("   Realtime unavailable from this bridge \u2014 polling instead."));
+  }
+  const loop = new DispatchLoop({
+    client,
+    orchestratorId: registration.orchestratorId,
+    realtime: useRealtime && registration.realtime ? {
+      supabaseUrl: registration.realtime.supabaseUrl,
+      anonKey: registration.realtime.anonKey,
+      jwt: registration.realtime.jwt
+    } : null,
+    maxConcurrent: maxConcurrentJobs,
+    handler: createBridgeDispatchHandler({
+      client,
+      orchestratorMode: options.mode,
+      httpUrl: options.httpUrl,
+      aoProjectName: options.aoProject,
+      aoPath: options.aoPath,
+      onLog: (line) => console.log(chalk7.blue(`   ${line}`))
+    }),
+    onLog: (line) => console.log(chalk7.gray(`   ${line}`)),
+    onError: (e) => console.log(chalk7.yellow(`   ${e.message}`))
+  });
+  const heartbeat = new HeartbeatService({
+    client,
+    activeJobs: () => loop.activeJobs,
+    onError: (e) => console.log(chalk7.gray(`   heartbeat: ${e.message}`))
+  });
+  await loop.start();
+  heartbeat.start();
+  console.log(chalk7.green(`\u2713 Listening (${useRealtime ? "realtime" : "poll"})`));
+  console.log(chalk7.gray("   Agents run on THIS machine. Ctrl+C to disconnect."));
+  console.log("");
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log("");
+    console.log(chalk7.yellow("Disconnecting\u2026"));
+    heartbeat.stop();
+    await loop.stop();
+    console.log(chalk7.green("\u2713 Disconnected"));
+    process.exit(0);
+  };
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
+  await new Promise(() => {
+  });
 });
 
 // src/commands/bridge/disconnect.ts

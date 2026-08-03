@@ -67,7 +67,15 @@ describe('DevPilot Server E2E', () => {
       const response = await fetch(`http://127.0.0.1:${testPort}/api/score`);
       const data = await response.json();
       expect(response.status).toBe(200);
-      expect(data).toHaveProperty('score');
+      // The route has always returned { total, max, percent, ... } — and so does
+      // the Next app's independent implementation at src/app/api/score/route.ts.
+      // The old assertion looked for a `score` property that neither produces;
+      // it never ran, because packages/cli had no test script and CI wrapped the
+      // whole suite in `|| true`.
+      expect(data).toHaveProperty('total');
+      expect(data).toHaveProperty('max', 1000);
+      expect(data).toHaveProperty('percent');
+      expect(data.percent).toBe(Math.round((data.total / 1000) * 100));
     });
   });
 });

@@ -4811,6 +4811,28 @@ var OrchestratorClient = class {
     return response.json();
   }
   /**
+   * Fetch the completion report for a finished job.
+   *
+   * The ao-cli and claude-session adapters both implement this; the HTTP
+   * adapter did not, and `OrchestratorAdapter.getCompletionReport` is optional —
+   * so StatusPoller.handleCompletion received null and NEVER invoked its
+   * onComplete callback. In practice that meant an http-mode job could run to
+   * completion locally and the host would never be told: the session sat at its
+   * last polled status forever.
+   *
+   * Returns null (rather than throwing) when the job is unknown or not yet
+   * finished, which is what the poller expects.
+   */
+  async getCompletionReport(externalJobId) {
+    const response = await this.fetch(`/jobs/${encodeURIComponent(externalJobId)}/result`);
+    if (!response.ok) return null;
+    try {
+      return await response.json();
+    } catch {
+      return null;
+    }
+  }
+  /**
    * Cancel a running job
    */
   async cancel(sessionId) {
@@ -4955,6 +4977,9 @@ var AoCliAdapter = class {
     this.mode = "ao-cli";
     this.config = config;
     this.aoPath = config.aoPath || "ao";
+    throw new Error(
+      "The ao-cli orchestrator mode is deprecated and non-functional.\n\n  `ao` no longer exposes the commands this adapter calls (`ao list`,\n  `ao status <id>`), and `ao spawn` no longer accepts a prompt.\n\n  Use --mode http against the ao daemon instead:\n    devpilot bridge connect --mode http --http-url http://127.0.0.1:3001\n\n  See docs/AO-INTEGRATION.md for the current integration path."
+    );
     this.projectName = config.aoProjectName || "default";
     this.workingDirectory = config.workingDirectory;
   }
@@ -5601,6 +5626,19 @@ var HttpAdapter = class {
   async dispatch(request) {
     return this.client.dispatch(request);
   }
+  /**
+   * Forwarded so http mode can actually finish.
+   *
+   * IOrchestratorAdapter.getCompletionReport is OPTIONAL, and this adapter did
+   * not implement it — so OrchestratorService.getCompletionReport always
+   * returned null for http mode, StatusPoller.handleCompletion never invoked
+   * onComplete, and a job that finished locally was never reported to the host.
+   * The ao-cli and claude-session adapters both implement it; this was the odd
+   * one out.
+   */
+  async getCompletionReport(externalJobId) {
+    return this.client.getCompletionReport(externalJobId);
+  }
   async getJobStatus(externalJobId) {
     const status = await this.client.getJobStatus(externalJobId);
     return {
@@ -5958,6 +5996,7 @@ var StatusPoller = class {
   constructor(orchestrator, config = {}) {
     this.trackedSessions = /* @__PURE__ */ new Map();
     this.pollInterval = null;
+    this.isPolling = false;
     this.isRunning = false;
     this.orchestrator = orchestrator;
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -6029,6 +6068,15 @@ var StatusPoller = class {
    * Poll all tracked sessions for status
    */
   async poll() {
+    if (this.isPolling) return;
+    this.isPolling = true;
+    try {
+      await this.pollOnce();
+    } finally {
+      this.isPolling = false;
+    }
+  }
+  async pollOnce() {
     const sessions = Array.from(this.trackedSessions.values());
     if (sessions.length === 0) return;
     await Promise.all(
@@ -6803,6 +6851,7 @@ function verifyLinearWebhookSignature(payload, signature, secret) {
 }
 
 // src/integrations/linear/sync.ts
+var import_bridge_protocol = require("@devpilot.sh/bridge-protocol");
 async function syncSessionToLinear(input) {
   if (!isLinearConfigured()) {
     return { success: false, error: "Linear not configured" };
@@ -6833,7 +6882,7 @@ async function syncProgressToLinear(input) {
   }
   try {
     const client = getLinearClient();
-    const progressMessage = buildProgressComment(input);
+    const progressMessage = (0, import_bridge_protocol.buildProgressComment)(input);
     await client.addComment(input.linearTicketId, progressMessage);
     if (input.status === "complete") {
       await client.moveIssueToState(input.linearTicketId, "In Review");
@@ -6852,7 +6901,7 @@ async function syncCompletionToLinear(input) {
   }
   try {
     const client = getLinearClient();
-    const completionMessage = buildCompletionComment(input);
+    const completionMessage = (0, import_bridge_protocol.buildCompletionComment)(input);
     await client.addComment(input.linearTicketId, completionMessage);
     const targetState = input.success ? "Done" : "Blocked";
     await client.moveIssueToState(input.linearTicketId, targetState);
@@ -6920,54 +6969,6 @@ function buildSessionDescription(input) {
     lines.push(`**Plan:** [View Plan](${input.planUrl})`);
   }
   lines.push("", "---", "*This ticket was created by DevPilot*");
-  return lines.join("\n");
-}
-function buildProgressComment(input) {
-  const statusEmoji = {
-    running: ":hourglass:",
-    waiting: ":pause_button:",
-    complete: ":white_check_mark:",
-    error: ":x:"
-  }[input.status];
-  const lines = [
-    `${statusEmoji} **Progress Update: ${input.progressPercent}%**`,
-    ""
-  ];
-  if (input.currentWorkstream) {
-    lines.push(`Working on: ${input.currentWorkstream}`);
-  }
-  if (input.message) {
-    lines.push("", input.message);
-  }
-  if (input.filesModified && input.filesModified.length > 0) {
-    lines.push("", "**Files modified:**");
-    input.filesModified.slice(0, 5).forEach((f) => lines.push(`- \`${f}\``));
-    if (input.filesModified.length > 5) {
-      lines.push(`- ... and ${input.filesModified.length - 5} more`);
-    }
-  }
-  return lines.join("\n");
-}
-function buildCompletionComment(input) {
-  const emoji = input.success ? ":rocket:" : ":warning:";
-  const status = input.success ? "Completed Successfully" : "Failed";
-  const lines = [
-    `${emoji} **Session ${status}**`,
-    ""
-  ];
-  if (input.prUrl) {
-    lines.push(`**Pull Request:** [View PR](${input.prUrl})`);
-  }
-  if (input.completionMessage) {
-    lines.push("", input.completionMessage);
-  }
-  if (input.filesModified.length > 0) {
-    lines.push("", "**Files modified:**");
-    input.filesModified.slice(0, 10).forEach((f) => lines.push(`- \`${f}\``));
-    if (input.filesModified.length > 10) {
-      lines.push(`- ... and ${input.filesModified.length - 10} more`);
-    }
-  }
   return lines.join("\n");
 }
 

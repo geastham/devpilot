@@ -1,54 +1,25 @@
-export interface TaskDispatchMessage {
-  linearIssueId: string;
-  linearIdentifier: string;
-  title: string;
-  description?: string;
-  teamId: string;
-  priority?: number;
-  labels?: string[];
-  repo: string;
-  workspaceId: string;
-}
+/**
+ * REMOVED in 0.2.0.
+ *
+ * The Pub/Sub transport required every user's laptop to authenticate into
+ * DevPilot's GCP project to pull a subscription, which is why the pipeline was
+ * never completed. It is replaced by a durable queue table plus Supabase
+ * Realtime (see RealtimeSubscriber and DispatchLoop).
+ *
+ * This shim exists so an old install fails with an actionable message rather
+ * than an opaque GCP credentials error. It will be deleted in 0.3.0.
+ */
+const REMOVED =
+  '@devpilot.sh/bridge-client: the Pub/Sub transport was removed in 0.2.0. ' +
+  'Upgrade the DevPilot CLI (npm i -g @devpilot.sh/cli) and use `devpilot bridge connect`. ' +
+  'GCP credentials are no longer required.';
 
-export interface PubSubSubscriberConfig {
-  projectId: string;
-  subscriptionName: string;
-  onMessage: (message: TaskDispatchMessage) => Promise<void>;
-}
-
+/** @deprecated Removed in 0.2.0. Use RealtimeSubscriber. */
 export class PubSubSubscriber {
-  private config: PubSubSubscriberConfig;
-  private isRunning = false;
-
-  constructor(config: PubSubSubscriberConfig) {
-    this.config = config;
-  }
-
-  async start(): Promise<void> {
-    // Dynamic import to avoid requiring @google-cloud/pubsub when not using cloud features
-    const { PubSub } = await import('@google-cloud/pubsub');
-    const pubsub = new PubSub({ projectId: this.config.projectId });
-    const subscription = pubsub.subscription(this.config.subscriptionName);
-
-    this.isRunning = true;
-
-    subscription.on('message', async (message) => {
-      try {
-        const data = JSON.parse(message.data.toString()) as TaskDispatchMessage;
-        await this.config.onMessage(data);
-        message.ack();
-      } catch (error) {
-        console.error('Error processing message:', error);
-        message.nack();
-      }
-    });
-
-    subscription.on('error', (error) => {
-      console.error('Subscription error:', error);
-    });
-  }
-
-  stop(): void {
-    this.isRunning = false;
+  constructor() {
+    throw new Error(REMOVED);
   }
 }
+
+/** @deprecated The message type now lives in @devpilot.sh/bridge-protocol. */
+export type { TaskDispatchMessage } from '@devpilot.sh/bridge-protocol';

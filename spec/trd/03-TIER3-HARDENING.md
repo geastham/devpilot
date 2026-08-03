@@ -1,6 +1,30 @@
 # TRD 03 — Tier 3: Hardening & Truth-Telling
 ## Bridge Pipeline · Linear Config Persistence & Webhook Verification · Real `devpilot status` · Measured Runway · Repo Hygiene
-### v1.0 · July 2026 · Status: DRAFT
+### v1.1 · July 2026 · Status: DRAFT — PARTIALLY SUPERSEDED
+
+> ## ⚠ Supersession notice (August 2026)
+>
+> The **bridge half** of this TRD is superseded by `05-HOSTED-BRIDGE.md`, which
+> re-targets it from GCP (Cloud Run + CloudSQL + Pub/Sub) to Supabase + a
+> Vercel-hosted API in the `devpilot-website` repo. The Postgres schema
+> foundation moves to `04-HOSTED-ACCOUNTS.md`.
+>
+> | Section | Status |
+> |---|---|
+> | §3.1 Bridge pipeline | **Superseded** → 05 §3.1 |
+> | §4.3 Bridge (Postgres) — no schema change | **Superseded** → 04 §4.1-4.2 (there *is* a schema change) |
+> | §4.4 Unified `TaskDispatchMessage` | **Superseded** → 05 §4.3 (+`queueId`, `+orgId`); the "duplicate the type" instruction is **withdrawn** → 05 §6.1 |
+> | §6.3 Pub/Sub extensions | **Superseded** → 05 §6.4 (Pub/Sub is removed entirely) |
+> | §6.4 Bridge crypto + Linear services | **Adopted** by 05 §6.2-6.3, relocated to `devpilot-website/lib/bridge/` |
+> | §6.5 Bridge-client + CLI handler | **Superseded** → 05 §6.5-6.6 |
+> | §7 rows `GCP_PROJECT_ID`, `PUBSUB_TOPIC_DISPATCH` | **Removed** → 05 §7 |
+> | §10 T3-AC-01 … T3-AC-04 | **Superseded** → 05 §10 T5-AC-01…05 |
+> | §11 tasks T3-W1-T5, T3-W1-T6, T3-W2-T5, T3-W2-T6, T3-W2-T7, T3-W2-T8, T3-W4-T2 | **Superseded** → 05 §11 |
+>
+> **Everything else in this TRD stands unchanged and should still be
+> implemented:** §3.2 (Linear config persistence), §3.3 (measured runway), §4.1-4.2
+> (`integrationConfigs` + SQLite DDL), §5.1-5.4, §5.6, §6.1-6.2, §6.6-6.7, and
+> Waves 3–4 hygiene. Item 10 (bridge middle hop) is now delivered by TRD 05.
 
 > **Depends on:** partially independent of Tier 1/2.
 >
@@ -53,9 +77,11 @@ Tier 3 is about making DevPilot stop lying:
 ### 1.2 Goals
 
 1. **Bridge middle hop** — full pipeline: Linear webhook → signature verify →
-   Pub/Sub publish (per-orchestrator subscription) → `bridge-client`
-   subscription → local `OrchestratorService` dispatch → status/complete
-   reported back to the bridge → Linear issue commented and moved.
+   dispatch enqueued → `bridge-client` receives → local `OrchestratorService`
+   dispatch → status/complete reported back to the bridge → Linear issue
+   commented and moved.
+   *(Goal unchanged; the transport is now a `dispatch_queue` table + Supabase
+   Realtime rather than Pub/Sub — see `05-HOSTED-BRIDGE.md` §3.1-3.2.)*
 2. **Persist Linear config** — DB-backed `integrationConfigs` table in core;
    Next connect/webhook routes read/write it; singleton re-hydrates from DB on
    cold start; webhook signature verification enforced.
@@ -76,8 +102,11 @@ Tier 3 is about making DevPilot stop lying:
   `.devpilot/config.yaml`, which already stores the key in plaintext
   (`packages/cli/src/commands/config.ts:31`). Accepted risk, documented. (The
   **bridge** side is multi-tenant cloud and DOES encrypt — §6.4.)
-- A message-broker abstraction. GCP Pub/Sub stays the one transport
-  (`@google-cloud/pubsub` is already the dependency on both sides).
+- ~~A message-broker abstraction. GCP Pub/Sub stays the one transport~~
+  **Reversed by `05-HOSTED-BRIDGE.md` §3.2:** GCP is removed entirely.
+  `@google-cloud/pubsub` is dropped from both sides. The transport seam now sits
+  behind `/api/dispatch/*` and `@devpilot.sh/bridge-protocol`, deliberately, so a
+  future broker swap does not change the client contract.
 - Bridge-side wave planning. The bridge dispatches one session per Linear
   issue; wave execution remains local (WAVE-PLANNER non-goal).
 - Replacing the CLI Fastify server or consolidating the two half-servers
@@ -121,6 +150,13 @@ Tier 3 is about making DevPilot stop lying:
 ## 3. Architecture
 
 ### 3.1 Bridge pipeline (item 10)
+
+> **⚠ SUPERSEDED by `05-HOSTED-BRIDGE.md` §3.1.** The pipeline below targets GCP
+> Cloud Run + Pub/Sub and requires distributing GCP service-account credentials
+> to every user's laptop — the reason it was never completed. TRD 05 replaces the
+> Pub/Sub hop with a transactional `dispatch_queue` table + Supabase Realtime,
+> and relocates the API to Next route handlers in `devpilot-website`. Retained
+> here for provenance; **do not implement.**
 
 ```
 Linear cloud                         DevPilot Bridge (GCP, Fastify, Postgres)
@@ -269,12 +305,24 @@ so the file converges identically either way.)
 
 ### 4.3 Bridge (Postgres) — no schema change
 
+> **⚠ SUPERSEDED by `04-HOSTED-ACCOUNTS.md` §4.1-4.2.** There *is* a schema
+> change: hosted accounts introduce `users`, `organizations`, `memberships`, and
+> `orchestrator_tokens`; `workspaces` and `orchestrators` gain `org_id`; the
+> unread `api_keys` table is dropped. **Do not implement this section.**
+
 `workspaces.apiKeyEncrypted` and `webhookSecret` already exist
 (`packages/bridge/src/db/schema/workspaces.ts:10-11`). `dispatchSessions`
 already carries everything the pipeline needs. The unified
 `TaskDispatchMessage` (below) is a type change, not a schema change.
 
 ### 4.4 Unified `TaskDispatchMessage`
+
+> **⚠ SUPERSEDED by `05-HOSTED-BRIDGE.md` §4.3 and §6.1.** The message shape is
+> extended with `queueId` and `orgId`. More importantly, **the instruction below
+> to duplicate the type across the two packages is withdrawn** — that duplication
+> is the direct cause of the register-400 and missing-`sessionId` defects. The
+> type now has exactly one definition, in the published
+> `@devpilot.sh/bridge-protocol` package. **Do not implement this section.**
 
 Single source of truth in `packages/bridge/src/services/pubsub/types.ts`;
 `packages/bridge-client/src/pubsub.ts` mirrors it exactly (bridge-client cannot
@@ -366,6 +414,13 @@ most recent `updatedAt` across both. Empty DB → `{ repos: [] }` (no seeded
 fakes).
 
 ### 5.5 Bridge routes (same paths, changed behavior)
+
+> **⚠ SUPERSEDED by `05-HOSTED-BRIDGE.md` §5.1-5.3.** The mandatory-signature
+> requirement and the `no_orchestrator` path below are **carried forward**; the
+> `ensureOrchestratorSubscription` call is dropped (no Pub/Sub), and every route
+> gains an authentication guard — the omission of which is the most severe
+> finding in the whole bridge. Routes move to Next handlers in
+> `devpilot-website/app/api/`. **Do not implement this section.**
 
 - `POST /api/webhooks/linear` — signature now **mandatory** (§3.1 step 1;
   `workspaces.webhookSecret` is `notNull`, so absence of the header is a 401 —
@@ -471,6 +526,10 @@ export async function ensureLinearClientFromDb(db: Database): Promise<DevPilotLi
 
 ### 6.3 Bridge Pub/Sub extensions — `packages/bridge/src/services/pubsub/service.ts`
 
+> **⚠ SUPERSEDED by `05-HOSTED-BRIDGE.md` §6.4.** Pub/Sub is removed entirely;
+> `packages/bridge/` is deleted. Subscription management is replaced by a
+> `dispatch_queue` RLS policy. **Do not implement this section.**
+
 ```typescript
 export function getPubSubServiceOrNull(): PubSubService | null;   // no-throw accessor
 export class PubSubService {
@@ -487,6 +546,13 @@ export class PubSubService {
 `types.ts`: unified `TaskDispatchMessage` (§4.4).
 
 ### 6.4 Bridge Linear + crypto services (new)
+
+> **✅ ADOPTED, RELOCATED.** `05-HOSTED-BRIDGE.md` §6.2-6.3 keeps these
+> specifications essentially verbatim — they were correct, only unimplemented —
+> but the files move to `devpilot-website/lib/bridge/{crypto,linear}.ts`. Two
+> changes: `webhookSecret` also goes behind `encryptSecret` (no reason to leave it
+> plaintext once the primitive exists), and the Linear comment formatters are
+> **imported from `@devpilot.sh/bridge-protocol` rather than copied**.
 
 `packages/bridge/src/services/crypto.ts`:
 
@@ -521,6 +587,13 @@ Comment bodies reuse the formats of
 `packages/core/src/integrations/linear/sync.ts:266-292` (copied, cited).
 
 ### 6.5 Bridge-client + CLI dispatch handler
+
+> **⚠ SUPERSEDED by `05-HOSTED-BRIDGE.md` §6.5-6.6.** The `register` fix below is
+> correct and carried forward, but `PubSubSubscriber` is replaced by
+> `RealtimeSubscriber` + `DispatchLoop`, and the handler's error path changes: a
+> throw under Pub/Sub meant nack-and-redeliver, whereas here it would strand a
+> claimed queue row, so errors must *report and release*. Ships as
+> `@devpilot.sh/bridge-client@0.2.0`. **Do not implement this section.**
 
 `packages/bridge-client/src/client.ts` — fix register to match the bridge
 contract (`orchestrators/routes.ts:33-36`):
@@ -607,8 +680,8 @@ result line.
 | Env var / key | Default | Used by |
 |---|---|---|
 | `BRIDGE_ENCRYPTION_KEY` | — (Linear sync skipped with a logged warning when unset) | bridge crypto (§6.4) |
-| `GCP_PROJECT_ID` | — (Pub/Sub features disabled) | bridge + `devpilot bridge connect` (existing) |
-| `PUBSUB_TOPIC_DISPATCH` | `devpilot-task-dispatch` | bridge (existing, `config.ts:8`) |
+| ~~`GCP_PROJECT_ID`~~ | **REMOVED** → TRD 05 §7 | — |
+| ~~`PUBSUB_TOPIC_DISPATCH`~~ | **REMOVED** → TRD 05 §7 | — |
 | `DEVPILOT_BRIDGE_URL` / `DEVPILOT_BRIDGE_API_KEY` | — | connect command (existing) |
 | `DEVPILOT_MAX_SESSIONS` | `8` | fleet capacity (`/api/fleet/state`) |
 | `DEVPILOT_VELOCITY_WINDOW_HOURS` | `168` | `computeVelocityStats` |
@@ -628,16 +701,20 @@ via `saveLinearIntegrationConfig` so CLI and Next app agree.
 - **Unsigned/forged webhooks**: Next route — 503 until a secret is configured
   (never silently unverified), 401 on bad signature, 401 on >60s-old timestamp.
   Bridge route — signature always required (secret is `notNull` per workspace).
-- **Publish failure** (Pub/Sub down): session row survives as `pending` with an
+- *(superseded → TRD 05 §8)* **Publish failure** (Pub/Sub down): session row survives as `pending` with an
   `error` sessionEvent; webhook still returns 200 (`queued:false`) so Linear
   doesn't retry-storm; operator re-drives via existing session endpoints.
 - **No orchestrator for repo**: no publish; session marked `error` with reason;
   response `action: 'no_orchestrator'`.
-- **Duplicate Pub/Sub delivery** (at-least-once): the dispatch handler checks
+- *(superseded → TRD 05 §8; replaced by the conditional-UPDATE claim, which
+  makes double-dispatch impossible rather than merely detectable)*
+  **Duplicate Pub/Sub delivery** (at-least-once): the dispatch handler checks
   `GET {bridgeUrl}/api/sessions/{sessionId}` first; status ≠ `pending` → ack and
   skip.
-- **Dispatch handler failure**: never nacks (would loop); reports `error`
-  status to the bridge and acks.
+- *(superseded → TRD 05 §6.6)* **Dispatch handler failure**: never nacks (would
+  loop); reports `error` status to the bridge and acks. **Under TRD 05 the
+  handler must also `releaseDispatch(queueId)`** — otherwise the claimed row is
+  stranded until the stale sweep.
 - **Linear sync failure on complete**: response still 200 with
   `linearSynced:false`; error recorded in `sessionEvents`.
 - **Missing `BRIDGE_ENCRYPTION_KEY` or undecryptable API key**: skip Linear
@@ -660,6 +737,9 @@ via `saveLinearIntegrationConfig` so CLI and Next app agree.
   never a hardcoded default.
 
 ## 9. Testing Strategy
+
+> **⚠ §9.3, §9.4, and §9.7 (bridge crypto / Linear service / webhook pipeline)
+> are superseded by `05-HOSTED-BRIDGE.md` §9.** The remaining subsections stand.
 
 vitest throughout; `@google-cloud/pubsub`, `fetch` (Linear GraphQL), and the
 Anthropic-independent bridge pieces are mocked. Bridge tests use mocked drizzle
@@ -700,17 +780,21 @@ service-level units with injected fakes.
 
 ## 10. Acceptance Criteria
 
-- **T3-AC-01** A Linear issue assigned to the bot (valid signature) produces a
+> **⚠ T3-AC-01 through T3-AC-04 are superseded** by `05-HOSTED-BRIDGE.md` §10
+> (T5-AC-01…T5-AC-05 and the three release gates T5-AC-09/10/11). Verify against
+> TRD 05, not the four below. **T3-AC-05 through T3-AC-12 stand unchanged.**
+
+- **T3-AC-01** *(superseded → T5-AC-01)* A Linear issue assigned to the bot (valid signature) produces a
   Pub/Sub message on `devpilot-task-dispatch` containing `sessionId` and
   `targetOrchestratorId`; the TODO at `bridge/src/api/webhooks/linear.ts:111`
   is gone.
-- **T3-AC-02** `POST /api/orchestrators/register` creates (idempotently) the
+- **T3-AC-02** *(superseded → T5-AC-02)* `POST /api/orchestrators/register` creates (idempotently) the
   filtered subscription `devpilot-dispatch-{id}`, and `BridgeClient.register`
   sends the required `name` (the historical 400 is fixed).
-- **T3-AC-03** `devpilot bridge connect` receiving a dispatch message calls
+- **T3-AC-03** *(superseded → T5-AC-03)* `devpilot bridge connect` receiving a dispatch message calls
   `OrchestratorService.dispatch` and reports `dispatched` →
   progress → `complete` to the bridge; the TODO at `connect.ts:66` is gone.
-- **T3-AC-04** Session completion at the bridge comments on the Linear issue
+- **T3-AC-04** *(superseded → T5-AC-05)* Session completion at the bridge comments on the Linear issue
   and moves it to the team's `completed` state (success case), and publishes a
   `session_complete` telemetry event; both TODOs at `sessions/routes.ts:89-90`
   are gone; Linear failure never fails the HTTP response.
@@ -754,8 +838,8 @@ file. Complexity S/M/L.
 | T3-W1-T2 | SQLite DDL | edit `packages/core/src/db/adapters/sqlite.ts` | Append §4.2 DDL (introduce `ensureColumn` verbatim from TRD 02 §4.3 iff absent) | — | S | `:memory:` adapter test: table exists, idempotent reopen |
 | T3-W1-T3 | fleet module | create `packages/core/src/fleet/{velocity.ts,runway.ts,index.ts}`; edit `packages/core/src/index.ts` | §6.1 exactly (formulas, defaults, thresholds); export `* as fleet` | — | M | §9.1 unit tests pass |
 | T3-W1-T4 | Linear config store | create `packages/core/src/integrations/linear/config-store.ts`; edit `linear/client.ts`, `linear/index.ts` | §6.2: CRUD + `ensureLinearClientFromDb` + `resetLinearClient` | T1 | M | §9.2 unit tests pass |
-| T3-W1-T5 | Bridge Pub/Sub extensions | edit `packages/bridge/src/services/pubsub/{service.ts,types.ts,index.ts}` | `getPubSubServiceOrNull`, `ensureOrchestratorSubscription` (filtered, idempotent), unified `TaskDispatchMessage` §4.4 | — | M | Mock-pubsub unit: subscription created once with correct filter string |
-| T3-W1-T6 | Bridge crypto + Linear API | create `packages/bridge/src/services/crypto.ts`, `services/linear/index.ts`; edit `services/index.ts` | §6.4 exactly (AES-256-GCM format; GraphQL ops; non-throwing sync fn) | — | M | §9.3/§9.4 unit tests pass |
+| ~~T3-W1-T5~~ | ~~Bridge Pub/Sub extensions~~ **→ TRD 05 W2** | edit `packages/bridge/src/services/pubsub/{service.ts,types.ts,index.ts}` | `getPubSubServiceOrNull`, `ensureOrchestratorSubscription` (filtered, idempotent), unified `TaskDispatchMessage` §4.4 | — | M | Mock-pubsub unit: subscription created once with correct filter string |
+| ~~T3-W1-T6~~ | ~~Bridge crypto + Linear API~~ **→ TRD 05 T5-W2-T2/T3** | create `packages/bridge/src/services/crypto.ts`, `services/linear/index.ts`; edit `services/index.ts` | §6.4 exactly (AES-256-GCM format; GraphQL ops; non-throwing sync fn) | — | M | §9.3/§9.4 unit tests pass |
 
 ### Wave 2 — Routes & commands
 
@@ -765,10 +849,10 @@ file. Complexity S/M/L.
 | T3-W2-T2 | Next webhook route | edit `src/app/api/integrations/linear/webhook/route.ts` | §5.2 rewrite: raw-body verify, 503/401 ladder, replay guard, `botUserId` pass-through, idempotent SHAPING item creation | W1-T4 | M | §9.5 route tests pass; TODO removed |
 | T3-W2-T3 | Measured fleet state | edit `src/app/api/fleet/state/route.ts` | Replace inline math with `fleet.computeRunway`/`computeVelocityStats`; add `velocity` block; `DEVPILOT_MAX_SESSIONS`; keep response back-compat (§5.3). **Coordinate with TRD 01 edits to this file** | W1-T3 | M | Route test: literals `45`/`8` absent; velocity block correct against seeds |
 | T3-W2-T4 | Real status command | edit `packages/cli/src/commands/status.ts` | §5.6: config load, `initDatabase`, zone/session/score queries, `fleet.computeRunway`, `--json`, exit-1 path, column feature-detect for opt-in | W1-T3 | M | §9.9 e2e passes; `grep -n "742\|#23" status.ts` empty |
-| T3-W2-T5 | Bridge webhook publish | edit `packages/bridge/src/api/webhooks/linear.ts` | §3.1 steps 1-5: mandatory signature, repoRoutes lookup, unified message publish, `no_orchestrator` / `queued:false` paths; remove TODO :111 | W1-T5 | M | §9.7 pipeline tests pass |
-| T3-W2-T6 | Bridge complete → Linear + telemetry | edit `packages/bridge/src/api/sessions/routes.ts` | §5.5: decrypt workspace key, `syncSessionCompletionToLinear`, telemetry publish, `linearSynced` flag; remove TODOs :89-90 | W1-T5,T6 | M | Unit: success/failure/missing-key paths; response shape |
-| T3-W2-T7 | Bridge register subscription | edit `packages/bridge/src/api/orchestrators/routes.ts` | Call `ensureOrchestratorSubscription` when configured; add `subscription` to response (§5.5) | W1-T5 | S | Unit: register → ensure called with new orchestrator id |
-| T3-W2-T8 | Client dispatch wiring | edit `packages/bridge-client/src/{client.ts,pubsub.ts,index.ts}`, `packages/cli/src/commands/bridge/connect.ts`; create `packages/cli/src/commands/bridge/dispatch-handler.ts` | §6.5: register `name` fix + mirrored message type; handler (dedupe check, dispatch, status/complete reporting, never-throw); `--name`/`--mode` options; remove TODO :66 | W1-T5 | L | §9.8 handler tests pass; TODO gone |
+| ~~T3-W2-T5~~ | ~~Bridge webhook publish~~ **→ TRD 05 T5-W3-T1** | edit `packages/bridge/src/api/webhooks/linear.ts` | §3.1 steps 1-5: mandatory signature, repoRoutes lookup, unified message publish, `no_orchestrator` / `queued:false` paths; remove TODO :111 | W1-T5 | M | §9.7 pipeline tests pass |
+| ~~T3-W2-T6~~ | ~~Bridge complete → Linear + telemetry~~ **→ TRD 05 T5-W3-T3** | edit `packages/bridge/src/api/sessions/routes.ts` | §5.5: decrypt workspace key, `syncSessionCompletionToLinear`, telemetry publish, `linearSynced` flag; remove TODOs :89-90 | W1-T5,T6 | M | Unit: success/failure/missing-key paths; response shape |
+| ~~T3-W2-T7~~ | ~~Bridge register subscription~~ **→ TRD 05 T5-W3-T2** | edit `packages/bridge/src/api/orchestrators/routes.ts` | Call `ensureOrchestratorSubscription` when configured; add `subscription` to response (§5.5) | W1-T5 | S | Unit: register → ensure called with new orchestrator id |
+| ~~T3-W2-T8~~ | ~~Client dispatch wiring~~ **→ TRD 05 T5-W4-T1/T2/T3** | edit `packages/bridge-client/src/{client.ts,pubsub.ts,index.ts}`, `packages/cli/src/commands/bridge/connect.ts`; create `packages/cli/src/commands/bridge/dispatch-handler.ts` | §6.5: register `name` fix + mirrored message type; handler (dedupe check, dispatch, status/complete reporting, never-throw); `--name`/`--mode` options; remove TODO :66 | W1-T5 | L | §9.8 handler tests pass; TODO gone |
 
 ### Wave 3 — Hygiene
 
@@ -785,7 +869,7 @@ file. Complexity S/M/L.
 | ID | Title | Files | Description | Deps | Cx | Done-check |
 |---|---|---|---|---|---|---|
 | T3-W4-T1 | Core fleet + config tests | create `packages/core/tests/unit/fleet-velocity.test.ts`, `linear-config-store.test.ts` | §9.1–9.2 scenarios | W1 | M | `pnpm --filter @devpilot.sh/core test` green |
-| T3-W4-T2 | Bridge tests | create `packages/bridge/tests/{crypto.test.ts,linear-service.test.ts,webhook-pipeline.test.ts}` (+ vitest config for the package if absent) | §9.3–9.4, §9.7 with mocked pubsub/fetch/db | W2-T5,T6,T7 | L | `pnpm --filter @devpilot.sh/bridge test` green |
+| ~~T3-W4-T2~~ | ~~Bridge tests~~ **→ TRD 05 W5** | create `packages/bridge/tests/{crypto.test.ts,linear-service.test.ts,webhook-pipeline.test.ts}` (+ vitest config for the package if absent) | §9.3–9.4, §9.7 with mocked pubsub/fetch/db | W2-T5,T6,T7 | L | `pnpm --filter @devpilot.sh/bridge test` green |
 | T3-W4-T3 | Next route tests | create `src/app/api/__tests__/{linear-webhook.test.ts,linear-connect.test.ts,fleet-state.test.ts,repos.test.ts}` | §9.5–9.6 + fleet-state velocity assertions + repos | W2-T1,T2,T3; W3-T4 | M | root `pnpm test` green |
 | T3-W4-T4 | Handler + status e2e | create `packages/cli/tests/e2e/status.test.ts`, `packages/cli/tests/unit/dispatch-handler.test.ts` | §9.8–9.9 | W2-T4,T8 | M | `pnpm --filter @devpilot.sh/cli test` green |
 | T3-W4-T5 | Docs | edit `docs/API-REFERENCE.md`, `docs/ROADMAP.md`, `README.md` (config keys) | Document §5 routes/flags/env vars; flip items 10–14; document runway-threshold change | all | S | Every §5 surface documented; ROADMAP updated |

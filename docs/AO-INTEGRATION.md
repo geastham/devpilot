@@ -1,318 +1,91 @@
-# Agent Orchestrator (ao) Integration
+# Agent Orchestrator (`ao`) Integration
 
-DevPilot integrates with the `@composio/ao-cli` agent orchestrator to spawn and manage AI coding agents.
+**Status: the `ao-cli` orchestrator mode is deprecated and non-functional.**
+Use `--mode http` pointed at the ao daemon.
 
-## Overview
+## What changed
 
-The agent orchestrator integration enables:
-- Automatic spawning of Claude Code agents via `ao spawn`
-- Real-time status polling via `ao status`
-- Session management and completion tracking
-- Linear ticket synchronization
+`ao` inverted its architecture. It is now a Go **daemon on `127.0.0.1:3001`**
+exposing a REST API, with the CLI as a thin client of it. Shelling out and
+parsing stdout — what our `ao-cli` adapter did — is no longer the integration
+surface.
 
-## Prerequisites
+Verified against `@composio/ao-cli` on 2026-08-03:
 
-1. **Install ao CLI**
-   ```bash
-   npm install -g @composio/ao-cli
-   ```
+| Our adapter called | Real `ao` responds |
+|---|---|
+| `ao list` | `error: unknown command 'list'` |
+| `ao status <sessionId>` | `error: too many arguments for 'status'. Expected 0 arguments but got 1.` |
+| `ao spawn <project> <ticket> "<prompt>"` | takes `[project] [issue-id]`; **accepts no prompt** |
+| `--model <m>` | does not exist — the flag is `--agent <name>` |
+| `--repo <r>` | does not exist |
 
-2. **Configure ao project**
-   ```bash
-   ao init my-project
-   ```
+Only `ao --version` still works.
 
-3. **Set up authentication**
-   - Configure your Anthropic API key for Claude Code
-   - Set up any project-specific environment variables
+The deepest difference is conceptual: our adapter **hands `ao` a prompt**. Real
+`ao` spawns from an *issue identifier* and resolves context itself; free-form
+instructions are sent afterwards with `ao send <session> "..."`.
 
-## Configuration
+### Distribution also changed
 
-### Via DevPilot Setup
+npm is no longer the real channel. Their own
+`docs/ao-start-bootstrapper-and-npm-deprecation.md` states npm is *"the legacy
+on-ramp… We are deprecating npm as an app-distribution path"*, and `ao start`
+now fetches and opens the desktop app rather than starting a daemon.
 
-```bash
-devpilot setup
-```
+Versions are badly skewed as a result:
 
-The setup wizard will:
-1. Check if ao CLI is installed
-2. Offer to install it if missing
-3. Generate `agent-orchestrator.yaml` configuration
-4. Configure agent rules and project settings
+| Source | Version |
+|---|---|
+| npm `@composio/ao-cli` | 0.2.2 (2026-03-29) |
+| that binary reports | 0.1.0 |
+| actual latest release | `v0.11.2-nightly.202608031559` (2026-08-03) |
 
-### Manual Configuration
+**Do not rely on the npm build.** Install the desktop app.
 
-Edit `.devpilot/config.yaml`:
-
-```yaml
-orchestrator:
-  mode: ao-cli          # Use ao CLI adapter
-  project: my-project   # ao project name
-  pollingInterval: 5000 # Status poll interval (ms)
-```
-
-### Agent Orchestrator Config
-
-The setup wizard generates `.devpilot/agent-orchestrator.yaml`:
-
-```yaml
-version: 1
-
-projects:
-  my-project:
-    path: /path/to/project
-    repo: github.com/org/repo
-
-    # Agent configuration
-    agentRules: |
-      - Always run tests before completing
-      - Create atomic, focused commits
-      - Follow existing code patterns
-
-    # Task defaults
-    defaults:
-      model: sonnet
-      maxTokens: 200000
-      timeout: 3600
-```
-
-## How It Works
-
-### 1. Dispatch Flow
-
-When you dispatch a horizon item to the fleet:
-
-```
-UI: Click "Dispatch" on READY item
-    ↓
-API: POST /api/fleet/dispatch/{itemId}
-    ↓
-OrchestratorService.dispatch()
-    ↓
-AoCliAdapter.spawn(project, ticketId)
-    ↓
-Shell: ao spawn my-project DP-123 "Task title"
-    ↓
-Claude Code session starts
-```
-
-### 2. Status Polling
-
-The status poller runs automatically:
-
-```
-StatusPoller (every 5s)
-    ↓
-Shell: ao status <session-id>
-    ↓
-Parse output → StatusUpdate
-    ↓
-Update rufloSessions table
-    ↓
-Sync to Linear (if configured)
-    ↓
-Emit SSE event to UI
-```
-
-### 3. Completion Flow
-
-When an agent completes:
-
-```
-ao session completes
-    ↓
-StatusPoller detects completion
-    ↓
-POST /api/orchestrator/complete
-    ↓
-Update session status
-    ↓
-Release in-flight files
-    ↓
-Update conductor score
-    ↓
-Sync to Linear
-```
-
-## Orchestrator Modes
-
-Configure via `orchestrator.mode` in config:
-
-| Mode | Description |
-|------|-------------|
-| `ao-cli` | Use local ao CLI (recommended) |
-| `http` | Connect to remote orchestrator via HTTP |
-| `disabled` | No orchestrator integration |
-
-### ao-cli Mode
-
-Uses `child_process.spawn` to execute ao commands locally:
-
-```typescript
-// packages/core/src/orchestrator/ao-cli-adapter.ts
-await spawn('ao', ['spawn', project, ticketId, title]);
-```
-
-### http Mode
-
-For remote orchestrator deployments:
-
-```yaml
-orchestrator:
-  mode: http
-  httpUrl: https://orchestrator.example.com
-  httpApiKey: orch_xxxxx
-```
-
-## Adapter Interface
-
-The orchestrator uses a strategy pattern with a common interface:
-
-```typescript
-interface IOrchestratorAdapter {
-  healthCheck(): Promise<OrchestratorHealth>;
-  dispatch(request: DispatchRequest): Promise<DispatchResponse>;
-  getJobStatus(sessionId: string): Promise<JobStatus>;
-  cancel(sessionId: string): Promise<CancelResponse>;
-}
-```
-
-### DispatchRequest
-
-```typescript
-interface DispatchRequest {
-  sessionId: string;
-  repo: string;
-  taskSpec: {
-    prompt: string;
-    filePaths: string[];
-    model: 'sonnet' | 'opus' | 'haiku';
-    acceptanceCriteria?: string[];
-  };
-  callbackUrl: string;
-  linearTicketId?: string;
-}
-```
-
-### StatusUpdate
-
-```typescript
-interface StatusUpdate {
-  sessionId: string;
-  status: 'running' | 'waiting' | 'complete' | 'error';
-  progressPercent: number;
-  currentStep?: string;
-  currentFile?: string;
-  filesModified: string[];
-  tokensUsed?: number;
-  message?: string;
-}
-```
-
-## CLI Commands
-
-### Check ao Status
+## Current integration path
 
 ```bash
-# Via ao CLI
-ao status
-
-# Via DevPilot
-devpilot fleet status
+devpilot bridge connect \
+  --url https://<your-bridge> \
+  --token dp_orch_… \
+  --repos owner/repo \
+  --mode http \
+  --http-url http://127.0.0.1:3001
 ```
 
-### Manual Spawn
+## Known gap
 
-```bash
-# Spawn a session directly
-ao spawn my-project DP-123 "Implement feature X"
-
-# Send a message to session
-ao send <session-id> "Also add tests"
-
-# Stop a session
-ao stop <session-id>
-```
-
-## Troubleshooting
-
-### ao CLI Not Found
-
-```bash
-# Install globally
-npm install -g @composio/ao-cli
-
-# Verify installation
-ao --version
-```
-
-### Session Not Starting
-
-Check the ao project configuration:
-```bash
-ao projects list
-ao project show my-project
-```
-
-### Status Polling Issues
-
-Check the DevPilot server logs:
-```bash
-devpilot serve --debug
-```
-
-### Parse Errors
-
-The ao CLI adapter parses session IDs from stdout. If format changes, update:
-```
-packages/core/src/orchestrator/ao-cli-adapter.ts
-```
-
-## Database Schema
-
-Fleet sessions are tracked in `ruflo_sessions`:
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | TEXT | DevPilot session ID |
-| `externalSessionId` | TEXT | ao session ID |
-| `orchestratorMode` | TEXT | 'ao-cli', 'http', 'manual' |
-| `status` | TEXT | ACTIVE, NEEDS_SPEC, COMPLETE, ERROR |
-| `progressPercent` | INTEGER | 0-100 |
-| `currentWorkstream` | TEXT | Current task label |
-
-## Architecture
+Our `http` adapter speaks **our** contract:
 
 ```
-┌─────────────────────────────────────────────────┐
-│              OrchestratorService                │
-│  ┌─────────────────────────────────────────────┐│
-│  │  Strategy Pattern: mode → adapter           ││
-│  └─────────────────────────────────────────────┘│
-└───────────────────────┬─────────────────────────┘
-                        │
-        ┌───────────────┼───────────────┐
-        │               │               │
-        ▼               ▼               ▼
-┌───────────────┐ ┌───────────────┐ ┌───────────────┐
-│ AoCliAdapter  │ │  HttpAdapter  │ │DisabledAdapter│
-│               │ │               │ │               │
-│ ao spawn      │ │ HTTP POST     │ │ Returns error │
-│ ao status     │ │ to remote     │ │               │
-│ ao stop       │ │ orchestrator  │ │               │
-└───────────────┘ └───────────────┘ └───────────────┘
-        │
-        ▼
-┌───────────────────────────────────────────────────┐
-│                   StatusPoller                     │
-│  ┌─────────────────────────────────────────────┐  │
-│  │ Poll active sessions every 5s               │  │
-│  │ Parse status → Update DB → Emit SSE → Linear│  │
-│  └─────────────────────────────────────────────┘  │
-└───────────────────────────────────────────────────┘
+POST /dispatch            GET /jobs/:id/status            GET /jobs/:id/result
 ```
 
-## Next Steps
+The ao daemon speaks **its own**:
 
-- [LINEAR-BRIDGE.md](./LINEAR-BRIDGE.md) - Sync sessions to Linear tickets
-- [API-REFERENCE.md](./API-REFERENCE.md) - Fleet API endpoints
+```
+POST /api/v1/sessions     GET /api/v1/sessions            POST /api/v1/sessions/:id/send
+```
+
+These are not the same shape, so `--mode http --http-url http://127.0.0.1:3001`
+**will not work unmodified**. Closing it needs a dedicated `ao-daemon` adapter
+translating between the two, which requires a running daemon to verify against —
+it has not been built, and would be dishonest to claim as working.
+
+Two caveats to settle before building it:
+
+1. The ao docs describe loopback-only as *"a load-bearing architectural rule —
+   no network exposure, ever."* Their local API is currently a private CLI↔app
+   channel; we should confirm they intend it as a stable third-party surface
+   before depending on it.
+2. `ao spawn` takes an issue identifier, not a prompt. If DevPilot dispatches a
+   Linear issue and `ao` is configured against the same Linear workspace, the
+   identifiers line up naturally — that is the seam worth designing around,
+   rather than trying to force a prompt through.
+
+## What still works
+
+`--mode http` against **any** orchestrator implementing our contract, and
+`--mode claude-session`. The http path is verified end to end by
+`packages/cli/tests/harness/run-local-dispatch.mjs`.

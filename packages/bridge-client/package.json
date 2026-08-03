@@ -1,7 +1,7 @@
 {
   "name": "@devpilot.sh/bridge-client",
-  "version": "0.1.0",
-  "description": "DevPilot Bridge Client - Local orchestrator connection to cloud bridge",
+  "version": "0.2.0",
+  "description": "DevPilot bridge client \u2014 connects a local orchestrator to a DevPilot bridge over a durable queue",
   "license": "MIT",
   "author": "DevPilot Team",
   "repository": {
@@ -26,7 +26,8 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "pnpm run build"
+    "prepublishOnly": "pnpm run build",
+    "test": "vitest run"
   },
   "publishConfig": {
     "access": "public",
@@ -35,15 +36,17 @@
   "keywords": [
     "devpilot",
     "bridge",
-    "pubsub",
-    "gcp"
+    "linear",
+    "agents"
   ],
   "dependencies": {
-    "@google-cloud/pubsub": "^4.0.0"
+    "@devpilot.sh/bridge-protocol": "workspace:*",
+    "@supabase/supabase-js": "^2.45.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "tsup": "^8.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
   }
 }

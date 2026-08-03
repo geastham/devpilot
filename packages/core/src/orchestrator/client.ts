@@ -7,6 +7,7 @@ import type {
   DispatchRequest,
   DispatchResponse,
   OrchestratorHealth,
+  CompletionReport,
 } from './types';
 
 export class OrchestratorClient {
@@ -45,6 +46,29 @@ export class OrchestratorClient {
     }
 
     return response.json() as Promise<DispatchResponse>;
+  }
+
+  /**
+   * Fetch the completion report for a finished job.
+   *
+   * The ao-cli and claude-session adapters both implement this; the HTTP
+   * adapter did not, and `OrchestratorAdapter.getCompletionReport` is optional —
+   * so StatusPoller.handleCompletion received null and NEVER invoked its
+   * onComplete callback. In practice that meant an http-mode job could run to
+   * completion locally and the host would never be told: the session sat at its
+   * last polled status forever.
+   *
+   * Returns null (rather than throwing) when the job is unknown or not yet
+   * finished, which is what the poller expects.
+   */
+  async getCompletionReport(externalJobId: string): Promise<CompletionReport | null> {
+    const response = await this.fetch(`/jobs/${encodeURIComponent(externalJobId)}/result`);
+    if (!response.ok) return null;
+    try {
+      return (await response.json()) as CompletionReport;
+    } catch {
+      return null;
+    }
   }
 
   /**

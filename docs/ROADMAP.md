@@ -66,7 +66,11 @@ Recent PRs added: Wiki system (#4), Caveman plugin in setup (#5), MemPalace memo
 
 ### Tier 3 — Hardening & truth-telling
 
-10. **Bridge middle hop**: Linear webhook → Pub/Sub publish → local orchestrator dispatch (`bridge/api/webhooks/linear.ts` TODO, `cli bridge connect.ts:66` TODO); session-complete → Linear sync in bridge.
+10. ~~**Bridge middle hop**~~ — **DONE**, re-architected. Linear webhook → durable
+    `dispatch_queue` (one transaction) → local orchestrator → status/complete
+    reported back → Linear sync. GCP Pub/Sub was removed entirely: it required
+    every user's laptop to authenticate into our GCP project, which is why the
+    original never shipped. See `spec/trd/05-HOSTED-BRIDGE.md`.
 11. **Persist Linear config** (currently an in-memory singleton lost on restart) and **enable webhook signature verification** in the Next route — the verify code already exists in core with tests.
 12. **Real `devpilot status`** — it currently prints hardcoded fake stats (3 sessions, score 742, rank #23).
 13. **Measured runway math** — replace hardcoded 45 min/task and 8-max-sessions constants with rolling velocity from completed-task history.

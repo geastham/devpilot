@@ -88,6 +88,13 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
 
+          # Update bridge-protocol package
+          # MUST be first: core and bridge-client depend on it, so pnpm needs its
+          # version resolved before their workspace:* refs are rewritten.
+          cd packages/bridge-protocol
+          pnpm version $VERSION --no-git-tag-version --allow-same-version
+          cd ../..
+
           # Update core package
           cd packages/core
           pnpm version $VERSION --no-git-tag-version --allow-same-version
@@ -102,6 +109,15 @@ jobs:
           cd packages/cli
           pnpm version $VERSION --no-git-tag-version --allow-same-version
           cd ../..
+
+      - name: Publish @devpilot.sh/bridge-protocol
+        # Published BEFORE core and bridge-client: pnpm rewrites their
+        # workspace:* dependency to this exact version, so it must already be
+        # resolvable on the registry or their installs break.
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: pnpm publish --filter @devpilot.sh/bridge-protocol --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @devpilot.sh/core
         if: ${{ github.event.inputs.dry_run != 'true' }}
@@ -128,6 +144,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Would have published:" >> $GITHUB_STEP_SUMMARY
           echo "- @devpilot.sh/core@${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- @devpilot.sh/bridge-protocol@${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "- @devpilot.sh/bridge-client@${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "- @devpilot.sh/cli@${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
 
@@ -138,6 +155,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Successfully published:" >> $GITHUB_STEP_SUMMARY
           echo "- [@devpilot.sh/core@${{ steps.version.outputs.version }}](https://www.npmjs.com/package/@devpilot.sh/core)" >> $GITHUB_STEP_SUMMARY
+          echo "- [@devpilot.sh/bridge-protocol@${{ steps.version.outputs.version }}](https://www.npmjs.com/package/@devpilot.sh/bridge-protocol)" >> $GITHUB_STEP_SUMMARY
           echo "- [@devpilot.sh/bridge-client@${{ steps.version.outputs.version }}](https://www.npmjs.com/package/@devpilot.sh/bridge-client)" >> $GITHUB_STEP_SUMMARY
           echo "- [@devpilot.sh/cli@${{ steps.version.outputs.version }}](https://www.npmjs.com/package/@devpilot.sh/cli)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY

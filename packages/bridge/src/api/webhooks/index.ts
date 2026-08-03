@@ -1,1 +1,0 @@
-export { registerWebhookRoutes } from './linear';

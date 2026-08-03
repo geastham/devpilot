@@ -54,6 +54,20 @@ class HttpAdapter implements IOrchestratorAdapter {
     return this.client.dispatch(request);
   }
 
+  /**
+   * Forwarded so http mode can actually finish.
+   *
+   * IOrchestratorAdapter.getCompletionReport is OPTIONAL, and this adapter did
+   * not implement it — so OrchestratorService.getCompletionReport always
+   * returned null for http mode, StatusPoller.handleCompletion never invoked
+   * onComplete, and a job that finished locally was never reported to the host.
+   * The ao-cli and claude-session adapters both implement it; this was the odd
+   * one out.
+   */
+  async getCompletionReport(externalJobId: string): Promise<CompletionReport | null> {
+    return this.client.getCompletionReport(externalJobId);
+  }
+
   async getJobStatus(externalJobId: string): Promise<JobStatus> {
     const status = await this.client.getJobStatus(externalJobId);
     return {
