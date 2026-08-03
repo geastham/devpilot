@@ -331,6 +331,725 @@ type ApiErrorBody = z.infer<typeof ApiErrorSchema>;
 declare function formatApiError(body: unknown, fallback: string): string;
 
 /**
+ * sessionCrypto — TRD 06 §4.4, §6.1. End-to-end encryption for shared sessions.
+ *
+ * THE INVARIANT THIS FILE EXISTS TO ENFORCE: the session key never reaches
+ * devpilot.sh. It is generated on a client, lives in the URL fragment (which
+ * browsers do not transmit), and is held in process memory by the CLI and the
+ * MCP server. The hosted plane stores one hash and relays opaque bytes.
+ *
+ * Contrast with the website's lib/bridge/crypto.ts, which encrypts Linear
+ * credentials with a SERVER-held key (BRIDGE_ENCRYPTION_KEY). That is correct
+ * there — the server must use those credentials. It is wrong here, because a
+ * server-held key means the server can read the transcript, which is the whole
+ * thing we are claiming it cannot do.
+ *
+ * ─── Key derivation (TRD 06 §5, as corrected) ───────────────────────────────
+ *
+ * The spec's original join proof was "client sends sha256(key), server compares
+ * to the stored joinKeyHash". That makes the stored column DIRECTLY REPLAYABLE:
+ * the value in the database is the same value the wire accepts, so a leaked
+ * backup or a read-only insider can join any session. It is the store-the-
+ * password-verbatim mistake.
+ *
+ * So one root secret is split into two independent HKDF branches:
+ *
+ *   k            32 random bytes, base64url — the fragment value, never sent
+ *    ├─ HKDF(k, "content") ──▶ encKey        AES-256-GCM key. Never leaves the client.
+ *    └─ HKDF(k, "verify")  ──▶ joinVerifier  sent as the join proof
+ *                                  │
+ *                                  └─ sha256 ──▶ joinKeyHash   what we store
+ *
+ * A database read yields only sha256(verifier), which cannot be used to join and
+ * cannot decrypt anything. The verifier is a different branch from the content
+ * key, so possessing it never yields plaintext. And §7.1 — "the key never
+ * reaches the server" — becomes literally true, which under the original
+ * formulation it was not: sha256(key) is a function of the key, sent on every
+ * request.
+ *
+ * ─── Why this API is async ──────────────────────────────────────────────────
+ *
+ * §6.1 sketched synchronous signatures. That is not implementable against
+ * WebCrypto, whose SubtleCrypto operations are all promise-returning, and
+ * WebCrypto is the only AES implementation present in BOTH Node 18+ and the
+ * browser. The alternatives were a Node/browser split (two implementations, the
+ * exact drift TRD 05 deleted packages/bridge to prevent) or shipping a hand
+ * rolled AES in JS (worse in every way). One async implementation, three
+ * consumers. The spec is corrected rather than the code contorted.
+ */
+declare class SessionCryptoError extends Error {
+    constructor(message: string);
+}
+declare class SessionKeyError extends SessionCryptoError {
+    constructor(message: string);
+}
+declare class SessionDecryptionError extends SessionCryptoError {
+    constructor(message: string);
+}
+/** What a client computes at creation time and sends to the server. */
+interface JoinCredentials {
+    /** base64url. Sent as the join proof, in a header. Never stored by us. */
+    verifier: string;
+    /** sha256 hex of the verifier. THE ONLY THING THE SERVER PERSISTS. */
+    joinKeyHash: string;
+}
+/**
+ * A key bound to its derived AES key, so a long-lived reader (`session tail`,
+ * the MCP server) derives once instead of per message.
+ *
+ * Deliberately NOT a module-level cache keyed by the key string: that would
+ * retain session keys in memory for the life of the process with no way to
+ * drop them. Holding the handle is an explicit choice with an obvious end.
+ */
+interface SessionCipher {
+    encrypt(plain: string): Promise<string>;
+    decrypt(payload: string): Promise<string>;
+}
+declare const sessionCrypto: {
+    /** 32 random bytes, base64url. This is the value that goes in the fragment. */
+    generateKey(): string;
+    /**
+     * Derive the join proof and the value the server stores.
+     *
+     * Creation sends `joinKeyHash` only. Joining sends `verifier`; the server
+     * hashes it with `hashJoinVerifier` and compares in constant time.
+     */
+    deriveJoinCredentials(key: string): Promise<JoinCredentials>;
+    /** Server-side half of the join check. Takes the verifier, never the key. */
+    hashJoinVerifier(verifier: string): Promise<string>;
+    /**
+     * Constant-time comparison of a presented verifier against a stored hash.
+     *
+     * The server calls this. It cannot derive the verifier from what it stores,
+     * which is the entire point of the split.
+     */
+    verifyJoinProof(verifier: string, storedJoinKeyHash: string): Promise<boolean>;
+    encrypt(plain: string, key: string): Promise<string>;
+    /** Throws SessionDecryptionError on a wrong key or a tampered payload. */
+    decrypt(payload: string, key: string): Promise<string>;
+    /** Bind a key once for repeated use. */
+    open(key: string): Promise<SessionCipher>;
+};
+/**
+ * Build a join link. The key goes after the `#` and nowhere else — browsers do
+ * not send fragments, so it never reaches our logs, proxies, or database.
+ */
+declare function buildJoinLink(baseUrl: string, sessionId: string, key: string): string;
+/**
+ * Split a join link into its id and key.
+ *
+ * Parsed by hand rather than with `new URL()` so this behaves identically in
+ * Node and the browser and never round-trips the key through anything that
+ * might log a URL.
+ */
+declare function parseJoinLink(link: string): {
+    sessionId: string;
+    key: string;
+};
+
+/**
+ * Shared-session wire contract — TRD 06 §5, §6.1.
+ *
+ * Separate file from messages.ts, which is dispatch-shaped: one Linear issue to
+ * one orchestrator, server-readable, single-writer. These are conversation-
+ * shaped: many participants, ciphertext, ordered by `seq`. Mixing them in one
+ * module would blur the one distinction a reader most needs to keep straight —
+ * which of these payloads the server can read (dispatch) and which it cannot
+ * (everything here).
+ *
+ * THE RULE FOR THIS FILE: every plaintext field below is plaintext ON PURPOSE
+ * and appears in the §3.2 "server sees" column. Adding a field here is a change
+ * to the privacy claim, not a schema tweak. Message content goes in
+ * `ciphertext` and nowhere else.
+ */
+/**
+ * §3.3. `observe` is the default and the safe one: agents read when asked, and
+ * a message landing in the transcript wakes nobody. Anything else is opt-in,
+ * budget-bounded and expiring.
+ */
+declare const SESSION_MODES: readonly ["observe", "relay", "auto"];
+declare const SessionModeSchema: z.ZodEnum<["observe", "relay", "auto"]>;
+type SessionMode = z.infer<typeof SessionModeSchema>;
+/**
+ * Deliberately coarse. Enough for the UI to pick a bubble style and for rate
+ * limits to distinguish a human typing from an agent dumping build output — and
+ * deliberately not enough to reveal anything about content.
+ */
+declare const SESSION_MESSAGE_KINDS: readonly ["chat", "agent_output", "system"];
+declare const SessionMessageKindSchema: z.ZodEnum<["chat", "agent_output", "system"]>;
+type SessionMessageKind = z.infer<typeof SessionMessageKindSchema>;
+declare const PARTICIPANT_KINDS: readonly ["human", "agent"];
+declare const ParticipantKindSchema: z.ZodEnum<["human", "agent"]>;
+type ParticipantKind = z.infer<typeof ParticipantKindSchema>;
+/** Open-ended by intent: a bridge implementation may carry an agent we do not ship. */
+declare const AGENT_KINDS: readonly ["claude-code", "codex", "ao", "other"];
+declare const AgentKindSchema: z.ZodEnum<["claude-code", "codex", "ao", "other"]>;
+type AgentKind = z.infer<typeof AgentKindSchema>;
+declare const SESSION_LIMITS: {
+    /** Per participant, per session. */
+    readonly messagesPerMinute: 60;
+    /** Ciphertext bytes, not plaintext — what the server actually stores. */
+    readonly maxCiphertextBytes: number;
+    /** §3.3 `auto` bounds. Exhausting either drops the session to `observe`. */
+    readonly autoDefaultBudget: 20;
+    readonly autoDefaultTtlMinutes: 30;
+};
+declare const SessionMessageSchema: z.ZodObject<{
+    id: z.ZodString;
+    sessionId: z.ZodString;
+    /** Null once a participant row is removed; the message survives them. */
+    participantId: z.ZodNullable<z.ZodString>;
+    /**
+     * AES-256-GCM, base64(iv).base64(ct).base64(tag), encrypted with a key
+     * derived from the session key by sessionCrypto. OPAQUE TO THE SERVER.
+     */
+    ciphertext: z.ZodString;
+    /** Which key version sealed this, so rotation does not orphan history (§4.4). */
+    keyVersion: z.ZodNumber;
+    kind: z.ZodEnum<["chat", "agent_output", "system"]>;
+    /** Monotonic per session, assigned by the server. Clients order by THIS, not by clock. */
+    seq: z.ZodNumber;
+    createdAt: z.ZodString;
+}, "strip", z.ZodTypeAny, {
+    sessionId: string;
+    id: string;
+    participantId: string | null;
+    ciphertext: string;
+    keyVersion: number;
+    kind: "chat" | "agent_output" | "system";
+    seq: number;
+    createdAt: string;
+}, {
+    sessionId: string;
+    id: string;
+    participantId: string | null;
+    ciphertext: string;
+    keyVersion: number;
+    kind: "chat" | "agent_output" | "system";
+    seq: number;
+    createdAt: string;
+}>;
+type SessionMessage = z.infer<typeof SessionMessageSchema>;
+declare const SessionParticipantSchema: z.ZodObject<{
+    id: z.ZodString;
+    sessionId: z.ZodString;
+    kind: z.ZodEnum<["human", "agent"]>;
+    /** Chosen by the joiner and NOT AUTHENTICATED. The UI must not imply otherwise. */
+    displayName: z.ZodString;
+    agentKind: z.ZodOptional<z.ZodNullable<z.ZodEnum<["claude-code", "codex", "ao", "other"]>>>;
+    joinedAt: z.ZodString;
+    lastSeenAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    leftAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+}, "strip", z.ZodTypeAny, {
+    sessionId: string;
+    id: string;
+    kind: "human" | "agent";
+    displayName: string;
+    joinedAt: string;
+    agentKind?: "claude-code" | "codex" | "ao" | "other" | null | undefined;
+    lastSeenAt?: string | null | undefined;
+    leftAt?: string | null | undefined;
+}, {
+    sessionId: string;
+    id: string;
+    kind: "human" | "agent";
+    displayName: string;
+    joinedAt: string;
+    agentKind?: "claude-code" | "codex" | "ao" | "other" | null | undefined;
+    lastSeenAt?: string | null | undefined;
+    leftAt?: string | null | undefined;
+}>;
+type SessionParticipant = z.infer<typeof SessionParticipantSchema>;
+/**
+ * Session metadata as a participant sees it.
+ *
+ * Note what is absent: `joinKeyHash` and `orgId` are server-side concerns and
+ * are never returned to a participant, who may be from another org entirely.
+ */
+declare const SharedSessionSchema: z.ZodObject<{
+    id: z.ZodString;
+    /** Plaintext BY CHOICE — it is the portal list label. Never put secrets here. */
+    title: z.ZodString;
+    mode: z.ZodEnum<["observe", "relay", "auto"]>;
+    keyVersion: z.ZodNumber;
+    linearIdentifier: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    autoBudgetRemaining: z.ZodOptional<z.ZodNumber>;
+    autoExpiresAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    closedAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    createdAt: z.ZodString;
+}, "strip", z.ZodTypeAny, {
+    title: string;
+    id: string;
+    keyVersion: number;
+    createdAt: string;
+    mode: "observe" | "relay" | "auto";
+    linearIdentifier?: string | null | undefined;
+    autoBudgetRemaining?: number | undefined;
+    autoExpiresAt?: string | null | undefined;
+    closedAt?: string | null | undefined;
+}, {
+    title: string;
+    id: string;
+    keyVersion: number;
+    createdAt: string;
+    mode: "observe" | "relay" | "auto";
+    linearIdentifier?: string | null | undefined;
+    autoBudgetRemaining?: number | undefined;
+    autoExpiresAt?: string | null | undefined;
+    closedAt?: string | null | undefined;
+}>;
+type SharedSession = z.infer<typeof SharedSessionSchema>;
+/**
+ * POST /api/sessions/shared
+ *
+ * Carries `joinKeyHash` and NOT the key, nor the verifier. The client derives
+ * both locally; only the hash is transmissible. A `key` field on this schema
+ * would be a breach of §7.1 — hence the `.strict()`, which makes an accidental
+ * extra field a parse failure rather than a silently forwarded secret.
+ */
+declare const CreateSharedSessionRequestSchema: z.ZodObject<{
+    title: z.ZodString;
+    /** sha256 hex of the join verifier. 64 lowercase hex chars. */
+    joinKeyHash: z.ZodString;
+    linearIssueId: z.ZodOptional<z.ZodString>;
+    linearIdentifier: z.ZodOptional<z.ZodString>;
+}, "strict", z.ZodTypeAny, {
+    title: string;
+    joinKeyHash: string;
+    linearIssueId?: string | undefined;
+    linearIdentifier?: string | undefined;
+}, {
+    title: string;
+    joinKeyHash: string;
+    linearIssueId?: string | undefined;
+    linearIdentifier?: string | undefined;
+}>;
+type CreateSharedSessionRequest = z.infer<typeof CreateSharedSessionRequestSchema>;
+declare const CreateSharedSessionResponseSchema: z.ZodObject<{
+    session: z.ZodObject<{
+        id: z.ZodString;
+        /** Plaintext BY CHOICE — it is the portal list label. Never put secrets here. */
+        title: z.ZodString;
+        mode: z.ZodEnum<["observe", "relay", "auto"]>;
+        keyVersion: z.ZodNumber;
+        linearIdentifier: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        autoBudgetRemaining: z.ZodOptional<z.ZodNumber>;
+        autoExpiresAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        closedAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        createdAt: z.ZodString;
+    }, "strip", z.ZodTypeAny, {
+        title: string;
+        id: string;
+        keyVersion: number;
+        createdAt: string;
+        mode: "observe" | "relay" | "auto";
+        linearIdentifier?: string | null | undefined;
+        autoBudgetRemaining?: number | undefined;
+        autoExpiresAt?: string | null | undefined;
+        closedAt?: string | null | undefined;
+    }, {
+        title: string;
+        id: string;
+        keyVersion: number;
+        createdAt: string;
+        mode: "observe" | "relay" | "auto";
+        linearIdentifier?: string | null | undefined;
+        autoBudgetRemaining?: number | undefined;
+        autoExpiresAt?: string | null | undefined;
+        closedAt?: string | null | undefined;
+    }>;
+}, "strip", z.ZodTypeAny, {
+    session: {
+        title: string;
+        id: string;
+        keyVersion: number;
+        createdAt: string;
+        mode: "observe" | "relay" | "auto";
+        linearIdentifier?: string | null | undefined;
+        autoBudgetRemaining?: number | undefined;
+        autoExpiresAt?: string | null | undefined;
+        closedAt?: string | null | undefined;
+    };
+}, {
+    session: {
+        title: string;
+        id: string;
+        keyVersion: number;
+        createdAt: string;
+        mode: "observe" | "relay" | "auto";
+        linearIdentifier?: string | null | undefined;
+        autoBudgetRemaining?: number | undefined;
+        autoExpiresAt?: string | null | undefined;
+        closedAt?: string | null | undefined;
+    };
+}>;
+type CreateSharedSessionResponse = z.infer<typeof CreateSharedSessionResponseSchema>;
+/**
+ * POST /api/sessions/shared/:id/join
+ *
+ * The proof travels in the `X-Session-Key-Proof` header rather than the body,
+ * so it stays out of anything that logs request payloads.
+ */
+declare const JOIN_PROOF_HEADER = "x-session-key-proof";
+declare const JoinSessionRequestSchema: z.ZodObject<{
+    displayName: z.ZodString;
+    kind: z.ZodDefault<z.ZodEnum<["human", "agent"]>>;
+    agentKind: z.ZodOptional<z.ZodEnum<["claude-code", "codex", "ao", "other"]>>;
+    /** Set when an agent participant is bound to a registered machine. */
+    orchestratorId: z.ZodOptional<z.ZodString>;
+}, "strict", z.ZodTypeAny, {
+    kind: "human" | "agent";
+    displayName: string;
+    orchestratorId?: string | undefined;
+    agentKind?: "claude-code" | "codex" | "ao" | "other" | undefined;
+}, {
+    displayName: string;
+    orchestratorId?: string | undefined;
+    kind?: "human" | "agent" | undefined;
+    agentKind?: "claude-code" | "codex" | "ao" | "other" | undefined;
+}>;
+type JoinSessionRequest = z.infer<typeof JoinSessionRequestSchema>;
+declare const JoinSessionResponseSchema: z.ZodObject<{
+    /**
+     * Short-lived JWT scoped to ONE session. Message routes authenticate with
+     * this and never with org membership — that is what lets an outside
+     * collaborator participate without being provisioned into the org (§5).
+     */
+    participantToken: z.ZodString;
+    expiresAt: z.ZodString;
+    participant: z.ZodObject<{
+        id: z.ZodString;
+        sessionId: z.ZodString;
+        kind: z.ZodEnum<["human", "agent"]>;
+        /** Chosen by the joiner and NOT AUTHENTICATED. The UI must not imply otherwise. */
+        displayName: z.ZodString;
+        agentKind: z.ZodOptional<z.ZodNullable<z.ZodEnum<["claude-code", "codex", "ao", "other"]>>>;
+        joinedAt: z.ZodString;
+        lastSeenAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        leftAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    }, "strip", z.ZodTypeAny, {
+        sessionId: string;
+        id: string;
+        kind: "human" | "agent";
+        displayName: string;
+        joinedAt: string;
+        agentKind?: "claude-code" | "codex" | "ao" | "other" | null | undefined;
+        lastSeenAt?: string | null | undefined;
+        leftAt?: string | null | undefined;
+    }, {
+        sessionId: string;
+        id: string;
+        kind: "human" | "agent";
+        displayName: string;
+        joinedAt: string;
+        agentKind?: "claude-code" | "codex" | "ao" | "other" | null | undefined;
+        lastSeenAt?: string | null | undefined;
+        leftAt?: string | null | undefined;
+    }>;
+    session: z.ZodObject<{
+        id: z.ZodString;
+        /** Plaintext BY CHOICE — it is the portal list label. Never put secrets here. */
+        title: z.ZodString;
+        mode: z.ZodEnum<["observe", "relay", "auto"]>;
+        keyVersion: z.ZodNumber;
+        linearIdentifier: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        autoBudgetRemaining: z.ZodOptional<z.ZodNumber>;
+        autoExpiresAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        closedAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        createdAt: z.ZodString;
+    }, "strip", z.ZodTypeAny, {
+        title: string;
+        id: string;
+        keyVersion: number;
+        createdAt: string;
+        mode: "observe" | "relay" | "auto";
+        linearIdentifier?: string | null | undefined;
+        autoBudgetRemaining?: number | undefined;
+        autoExpiresAt?: string | null | undefined;
+        closedAt?: string | null | undefined;
+    }, {
+        title: string;
+        id: string;
+        keyVersion: number;
+        createdAt: string;
+        mode: "observe" | "relay" | "auto";
+        linearIdentifier?: string | null | undefined;
+        autoBudgetRemaining?: number | undefined;
+        autoExpiresAt?: string | null | undefined;
+        closedAt?: string | null | undefined;
+    }>;
+}, "strip", z.ZodTypeAny, {
+    expiresAt: string;
+    session: {
+        title: string;
+        id: string;
+        keyVersion: number;
+        createdAt: string;
+        mode: "observe" | "relay" | "auto";
+        linearIdentifier?: string | null | undefined;
+        autoBudgetRemaining?: number | undefined;
+        autoExpiresAt?: string | null | undefined;
+        closedAt?: string | null | undefined;
+    };
+    participantToken: string;
+    participant: {
+        sessionId: string;
+        id: string;
+        kind: "human" | "agent";
+        displayName: string;
+        joinedAt: string;
+        agentKind?: "claude-code" | "codex" | "ao" | "other" | null | undefined;
+        lastSeenAt?: string | null | undefined;
+        leftAt?: string | null | undefined;
+    };
+}, {
+    expiresAt: string;
+    session: {
+        title: string;
+        id: string;
+        keyVersion: number;
+        createdAt: string;
+        mode: "observe" | "relay" | "auto";
+        linearIdentifier?: string | null | undefined;
+        autoBudgetRemaining?: number | undefined;
+        autoExpiresAt?: string | null | undefined;
+        closedAt?: string | null | undefined;
+    };
+    participantToken: string;
+    participant: {
+        sessionId: string;
+        id: string;
+        kind: "human" | "agent";
+        displayName: string;
+        joinedAt: string;
+        agentKind?: "claude-code" | "codex" | "ao" | "other" | null | undefined;
+        lastSeenAt?: string | null | undefined;
+        leftAt?: string | null | undefined;
+    };
+}>;
+type JoinSessionResponse = z.infer<typeof JoinSessionResponseSchema>;
+/** POST /api/sessions/shared/:id/messages — the server assigns `seq`, never the client. */
+declare const PostSessionMessageRequestSchema: z.ZodObject<{
+    ciphertext: z.ZodString;
+    kind: z.ZodDefault<z.ZodEnum<["chat", "agent_output", "system"]>>;
+    keyVersion: z.ZodNumber;
+    /**
+     * Client-generated idempotency key. A retried POST after a timeout must not
+     * double-post: the transport is at-least-once, so the write has to be
+     * deduplicated somewhere, and the client is the only party that knows two
+     * requests were the same intent.
+     */
+    clientNonce: z.ZodOptional<z.ZodString>;
+}, "strict", z.ZodTypeAny, {
+    ciphertext: string;
+    keyVersion: number;
+    kind: "chat" | "agent_output" | "system";
+    clientNonce?: string | undefined;
+}, {
+    ciphertext: string;
+    keyVersion: number;
+    kind?: "chat" | "agent_output" | "system" | undefined;
+    clientNonce?: string | undefined;
+}>;
+type PostSessionMessageRequest = z.infer<typeof PostSessionMessageRequestSchema>;
+declare const PostSessionMessageResponseSchema: z.ZodObject<{
+    message: z.ZodObject<{
+        id: z.ZodString;
+        sessionId: z.ZodString;
+        /** Null once a participant row is removed; the message survives them. */
+        participantId: z.ZodNullable<z.ZodString>;
+        /**
+         * AES-256-GCM, base64(iv).base64(ct).base64(tag), encrypted with a key
+         * derived from the session key by sessionCrypto. OPAQUE TO THE SERVER.
+         */
+        ciphertext: z.ZodString;
+        /** Which key version sealed this, so rotation does not orphan history (§4.4). */
+        keyVersion: z.ZodNumber;
+        kind: z.ZodEnum<["chat", "agent_output", "system"]>;
+        /** Monotonic per session, assigned by the server. Clients order by THIS, not by clock. */
+        seq: z.ZodNumber;
+        createdAt: z.ZodString;
+    }, "strip", z.ZodTypeAny, {
+        sessionId: string;
+        id: string;
+        participantId: string | null;
+        ciphertext: string;
+        keyVersion: number;
+        kind: "chat" | "agent_output" | "system";
+        seq: number;
+        createdAt: string;
+    }, {
+        sessionId: string;
+        id: string;
+        participantId: string | null;
+        ciphertext: string;
+        keyVersion: number;
+        kind: "chat" | "agent_output" | "system";
+        seq: number;
+        createdAt: string;
+    }>;
+}, "strip", z.ZodTypeAny, {
+    message: {
+        sessionId: string;
+        id: string;
+        participantId: string | null;
+        ciphertext: string;
+        keyVersion: number;
+        kind: "chat" | "agent_output" | "system";
+        seq: number;
+        createdAt: string;
+    };
+}, {
+    message: {
+        sessionId: string;
+        id: string;
+        participantId: string | null;
+        ciphertext: string;
+        keyVersion: number;
+        kind: "chat" | "agent_output" | "system";
+        seq: number;
+        createdAt: string;
+    };
+}>;
+type PostSessionMessageResponse = z.infer<typeof PostSessionMessageResponseSchema>;
+/** GET /api/sessions/shared/:id/messages?since=<seq> */
+declare const SessionMessagePageSchema: z.ZodObject<{
+    messages: z.ZodArray<z.ZodObject<{
+        id: z.ZodString;
+        sessionId: z.ZodString;
+        /** Null once a participant row is removed; the message survives them. */
+        participantId: z.ZodNullable<z.ZodString>;
+        /**
+         * AES-256-GCM, base64(iv).base64(ct).base64(tag), encrypted with a key
+         * derived from the session key by sessionCrypto. OPAQUE TO THE SERVER.
+         */
+        ciphertext: z.ZodString;
+        /** Which key version sealed this, so rotation does not orphan history (§4.4). */
+        keyVersion: z.ZodNumber;
+        kind: z.ZodEnum<["chat", "agent_output", "system"]>;
+        /** Monotonic per session, assigned by the server. Clients order by THIS, not by clock. */
+        seq: z.ZodNumber;
+        createdAt: z.ZodString;
+    }, "strip", z.ZodTypeAny, {
+        sessionId: string;
+        id: string;
+        participantId: string | null;
+        ciphertext: string;
+        keyVersion: number;
+        kind: "chat" | "agent_output" | "system";
+        seq: number;
+        createdAt: string;
+    }, {
+        sessionId: string;
+        id: string;
+        participantId: string | null;
+        ciphertext: string;
+        keyVersion: number;
+        kind: "chat" | "agent_output" | "system";
+        seq: number;
+        createdAt: string;
+    }>, "many">;
+    /** Highest `seq` in this page; the cursor for the next `?since=`. */
+    latestSeq: z.ZodNumber;
+    hasMore: z.ZodBoolean;
+}, "strip", z.ZodTypeAny, {
+    messages: {
+        sessionId: string;
+        id: string;
+        participantId: string | null;
+        ciphertext: string;
+        keyVersion: number;
+        kind: "chat" | "agent_output" | "system";
+        seq: number;
+        createdAt: string;
+    }[];
+    latestSeq: number;
+    hasMore: boolean;
+}, {
+    messages: {
+        sessionId: string;
+        id: string;
+        participantId: string | null;
+        ciphertext: string;
+        keyVersion: number;
+        kind: "chat" | "agent_output" | "system";
+        seq: number;
+        createdAt: string;
+    }[];
+    latestSeq: number;
+    hasMore: boolean;
+}>;
+type SessionMessagePage = z.infer<typeof SessionMessagePageSchema>;
+/** POST /api/sessions/shared/:id/mode */
+declare const SetSessionModeRequestSchema: z.ZodEffects<z.ZodObject<{
+    mode: z.ZodEnum<["observe", "relay", "auto"]>;
+    /** Required when mode is `auto`; ignored otherwise. §3.3 admits no unbounded autonomy. */
+    autoBudget: z.ZodOptional<z.ZodNumber>;
+    autoTtlMinutes: z.ZodOptional<z.ZodNumber>;
+}, "strict", z.ZodTypeAny, {
+    mode: "observe" | "relay" | "auto";
+    autoBudget?: number | undefined;
+    autoTtlMinutes?: number | undefined;
+}, {
+    mode: "observe" | "relay" | "auto";
+    autoBudget?: number | undefined;
+    autoTtlMinutes?: number | undefined;
+}>, {
+    mode: "observe" | "relay" | "auto";
+    autoBudget?: number | undefined;
+    autoTtlMinutes?: number | undefined;
+}, {
+    mode: "observe" | "relay" | "auto";
+    autoBudget?: number | undefined;
+    autoTtlMinutes?: number | undefined;
+}>;
+type SetSessionModeRequest = z.infer<typeof SetSessionModeRequestSchema>;
+/**
+ * POST /api/sessions/shared/:id/rotate
+ *
+ * Same asymmetry as creation: the caller generates the new key client-side and
+ * sends only its hash. Rotation stops FUTURE reads by old-link holders; it does
+ * not retract past access, and nothing in this schema should suggest it does.
+ */
+declare const RotateSessionKeyRequestSchema: z.ZodObject<{
+    joinKeyHash: z.ZodString;
+}, "strict", z.ZodTypeAny, {
+    joinKeyHash: string;
+}, {
+    joinKeyHash: string;
+}>;
+type RotateSessionKeyRequest = z.infer<typeof RotateSessionKeyRequestSchema>;
+declare const RotateSessionKeyResponseSchema: z.ZodObject<{
+    keyVersion: z.ZodNumber;
+}, "strip", z.ZodTypeAny, {
+    keyVersion: number;
+}, {
+    keyVersion: number;
+}>;
+type RotateSessionKeyResponse = z.infer<typeof RotateSessionKeyResponseSchema>;
+declare function parseSessionMessage(input: unknown): SessionMessage;
+declare function safeParseSessionMessage(input: unknown): z.SafeParseReturnType<{
+    sessionId: string;
+    id: string;
+    participantId: string | null;
+    ciphertext: string;
+    keyVersion: number;
+    kind: "chat" | "agent_output" | "system";
+    seq: number;
+    createdAt: string;
+}, {
+    sessionId: string;
+    id: string;
+    participantId: string | null;
+    ciphertext: string;
+    keyVersion: number;
+    kind: "chat" | "agent_output" | "system";
+    seq: number;
+    createdAt: string;
+}>;
+declare function parseSessionMessagePage(input: unknown): SessionMessagePage;
+
+/**
  * Linear comment formatting — TRD 05 §6.1.
  *
  * Ported from packages/core/src/integrations/linear/sync.ts (buildProgressComment /
@@ -371,4 +1090,4 @@ declare function buildBridgeCompletionComment(input: {
     errorMessage?: string;
 }): string;
 
-export { type ApiErrorBody, ApiErrorSchema, type CompletionCommentInput, DispatchPollResponseSchema, ERROR_CODES, type HeartbeatRequest, HeartbeatRequestSchema, type ProgressCommentInput, RealtimeCredentialsSchema, type RegisterRequest, RegisterRequestSchema, type RegisterResponse, RegisterResponseSchema, SESSION_EVENT_TYPES, SESSION_STATUSES, type SessionComplete, SessionCompleteResponseSchema, SessionCompleteSchema, type SessionEventType, SessionEventTypeSchema, type SessionStatus, SessionStatusSchema, type SessionStatusUpdate, SessionStatusUpdateSchema, TERMINAL_STATUSES, type TaskDispatchMessage, TaskDispatchMessageSchema, type TerminalStatus, buildBridgeCompletionComment, buildCompletionComment, buildProgressComment, formatApiError, isTerminal, parseTaskDispatchMessage, safeParseTaskDispatchMessage };
+export { AGENT_KINDS, type AgentKind, AgentKindSchema, type ApiErrorBody, ApiErrorSchema, type CompletionCommentInput, type CreateSharedSessionRequest, CreateSharedSessionRequestSchema, type CreateSharedSessionResponse, CreateSharedSessionResponseSchema, DispatchPollResponseSchema, ERROR_CODES, type HeartbeatRequest, HeartbeatRequestSchema, JOIN_PROOF_HEADER, type JoinCredentials, type JoinSessionRequest, JoinSessionRequestSchema, type JoinSessionResponse, JoinSessionResponseSchema, PARTICIPANT_KINDS, type ParticipantKind, ParticipantKindSchema, type PostSessionMessageRequest, PostSessionMessageRequestSchema, type PostSessionMessageResponse, PostSessionMessageResponseSchema, type ProgressCommentInput, RealtimeCredentialsSchema, type RegisterRequest, RegisterRequestSchema, type RegisterResponse, RegisterResponseSchema, type RotateSessionKeyRequest, RotateSessionKeyRequestSchema, type RotateSessionKeyResponse, RotateSessionKeyResponseSchema, SESSION_EVENT_TYPES, SESSION_LIMITS, SESSION_MESSAGE_KINDS, SESSION_MODES, SESSION_STATUSES, type SessionCipher, type SessionComplete, SessionCompleteResponseSchema, SessionCompleteSchema, SessionCryptoError, SessionDecryptionError, type SessionEventType, SessionEventTypeSchema, SessionKeyError, type SessionMessage, type SessionMessageKind, SessionMessageKindSchema, type SessionMessagePage, SessionMessagePageSchema, SessionMessageSchema, type SessionMode, SessionModeSchema, type SessionParticipant, SessionParticipantSchema, type SessionStatus, SessionStatusSchema, type SessionStatusUpdate, SessionStatusUpdateSchema, type SetSessionModeRequest, SetSessionModeRequestSchema, type SharedSession, SharedSessionSchema, TERMINAL_STATUSES, type TaskDispatchMessage, TaskDispatchMessageSchema, type TerminalStatus, buildBridgeCompletionComment, buildCompletionComment, buildJoinLink, buildProgressComment, formatApiError, isTerminal, parseJoinLink, parseSessionMessage, parseSessionMessagePage, parseTaskDispatchMessage, safeParseSessionMessage, safeParseTaskDispatchMessage, sessionCrypto };

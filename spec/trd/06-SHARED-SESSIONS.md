@@ -1,6 +1,26 @@
 # TRD 06 — Shared Agent Sessions
 ## Cross-Machine Agent Coordination · End-to-End Encrypted Transcripts · Join Links · MCP Bridge
-### v1.0 · August 2026 · Status: DRAFT
+### v1.2 · August 2026 · Status: WAVES 1–2 SHIPPED
+
+> **Change log — v1.2 (3 Aug 2026)**
+> - Wave 2 complete: three tables, RLS, policies, `seq` trigger, ciphertext
+>   gate. Applied live and replayed from zero. §10 records the deviations.
+> - §4.1 gains `last_seq`, §4.3 gains `client_nonce` — both forced by
+>   acceptance criteria the original schema could not satisfy.
+> - `seq` is assigned by trigger and client values are discarded.
+> - DECISION A is now a CHECK constraint: unbounded `auto` is unrepresentable.
+> - Realtime deliberately not extended; polling is the correct path (TRD 05 §4.2).
+
+> **Change log — v1.1 (3 Aug 2026)**
+> - Decisions A (§3.3, `observe` default) and B (§3.4, fragment-only key)
+>   **confirmed**. Both are now binding on later waves.
+> - §5 join proof **corrected**: `sha256(key)` made the stored column directly
+>   replayable. Replaced by an HKDF split with separate content and verify
+>   branches. Shipped in Wave 1.
+> - §6.1 `sessionCrypto` is **async** and has no Node fallback. Rationale inline.
+> - §4.4 rotation: **open issue** raised — T6-AC-07 is unsatisfiable as written.
+>   Must be resolved in Wave 3.
+> - Wave 1 complete; §10 records what is and is not proven.
 
 > **Depends on:** `04-HOSTED-ACCOUNTS.md` (orgs, guards, tokens, RLS baseline) and
 > `05-HOSTED-BRIDGE.md` (queue, Realtime transport, protocol package). Both
@@ -118,7 +138,7 @@ Traffic analysis is possible and we should say so rather than imply perfect
 privacy: message *sizes and timing* leak activity patterns. What does not leak
 is content.
 
-### 3.3 Turn discipline — DECISION A
+### 3.3 Turn discipline — DECISION A ✅ CONFIRMED 2026-08-03
 
 **Agents do not autonomously converse by default.** A message from an agent
 lands in the transcript; it does not automatically wake the other agent.
@@ -141,7 +161,7 @@ unsupervised at 3am. The interesting product is *shared context*, which
 `observe` already delivers in full. Autonomy is a separate, riskier feature and
 should be opted into deliberately with a bound on the blast radius.
 
-### 3.4 Trust model of the link — DECISION B
+### 3.4 Trust model of the link — DECISION B ✅ CONFIRMED 2026-08-03
 
 **Anyone with the full link can read the transcript.** The key is in the
 fragment; possession is authorisation. This is the Google-Docs-link model, and
@@ -187,6 +207,12 @@ export const sharedSessions = pgTable('shared_sessions', {
   joinKeyHash: text('join_key_hash').notNull(),
   /** Bumped by rotation; old links fail the hash check. */
   keyVersion: integer('key_version').notNull().default(1),
+  /**
+   * ADDED IN WAVE 2. Monotonic counter backing session_messages.seq, bumped by
+   * trigger inside the inserting transaction. A SEQUENCE cannot be used —
+   * nextval() is non-transactional and leaves gaps, and T6-AC-09 says no gaps.
+   */
+  lastSeq: integer('last_seq').notNull().default(0),
   closedAt: timestamp('closed_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -238,8 +264,29 @@ export const sessionMessages = pgTable('session_messages', {
    * reveal content.
    */
   kind: text('kind', { enum: ['chat', 'agent_output', 'system'] }).notNull().default('chat'),
-  /** Monotonic per session. The client orders by this, not by clock. */
-  seq: integer('seq').notNull(),
+  /**
+   * Monotonic per session. The client orders by this, not by clock.
+   *
+   * ASSIGNED SERVER-SIDE, INSIDE THE INSERTING TRANSACTION — never read-then-
+   * write, and never supplied by the client (PostSessionMessageRequestSchema is
+   * `.strict()` and has no `seq`, so an invented one is a 400). A SELECT max(seq)
+   * followed by an INSERT is exactly the race §8.4 exists to catch, and it is
+   * the same discipline TRD 05 applied to enqueueDispatch. The unique index
+   * below is the backstop, not the mechanism.
+   *
+   * SHIPPED IN WAVE 2 as a BEFORE INSERT trigger over shared_sessions.last_seq.
+   * The trigger DISCARDS any client-supplied value, so choosing your own place
+   * in the transcript is impossible rather than merely refused. The `.default(0)`
+   * exists only so inserts may omit the column; it is never observed.
+   */
+  seq: integer('seq').notNull().default(0),
+  /**
+   * ADDED IN WAVE 2. Client-supplied idempotency key, unique per session where
+   * present. The transport is at-least-once, so a POST retried after a timeout
+   * must not double-post — and only the client knows two requests were one
+   * intent.
+   */
+  clientNonce: text('client_nonce'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   uniqSeq: unique('session_messages_seq_uniq').on(t.sessionId, t.seq),
@@ -269,6 +316,21 @@ So:
 and stay readable to holders of the old key. This is honest: rotation stops
 future leakage, it does not retract past access.
 
+> **OPEN — resolve in Wave 3.** As specified, `shared_sessions` holds exactly one
+> `joinKeyHash`, so after rotation a holder of only the old key cannot
+> authenticate at all — and therefore cannot *fetch* the pre-rotation ciphertext
+> they are supposedly still able to read. T6-AC-07 is unsatisfiable as written;
+> it is true only for someone who already downloaded the messages.
+>
+> Two ways out, to be chosen when the routes are built:
+> **(a)** keep superseded `joinKeyHash` values in a `session_key_versions` table
+> and let an old proof authenticate read-only requests bounded to
+> `seq <= <rotation seq>`; or **(b)** accept that rotation ends access outright
+> and reword T6-AC-07 to say so.
+>
+> (a) matches what §4.4 currently promises. (b) is simpler and arguably the
+> better security story. Either is defensible; silently shipping neither is not.
+
 ---
 
 ## 5. API Surface
@@ -287,12 +349,40 @@ future leakage, it does not retract past access.
 | `POST /api/sessions/shared/:id/rotate` | session, org member | Re-key |
 | `POST /api/sessions/shared/:id/close` | session, org member | Close to further messages |
 
-**Join proof** is `HMAC-SHA256(key, sessionId)` sent in a header — it proves
-possession of the key without transmitting it. The server recomputes against
-`joinKeyHash`… which it cannot, since it holds only the hash. So the proof is
-instead: the client sends `sha256(key)`, the server compares to `joinKeyHash` in
-constant time. That reveals the hash to the server, which is already stored, and
-never the key.
+**Join proof** — *corrected in Wave 1; the original text is preserved below
+because the reasoning matters.*
+
+> ~~`HMAC-SHA256(key, sessionId)` sent in a header — it proves possession of the
+> key without transmitting it. The server recomputes against `joinKeyHash`…
+> which it cannot, since it holds only the hash. So the proof is instead: the
+> client sends `sha256(key)`, the server compares to `joinKeyHash` in constant
+> time.~~
+
+That fallback is wrong, and wrong in a way worth naming: the value stored in the
+database is the same value the wire accepts, so `joinKeyHash` is **directly
+replayable**. A leaked backup, or anyone with read access to the table, could
+join any session. It is the store-the-password-verbatim mistake. It also made
+§7.1 false: `sha256(key)` is a function of the key, sent on every request.
+
+The shipped scheme splits one root secret into two independent HKDF branches:
+
+```
+k            32 random bytes, base64url — the fragment value, never sent
+ ├─ HKDF(k, salt="devpilot-session/v1", info="dp-session-content/v1") ──▶ encKey
+ └─ HKDF(k, salt="devpilot-session/v1", info="dp-session-verify/v1")  ──▶ joinVerifier
+                                                     │
+                                                     └─ sha256 ──▶ joinKeyHash  (stored)
+```
+
+- **Create** sends `joinKeyHash` only.
+- **Join** sends `joinVerifier` in `X-Session-Key-Proof`; the server hashes it
+  and compares to the stored `joinKeyHash` in constant time.
+- A database read yields `sha256(verifier)`, which cannot join and cannot
+  decrypt. The verifier is a different branch from the content key, so the
+  server — which receives the verifier on every join — can never derive
+  plaintext from it. `sessionCrypto` has a test asserting exactly that.
+
+Same UX, same single secret in the fragment, no extra round trip.
 
 **Participant tokens** are short-lived JWTs scoped to one session, minted at
 join. They keep message routes off the org-membership path entirely, which is
@@ -318,15 +408,43 @@ export const SessionMessageSchema = z.object({
 
 /** Same AES-256-GCM format as lib/bridge/crypto.ts, key supplied by the caller. */
 export const sessionCrypto: {
-  generateKey(): string;                                   // 32B base64url
-  keyFingerprint(key: string): string;                     // sha256 hex
-  encrypt(plain: string, key: string): string;
-  decrypt(payload: string, key: string): string;           // throws on tamper
+  generateKey(): string;                                          // 32B base64url
+  deriveJoinCredentials(key: string): Promise<JoinCredentials>;    // { verifier, joinKeyHash }
+  hashJoinVerifier(verifier: string): Promise<string>;             // server-side half
+  verifyJoinProof(verifier: string, storedHash: string): Promise<boolean>;  // constant-time
+  encrypt(plain: string, key: string): Promise<string>;
+  decrypt(payload: string, key: string): Promise<string>;          // throws on tamper
+  open(key: string): Promise<SessionCipher>;                       // derive once, reuse
 };
+
+export function buildJoinLink(baseUrl: string, sessionId: string, key: string): string;
+export function parseJoinLink(link: string): { sessionId: string; key: string };
 ```
 
-Runs in Node **and** the browser, so it uses WebCrypto with a Node fallback —
-one implementation, three consumers.
+Runs in Node **and** the browser. Two corrections to the sketch above, both made
+while building Wave 1:
+
+**The API is async.** SubtleCrypto is promise-returning throughout, and
+WebCrypto is the only AES implementation present in both Node 18+ and the
+browser. The alternatives were a Node/browser split — two implementations, the
+exact drift TRD 05 deleted `packages/bridge` to prevent — or a hand-rolled AES
+in JS. One async implementation, three consumers.
+
+**`keyFingerprint` is replaced by `deriveJoinCredentials`**, per the §5
+correction: `sha256(key)` was never safe to use as a join proof.
+
+There is no Node fallback and no platform branching anywhere in the module,
+including base64: the encoders are hand-rolled so the CLI and the browser cannot
+produce different bytes. A test asserts the compiled module references no
+`Buffer`, no `node:` import, and no `process`, and round-trips with those
+globals deleted.
+
+**Wave 1 file layout.** The session schemas live in
+`packages/bridge-protocol/src/session-messages.ts`, not in the existing
+`messages.ts`, which is dispatch-shaped: one issue, one orchestrator,
+server-readable. Keeping the conversation schemas separate keeps visible the one
+distinction a reader most needs — which payloads the server can read and which
+it cannot.
 
 ### 6.2 `packages/mcp-session` (new, published)
 
@@ -443,20 +561,109 @@ by link and post, and can read *nothing else* in that org.
 
 Wave protocol per `00-PROGRAM-OVERVIEW.md` §2.2.
 
-### Wave 1 — Protocol & crypto (public repo; independent)
+### Wave 1 — Protocol & crypto (public repo; independent) ✅ COMPLETE
 
 | ID | Title | Repo | Files | Cx | Done-check |
 |---|---|---|---|---|---|
-| T6-W1-T1 | `sessionCrypto` | devpilot | `packages/bridge-protocol/src/session-crypto.ts` | M | §8.1 passes in Node and browser builds |
-| T6-W1-T2 | Message schemas | devpilot | `packages/bridge-protocol/src/messages.ts` | S | Round-trip tests |
+| T6-W1-T1 | `sessionCrypto` | devpilot | `packages/bridge-protocol/src/session-crypto.ts` | M | ✅ §8.1 — 47 tests |
+| T6-W1-T2 | Message schemas | devpilot | `packages/bridge-protocol/src/session-messages.ts` | S | ✅ 41 tests |
 
-### Wave 2 — Schema & RLS (website)
+Gates green: `typecheck | lint | test | build`, 148 tests (was 60). The built
+ESM bundle was executed directly, not just compiled — golden vector, join proof,
+replay rejection and link round-trip all verified against `dist/`.
+
+**Proven in Wave 1**
+
+- Round-trip across ASCII, unicode, empty, and 200 KB payloads.
+- Wrong key and tampering in any of the three ciphertext parts throw
+  `SessionDecryptionError` — no garbage returns.
+- No IV reuse across 50 encryptions of identical plaintext under one key.
+- The verifier the server receives **cannot decrypt** — the load-bearing
+  assertion behind §3.2.
+- Replaying the stored `joinKeyHash` as a proof **fails**; regression guard for
+  the §5 defect.
+- Golden vectors pin both HKDF branches, so a change to the salt or info strings
+  fails here rather than in production as an undecryptable message.
+
+**Not proven in Wave 1 — stated rather than implied**
+
+- **Execution in a real browser engine.** jsdom has no SubtleCrypto, so a jsdom
+  run would fail for reasons unrelated to this code and prove nothing. The
+  browser guarantee is currently *static*: the compiled module references no
+  `Buffer`, no `node:` import and no `process`, and round-trips with those
+  globals deleted. T6-W5-T1's join page is the first consumer that runs it in a
+  browser for real, and §8.1 is only genuinely satisfied there.
+- Nothing on the server exists yet, so §8.2 (server blindness) is asserted at
+  the schema boundary only — `.strict()` rejects a key-bearing create request.
+  The database half is Wave 2.
+
+### Wave 2 — Schema & RLS (website) ✅ COMPLETE
 
 | ID | Title | Files | Cx | Done-check |
 |---|---|---|---|---|
-| T6-W2-T1 | Three tables | `lib/db/schema/shared-sessions.ts` | M | Typechecks |
-| T6-W2-T2 | Migration + RLS + policies | `supabase/migrations/*` | L | pgTAP; §8.2 |
-| T6-W2-T3 | Extend ciphertext gate | `scripts/check-secret-columns.mjs` | S | T6-AC-11 |
+| T6-W2-T1 | Three tables | `lib/db/schema/shared-sessions.ts` | M | ✅ |
+| T6-W2-T2 | Migration + RLS + policies | `supabase/migrations/20260803194850_*` | L | ✅ 35 pgTAP (was 18); §8.2 |
+| T6-W2-T3 | Extend ciphertext gate | `scripts/check-secret-columns.mjs` | S | ✅ T6-AC-11 |
+
+Gates green: `typecheck | lint | check:guards | check:secrets | test | test:db | check:drift`.
+258 vitest tests (was 218), 35 pgTAP (was 18). Migration applied to the live
+project and replayed from zero locally, so the ledger is known complete.
+
+**Three schema additions not in §4:**
+
+- `shared_sessions.last_seq` — the counter backing `session_messages.seq`.
+  Required by T6-AC-09, which asks for *no gaps*. That rules out a Postgres
+  SEQUENCE, whose `nextval()` is deliberately non-transactional and burns a
+  number on every rollback. It also cannot be done from the route layer without
+  the read-then-write race §8.4 exists to catch.
+- `session_messages.client_nonce` — unique per session where present. The
+  transport is at-least-once, so a POST retried after a timeout must not
+  double-post, and only the client knows two requests were one intent.
+- CHECK constraints for every "enum" column. `text('col', { enum: [...] })` is
+  TypeScript-only and emits no DDL — the lesson of migration `20260801193005`,
+  where four columns the app treated as closed sets accepted arbitrary text.
+
+**`seq` is assigned by trigger, not by the route.** A BEFORE INSERT trigger
+bumps `last_seq` with `UPDATE … RETURNING` inside the caller's transaction: the
+row lock serialises concurrent posters and a rollback returns the number. The
+trigger *discards* whatever `seq` the caller supplied, so a client cannot choose
+its position in the transcript even if a future route forgets to strip the
+field. It also refuses appends to a closed session and posts under a superseded
+`key_version` — a stale client would otherwise write a message nobody can
+decrypt, a silent hole in the transcript.
+
+**DECISION A is enforced by a CHECK, not by a handler.** `mode = 'auto'` without
+both a budget and an expiry is unrepresentable in the database. Combined with
+Wave 1's schema refinement, an unbounded autonomous session cannot be
+constructed at either layer.
+
+**The §7.3 gate is path-based, not a blanket ban.** Forbidding the identifier
+`ciphertext` outright would make the product unimplementable: the transcript API
+*must* return it and the browser *must* receive it, because the key is in the
+fragment and decryption is client-side. The rule is about which path carries it
+— permitted on the participant-token API and in client components, forbidden in
+anything server-rendered. A server component renders for a viewer authorised by
+org membership rather than by possession of the key, so an RSC payload carrying
+a transcript would hand it to an admin who never had the link, quietly turning
+§3.4 into "link OR org", which §10 forbids in those words.
+
+`check-secret-columns.mjs` also now covers `join_key_hash`, and has 17 fixtures
+of its own asserting it actually fires — a control nobody has watched fail is
+indistinguishable from one that cannot, which is the shape of the `|| true`
+defect this program already paid for once.
+
+**Realtime deliberately untouched.** TRD 05 §4.2 asserts the publication is
+exactly `dispatch_queue` and `dispatch_sessions`. Wave 2 adds nothing to it, for
+the reason TRD 05 made the queue table the delivery guarantee: Realtime is a
+latency optimisation, `SUPABASE_JWT_SECRET` is still unset, and it has never
+connected in this project. `GET /messages?since=<seq>` is fully correct without
+it. A test pins the publication membership so adding one stays an explicit act.
+
+**Not proven in Wave 2.** No route exists yet, so the participant token is
+modelled in pgTAP by setting the JWT claim directly. That `shared_session_id`
+claim is only as good as the Wave 3 minting code that sets it, and nothing here
+verifies that code — because it does not exist. Rate limits (§5) are likewise
+Wave 3: the database caps message *size*, not rate.
 
 ### Wave 3 — Routes (website)
 
@@ -496,4 +703,4 @@ Wave protocol per `00-PROGRAM-OVERVIEW.md` §2.2.
 - **Ciphertext is never rendered server-side**, encrypted or not.
 - The invariant from TRD 05 stands: **agents run locally.**
 
-*TRD 06 · v1.0 · August 2026 · DRAFT*
+*TRD 06 · v1.2 · August 2026 · Waves 1–2 shipped*
