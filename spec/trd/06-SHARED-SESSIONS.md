@@ -1,6 +1,15 @@
 # TRD 06 — Shared Agent Sessions
 ## Cross-Machine Agent Coordination · End-to-End Encrypted Transcripts · Join Links · MCP Bridge
-### v1.1 · August 2026 · Status: WAVE 1 SHIPPED
+### v1.2 · August 2026 · Status: WAVES 1–2 SHIPPED
+
+> **Change log — v1.2 (3 Aug 2026)**
+> - Wave 2 complete: three tables, RLS, policies, `seq` trigger, ciphertext
+>   gate. Applied live and replayed from zero. §10 records the deviations.
+> - §4.1 gains `last_seq`, §4.3 gains `client_nonce` — both forced by
+>   acceptance criteria the original schema could not satisfy.
+> - `seq` is assigned by trigger and client values are discarded.
+> - DECISION A is now a CHECK constraint: unbounded `auto` is unrepresentable.
+> - Realtime deliberately not extended; polling is the correct path (TRD 05 §4.2).
 
 > **Change log — v1.1 (3 Aug 2026)**
 > - Decisions A (§3.3, `observe` default) and B (§3.4, fragment-only key)
@@ -198,6 +207,12 @@ export const sharedSessions = pgTable('shared_sessions', {
   joinKeyHash: text('join_key_hash').notNull(),
   /** Bumped by rotation; old links fail the hash check. */
   keyVersion: integer('key_version').notNull().default(1),
+  /**
+   * ADDED IN WAVE 2. Monotonic counter backing session_messages.seq, bumped by
+   * trigger inside the inserting transaction. A SEQUENCE cannot be used —
+   * nextval() is non-transactional and leaves gaps, and T6-AC-09 says no gaps.
+   */
+  lastSeq: integer('last_seq').notNull().default(0),
   closedAt: timestamp('closed_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -258,8 +273,20 @@ export const sessionMessages = pgTable('session_messages', {
    * followed by an INSERT is exactly the race §8.4 exists to catch, and it is
    * the same discipline TRD 05 applied to enqueueDispatch. The unique index
    * below is the backstop, not the mechanism.
+   *
+   * SHIPPED IN WAVE 2 as a BEFORE INSERT trigger over shared_sessions.last_seq.
+   * The trigger DISCARDS any client-supplied value, so choosing your own place
+   * in the transcript is impossible rather than merely refused. The `.default(0)`
+   * exists only so inserts may omit the column; it is never observed.
    */
-  seq: integer('seq').notNull(),
+  seq: integer('seq').notNull().default(0),
+  /**
+   * ADDED IN WAVE 2. Client-supplied idempotency key, unique per session where
+   * present. The transport is at-least-once, so a POST retried after a timeout
+   * must not double-post — and only the client knows two requests were one
+   * intent.
+   */
+  clientNonce: text('client_nonce'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   uniqSeq: unique('session_messages_seq_uniq').on(t.sessionId, t.seq),
@@ -570,13 +597,73 @@ replay rejection and link round-trip all verified against `dist/`.
   the schema boundary only — `.strict()` rejects a key-bearing create request.
   The database half is Wave 2.
 
-### Wave 2 — Schema & RLS (website)
+### Wave 2 — Schema & RLS (website) ✅ COMPLETE
 
 | ID | Title | Files | Cx | Done-check |
 |---|---|---|---|---|
-| T6-W2-T1 | Three tables | `lib/db/schema/shared-sessions.ts` | M | Typechecks |
-| T6-W2-T2 | Migration + RLS + policies | `supabase/migrations/*` | L | pgTAP; §8.2 |
-| T6-W2-T3 | Extend ciphertext gate | `scripts/check-secret-columns.mjs` | S | T6-AC-11 |
+| T6-W2-T1 | Three tables | `lib/db/schema/shared-sessions.ts` | M | ✅ |
+| T6-W2-T2 | Migration + RLS + policies | `supabase/migrations/20260803194850_*` | L | ✅ 35 pgTAP (was 18); §8.2 |
+| T6-W2-T3 | Extend ciphertext gate | `scripts/check-secret-columns.mjs` | S | ✅ T6-AC-11 |
+
+Gates green: `typecheck | lint | check:guards | check:secrets | test | test:db | check:drift`.
+258 vitest tests (was 218), 35 pgTAP (was 18). Migration applied to the live
+project and replayed from zero locally, so the ledger is known complete.
+
+**Three schema additions not in §4:**
+
+- `shared_sessions.last_seq` — the counter backing `session_messages.seq`.
+  Required by T6-AC-09, which asks for *no gaps*. That rules out a Postgres
+  SEQUENCE, whose `nextval()` is deliberately non-transactional and burns a
+  number on every rollback. It also cannot be done from the route layer without
+  the read-then-write race §8.4 exists to catch.
+- `session_messages.client_nonce` — unique per session where present. The
+  transport is at-least-once, so a POST retried after a timeout must not
+  double-post, and only the client knows two requests were one intent.
+- CHECK constraints for every "enum" column. `text('col', { enum: [...] })` is
+  TypeScript-only and emits no DDL — the lesson of migration `20260801193005`,
+  where four columns the app treated as closed sets accepted arbitrary text.
+
+**`seq` is assigned by trigger, not by the route.** A BEFORE INSERT trigger
+bumps `last_seq` with `UPDATE … RETURNING` inside the caller's transaction: the
+row lock serialises concurrent posters and a rollback returns the number. The
+trigger *discards* whatever `seq` the caller supplied, so a client cannot choose
+its position in the transcript even if a future route forgets to strip the
+field. It also refuses appends to a closed session and posts under a superseded
+`key_version` — a stale client would otherwise write a message nobody can
+decrypt, a silent hole in the transcript.
+
+**DECISION A is enforced by a CHECK, not by a handler.** `mode = 'auto'` without
+both a budget and an expiry is unrepresentable in the database. Combined with
+Wave 1's schema refinement, an unbounded autonomous session cannot be
+constructed at either layer.
+
+**The §7.3 gate is path-based, not a blanket ban.** Forbidding the identifier
+`ciphertext` outright would make the product unimplementable: the transcript API
+*must* return it and the browser *must* receive it, because the key is in the
+fragment and decryption is client-side. The rule is about which path carries it
+— permitted on the participant-token API and in client components, forbidden in
+anything server-rendered. A server component renders for a viewer authorised by
+org membership rather than by possession of the key, so an RSC payload carrying
+a transcript would hand it to an admin who never had the link, quietly turning
+§3.4 into "link OR org", which §10 forbids in those words.
+
+`check-secret-columns.mjs` also now covers `join_key_hash`, and has 17 fixtures
+of its own asserting it actually fires — a control nobody has watched fail is
+indistinguishable from one that cannot, which is the shape of the `|| true`
+defect this program already paid for once.
+
+**Realtime deliberately untouched.** TRD 05 §4.2 asserts the publication is
+exactly `dispatch_queue` and `dispatch_sessions`. Wave 2 adds nothing to it, for
+the reason TRD 05 made the queue table the delivery guarantee: Realtime is a
+latency optimisation, `SUPABASE_JWT_SECRET` is still unset, and it has never
+connected in this project. `GET /messages?since=<seq>` is fully correct without
+it. A test pins the publication membership so adding one stays an explicit act.
+
+**Not proven in Wave 2.** No route exists yet, so the participant token is
+modelled in pgTAP by setting the JWT claim directly. That `shared_session_id`
+claim is only as good as the Wave 3 minting code that sets it, and nothing here
+verifies that code — because it does not exist. Rate limits (§5) are likewise
+Wave 3: the database caps message *size*, not rate.
 
 ### Wave 3 — Routes (website)
 
@@ -616,4 +703,4 @@ replay rejection and link round-trip all verified against `dist/`.
 - **Ciphertext is never rendered server-side**, encrypted or not.
 - The invariant from TRD 05 stands: **agents run locally.**
 
-*TRD 06 · v1.1 · August 2026 · Wave 1 shipped*
+*TRD 06 · v1.2 · August 2026 · Waves 1–2 shipped*
