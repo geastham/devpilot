@@ -20,15 +20,18 @@
  *   5. delete everything it created
  *
  * Usage:
- *   node run-local-dispatch.mjs                  # http mode, happy path
- *   node run-local-dispatch.mjs --fail           # agent fails
- *   node run-local-dispatch.mjs --mode ao-cli    # exercise the ao CLI wrapper
- *   node run-local-dispatch.mjs --mode ao-cli --fail
+ *   node run-local-dispatch.mjs           # happy path
+ *   node run-local-dispatch.mjs --fail    # agent fails; assert error + settle
  *
- * ao-cli mode runs against tests/harness/fake-ao.mjs, which speaks the exact
- * stdout format AoCliAdapter parses. That proves OUR argv construction and
- * parsing; it does not prove the real `ao` emits that format — see the note in
- * fake-ao.mjs.
+ * ao-cli mode was removed from this harness on 2026-08-03. It exercised
+ * AoCliAdapter against tests/harness/fake-ao.mjs — a fake that spoke the format
+ * the adapter EXPECTED. Checking against the real `ao` showed that format no
+ * longer exists (`ao list` and `ao status <id>` are both gone, and `ao spawn`
+ * takes no prompt), so the adapter is deprecated and throws.
+ *
+ * The lesson is worth keeping: a harness built from our own assumptions
+ * confirms our internal consistency and nothing about the world. fake-ao.mjs is
+ * retained only as a record of what we had assumed. See docs/AO-INTEGRATION.md.
  */
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';

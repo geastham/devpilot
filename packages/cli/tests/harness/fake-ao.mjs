@@ -1,5 +1,15 @@
 #!/usr/bin/env node
 /**
+ * RETAINED AS A RECORD — not wired into any harness.
+ *
+ * This speaks the stdout format AoCliAdapter expects. Checking it against the
+ * real `ao` on 2026-08-03 showed that format does not exist: `ao list` and
+ * `ao status <id>` were removed, and `ao spawn` accepts no prompt. The adapter
+ * is deprecated (see docs/AO-INTEGRATION.md).
+ *
+ * Kept because it documents precisely what we had assumed, which is the useful
+ * artifact when someone rebuilds the integration against the ao daemon.
+ *
  * Fake `ao` binary — a stand-in for the agent-orchestrator CLI.
  *
  * WHAT THIS PROVES: the parts of ao-cli mode that are OURS — how

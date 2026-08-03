@@ -125,6 +125,42 @@ export class AoCliAdapter implements IOrchestratorAdapter {
   constructor(config: OrchestratorAdapterConfig) {
     this.config = config;
     this.aoPath = config.aoPath || 'ao';
+
+    // DEPRECATED — this adapter cannot work against any current `ao`.
+    //
+    // Verified against @composio/ao-cli on 2026-08-03. Every command this
+    // adapter issues has been removed or changed shape:
+    //
+    //   ao list                 -> "error: unknown command 'list'"
+    //   ao status <sessionId>   -> "error: too many arguments for 'status'.
+    //                              Expected 0 arguments but got 1."
+    //   ao spawn <proj> <tkt> "<prompt>"
+    //                           -> spawn takes [project] [issue-id] and accepts
+    //                              NO prompt; agents are instructed afterwards
+    //                              via `ao send`.
+    //   --model / --repo        -> do not exist (the flag is --agent)
+    //
+    // The project also inverted its architecture: `ao` is now a Go daemon on
+    // 127.0.0.1:3001 exposing REST (`POST /api/v1/sessions`, SSE for changes),
+    // and the CLI is a thin client of it. Shelling out and scraping stdout is
+    // no longer the integration surface at all.
+    //
+    // Failing loudly here is deliberate. Silently dispatching into a broken
+    // adapter looks like "the agent never started" and costs hours to diagnose;
+    // the previous behaviour was exactly that.
+    //
+    // See spec/trd/06-SHARED-SESSIONS.md §2 and docs/AO-INTEGRATION.md.
+    throw new Error(
+      'The ao-cli orchestrator mode is deprecated and non-functional.\n' +
+        '\n' +
+        "  `ao` no longer exposes the commands this adapter calls (`ao list`,\n" +
+        '  `ao status <id>`), and `ao spawn` no longer accepts a prompt.\n' +
+        '\n' +
+        '  Use --mode http against the ao daemon instead:\n' +
+        '    devpilot bridge connect --mode http --http-url http://127.0.0.1:3001\n' +
+        '\n' +
+        '  See docs/AO-INTEGRATION.md for the current integration path.',
+    );
     this.projectName = config.aoProjectName || 'default';
     this.workingDirectory = config.workingDirectory;
   }

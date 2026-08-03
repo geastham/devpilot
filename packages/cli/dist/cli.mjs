@@ -2010,7 +2010,7 @@ function createBridgeDispatchHandler(opts) {
 }
 
 // src/commands/bridge/connect.ts
-var connectCommand = new Command6("connect").description("Connect this machine to a DevPilot bridge and run dispatched work locally").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-n, --name <name>", "Name for this machine", os.hostname()).option("-r, --repos <repos>", "Comma-separated repos this machine handles").option("-m, --mode <mode>", "Local orchestrator mode (ao-cli|http|claude-session)", "ao-cli").option(
+var connectCommand = new Command6("connect").description("Connect this machine to a DevPilot bridge and run dispatched work locally").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-n, --name <name>", "Name for this machine", os.hostname()).option("-r, --repos <repos>", "Comma-separated repos this machine handles").option("-m, --mode <mode>", "Local orchestrator mode (http|claude-session)", "http").option(
   "--transport <transport>",
   "realtime | poll \u2014 polling is fully correct, just higher latency",
   process.env.DEVPILOT_BRIDGE_TRANSPORT || "realtime"
@@ -2030,8 +2030,15 @@ var connectCommand = new Command6("connect").description("Connect this machine t
   console.log(chalk7.gray(`   ${options.url}`));
   console.log(chalk7.gray(`   machine: ${options.name}`));
   console.log("");
+  if (options.mode === "ao-cli") {
+    console.error(chalk7.red("\u2717 --mode ao-cli is deprecated and non-functional."));
+    console.error(chalk7.gray("  `ao` is now a daemon on 127.0.0.1:3001; point http mode at it:"));
+    console.error(chalk7.gray("    devpilot bridge connect --mode http --http-url http://127.0.0.1:3001"));
+    process.exit(1);
+  }
   if (options.mode === "http" && !options.httpUrl) {
     console.error(chalk7.red("\u2717 --mode http requires --http-url"));
+    console.error(chalk7.gray("  For the ao daemon: --http-url http://127.0.0.1:3001"));
     process.exit(1);
   }
   const client = new BridgeClient({ bridgeUrl: options.url, token: options.token });

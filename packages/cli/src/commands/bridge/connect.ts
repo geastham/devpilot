@@ -23,7 +23,9 @@ export const connectCommand = new Command('connect')
   .option('-t, --token <token>', 'Orchestrator token (dp_orch_…)', process.env.DEVPILOT_BRIDGE_TOKEN)
   .option('-n, --name <name>', 'Name for this machine', os.hostname())
   .option('-r, --repos <repos>', 'Comma-separated repos this machine handles')
-  .option('-m, --mode <mode>', 'Local orchestrator mode (ao-cli|http|claude-session)', 'ao-cli')
+  // Default is `http`: ao-cli is deprecated and throws (see ao-cli-adapter.ts),
+  // and http is the mode that points at the current ao daemon on :3001.
+  .option('-m, --mode <mode>', 'Local orchestrator mode (http|claude-session)', 'http')
   .option(
     '--transport <transport>',
     'realtime | poll — polling is fully correct, just higher latency',
@@ -52,8 +54,15 @@ export const connectCommand = new Command('connect')
     console.log(chalk.gray(`   machine: ${options.name}`));
     console.log('');
 
+    if (options.mode === 'ao-cli') {
+      console.error(chalk.red('✗ --mode ao-cli is deprecated and non-functional.'));
+      console.error(chalk.gray('  `ao` is now a daemon on 127.0.0.1:3001; point http mode at it:'));
+      console.error(chalk.gray('    devpilot bridge connect --mode http --http-url http://127.0.0.1:3001'));
+      process.exit(1);
+    }
     if (options.mode === 'http' && !options.httpUrl) {
       console.error(chalk.red('✗ --mode http requires --http-url'));
+      console.error(chalk.gray('  For the ao daemon: --http-url http://127.0.0.1:3001'));
       process.exit(1);
     }
 

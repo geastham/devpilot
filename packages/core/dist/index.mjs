@@ -4870,6 +4870,9 @@ var AoCliAdapter = class {
     this.mode = "ao-cli";
     this.config = config;
     this.aoPath = config.aoPath || "ao";
+    throw new Error(
+      "The ao-cli orchestrator mode is deprecated and non-functional.\n\n  `ao` no longer exposes the commands this adapter calls (`ao list`,\n  `ao status <id>`), and `ao spawn` no longer accepts a prompt.\n\n  Use --mode http against the ao daemon instead:\n    devpilot bridge connect --mode http --http-url http://127.0.0.1:3001\n\n  See docs/AO-INTEGRATION.md for the current integration path."
+    );
     this.projectName = config.aoProjectName || "default";
     this.workingDirectory = config.workingDirectory;
   }
