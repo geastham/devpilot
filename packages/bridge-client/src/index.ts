@@ -12,6 +12,12 @@ export {
   type DispatchHandler,
 } from './dispatch-loop';
 export { HeartbeatService, type HeartbeatConfig } from './heartbeat';
+export {
+  SharedSessionClient,
+  type SharedSessionJoinOptions,
+  type TranscriptEntry,
+  type EntryStatus,
+} from './shared-session';
 
 /** @deprecated Removed in 0.2.0 — throws with upgrade instructions. */
 export { PubSubSubscriber } from './pubsub';

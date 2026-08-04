@@ -517,6 +517,17 @@ var SharedSessionSchema = import_zod4.z.object({
   autoBudgetRemaining: import_zod4.z.number().int().nonnegative().optional(),
   autoExpiresAt: import_zod4.z.string().datetime().nullable().optional(),
   closedAt: import_zod4.z.string().datetime().nullable().optional(),
+  /**
+   * Highest assigned `seq`, so a joiner knows how far behind it is without
+   * fetching the transcript first.
+   *
+   * ADDED IN WAVE 4. Wave 2 introduced the column and Wave 3's route has been
+   * returning it since, but this schema — the thing that is supposed to BE the
+   * wire contract — never declared it. Caught by the MCP server, which is the
+   * first consumer to read the session object through the published types
+   * rather than through a hand-written fetch.
+   */
+  lastSeq: import_zod4.z.number().int().nonnegative().optional(),
   createdAt: import_zod4.z.string().datetime()
 });
 var CreateSharedSessionRequestSchema = import_zod4.z.object({

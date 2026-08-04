@@ -112,6 +112,17 @@ export const SharedSessionSchema = z.object({
   autoBudgetRemaining: z.number().int().nonnegative().optional(),
   autoExpiresAt: z.string().datetime().nullable().optional(),
   closedAt: z.string().datetime().nullable().optional(),
+  /**
+   * Highest assigned `seq`, so a joiner knows how far behind it is without
+   * fetching the transcript first.
+   *
+   * ADDED IN WAVE 4. Wave 2 introduced the column and Wave 3's route has been
+   * returning it since, but this schema — the thing that is supposed to BE the
+   * wire contract — never declared it. Caught by the MCP server, which is the
+   * first consumer to read the session object through the published types
+   * rather than through a hand-written fetch.
+   */
+  lastSeq: z.number().int().nonnegative().optional(),
   createdAt: z.string().datetime(),
 });
 export type SharedSession = z.infer<typeof SharedSessionSchema>;

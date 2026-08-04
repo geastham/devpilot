@@ -215,6 +215,24 @@ describe('what the server hands back', () => {
   });
 
   /** A participant may be from another org, so org internals must not ride along. */
+  /**
+   * REGRESSION GUARD. `lastSeq` was returned by the Wave 3 route for a full
+   * wave before this schema declared it — the wire contract silently described
+   * something other than the wire. A field the server sends and this schema
+   * omits is drift, even though zod would strip it without complaint.
+   */
+  it('declares lastSeq, which the session routes return', () => {
+    const parsed = SharedSessionSchema.parse({
+      id: 'sess_1',
+      title: 'T',
+      mode: 'observe',
+      keyVersion: 1,
+      lastSeq: 12,
+      createdAt: '2026-08-04T10:00:00.000Z',
+    });
+    expect(parsed.lastSeq).toBe(12);
+  });
+
   it('leaks neither orgId nor joinKeyHash to a participant', () => {
     const keys = Object.keys(SharedSessionSchema.shape);
     expect(keys).not.toContain('orgId');

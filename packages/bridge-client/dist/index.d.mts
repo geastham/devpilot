@@ -1,4 +1,4 @@
-import { RegisterRequest, RegisterResponse, TaskDispatchMessage, SessionStatusUpdate, SessionComplete } from '@devpilot.sh/bridge-protocol';
+import { RegisterRequest, RegisterResponse, TaskDispatchMessage, SessionStatusUpdate, SessionComplete, SharedSession, SessionMessage, SessionMessageKind, SessionParticipant } from '@devpilot.sh/bridge-protocol';
 export { RegisterRequest, RegisterResponse, SessionComplete, SessionStatus, SessionStatusUpdate, TaskDispatchMessage } from '@devpilot.sh/bridge-protocol';
 
 interface BridgeClientConfig {
@@ -155,9 +155,98 @@ declare class HeartbeatService {
     stop(): void;
 }
 
+/**
+ * Shared agent sessions client — TRD 06 §5, §6.2, §6.3.
+ *
+ * One implementation for both consumers: `@devpilot.sh/mcp-session` (so Claude
+ * Code can take part) and `devpilot session …` in the CLI. Duplicating it would
+ * be the drift that got `packages/bridge` deleted in TRD 05.
+ *
+ * ─── The key never leaves this process ──────────────────────────────────────
+ *
+ * It is parsed out of the link fragment, held in a private field, and used only
+ * to derive the join verifier and to encrypt/decrypt locally. It is never sent
+ * to the bridge, never written to disk, and deliberately not exposed on the
+ * instance — `toJSON` is overridden so an accidental `console.log(client)` or
+ * `JSON.stringify(client)` cannot print it. That last one is not paranoia: a
+ * debug log is exactly how a secret ends up in a terminal recording.
+ *
+ * ─── What "cannot decrypt" means here ───────────────────────────────────────
+ *
+ * Two kinds of message do not decrypt, and BOTH are reported rather than hidden:
+ *
+ *   system        server-authored plaintext (TRD 06 §3.2, corrected in v1.3).
+ *                 The server cannot encrypt — it holds no key — so its notices
+ *                 about auto-mode expiry arrive as plaintext with a `system:`
+ *                 prefix. Attempting to decrypt one would just throw.
+ *   undecryptable sealed under a superseded keyVersion. After a rotation, a
+ *                 holder of only the new key genuinely cannot read history.
+ *                 Silently dropping those would make the transcript look
+ *                 complete when it is not, which is worse than a visible gap.
+ */
+
+interface SharedSessionJoinOptions {
+    /** `https://devpilot.sh/s/<id>#k=<key>` — the fragment carries the key. */
+    link: string;
+    displayName: string;
+    kind?: 'human' | 'agent';
+    agentKind?: 'claude-code' | 'codex' | 'ao' | 'other';
+    orchestratorId?: string;
+    fetchImpl?: typeof fetch;
+}
+type EntryStatus = 'ok' | 'system' | 'undecryptable';
+interface TranscriptEntry {
+    id: string;
+    seq: number;
+    participantId: string | null;
+    kind: SessionMessageKind;
+    keyVersion: number;
+    createdAt: string;
+    /** Plaintext when readable; null otherwise. Never a decryption failure string. */
+    text: string | null;
+    status: EntryStatus;
+    /** Present when status is 'system' — the parsed server notice. */
+    systemNotice?: {
+        type: string;
+        reason?: string;
+    };
+}
+declare class SharedSessionClient {
+    #private;
+    readonly sessionId: string;
+    readonly baseUrl: string;
+    private constructor();
+    /** Joins by link. The key is taken from the fragment and kept in memory. */
+    static join(options: SharedSessionJoinOptions): Promise<SharedSessionClient>;
+    get participantId(): string;
+    get session(): SharedSession;
+    /** Encrypts locally, then posts. The bridge sees only ciphertext. */
+    post(text: string, opts?: {
+        kind?: 'chat' | 'agent_output';
+        clientNonce?: string;
+    }): Promise<SessionMessage>;
+    /** Reads and decrypts locally. `since` is a seq cursor, never a clock. */
+    read(since?: number): Promise<{
+        entries: TranscriptEntry[];
+        latestSeq: number;
+        hasMore: boolean;
+    }>;
+    who(): Promise<SessionParticipant[]>;
+    /**
+     * Keeps `console.log(client)` and `JSON.stringify(client)` from printing the
+     * key. Private fields are already invisible to JSON.stringify, but this is
+     * cheap and states the intent where someone adding a field will read it.
+     */
+    toJSON(): {
+        sessionId: string;
+        baseUrl: string;
+        participantId: string;
+    };
+}
+
 /** @deprecated Removed in 0.2.0. Use RealtimeSubscriber. */
 declare class PubSubSubscriber {
     constructor();
 }
 
-export { BridgeClient, type BridgeClientConfig, BridgeError, type DispatchHandler, DispatchLoop, type DispatchLoopConfig, type HeartbeatConfig, HeartbeatService, PubSubSubscriber, RealtimeSubscriber, type RealtimeSubscriberConfig };
+export { BridgeClient, type BridgeClientConfig, BridgeError, type DispatchHandler, DispatchLoop, type DispatchLoopConfig, type EntryStatus, type HeartbeatConfig, HeartbeatService, PubSubSubscriber, RealtimeSubscriber, type RealtimeSubscriberConfig, SharedSessionClient, type SharedSessionJoinOptions, type TranscriptEntry };
