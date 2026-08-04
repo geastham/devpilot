@@ -436,11 +436,15 @@ _session = new WeakMap();
 _joinOptions = new WeakMap();
 _fetchImpl = new WeakMap();
 _SharedSessionClient_static = new WeakSet();
-requestJoin_fn = async function(fetchImpl, baseUrl, sessionId, key, joinOptions) {
+requestJoin_fn = async function(fetchImpl, baseUrl, sessionId, key, joinOptions, resumeToken) {
   const { verifier } = await import_bridge_protocol2.sessionCrypto.deriveJoinCredentials(key);
   const res = await fetchImpl(`${baseUrl}/api/sessions/shared/${sessionId}/join`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", [import_bridge_protocol2.JOIN_PROOF_HEADER]: verifier },
+    headers: {
+      "Content-Type": "application/json",
+      [import_bridge_protocol2.JOIN_PROOF_HEADER]: verifier,
+      ...resumeToken ? { "x-session-resume": resumeToken } : {}
+    },
     body: JSON.stringify(joinOptions)
   });
   if (!res.ok) {
@@ -472,7 +476,7 @@ request_fn = async function(path, init = {}, retried = false) {
     }
   });
   if (res.status === 401 && !retried) {
-    const rejoined = await __privateMethod(_a = _SharedSessionClient, _SharedSessionClient_static, requestJoin_fn).call(_a, __privateGet(this, _fetchImpl), this.baseUrl, this.sessionId, __privateGet(this, _key), __privateGet(this, _joinOptions));
+    const rejoined = await __privateMethod(_a = _SharedSessionClient, _SharedSessionClient_static, requestJoin_fn).call(_a, __privateGet(this, _fetchImpl), this.baseUrl, this.sessionId, __privateGet(this, _key), __privateGet(this, _joinOptions), __privateGet(this, _token));
     __privateSet(this, _token, rejoined.token);
     __privateSet(this, _participantId, rejoined.participantId);
     __privateSet(this, _session, rejoined.session);
