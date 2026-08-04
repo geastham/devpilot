@@ -35,7 +35,7 @@ __export(cli_exports, {
   runCli: () => runCli
 });
 module.exports = __toCommonJS(cli_exports);
-var import_commander12 = require("commander");
+var import_commander16 = require("commander");
 var import_update_notifier = __toESM(require("update-notifier"));
 
 // src/version.ts
@@ -2213,10 +2213,153 @@ var statusCommand2 = new import_commander8.Command("status").description("Check 
 // src/commands/bridge.ts
 var bridgeCommand = new import_commander9.Command("bridge").description("Manage connection to DevPilot cloud bridge").addCommand(connectCommand).addCommand(disconnectCommand).addCommand(statusCommand2);
 
-// src/commands/update.ts
+// src/commands/session.ts
+var import_commander13 = require("commander");
+
+// src/commands/session/new.ts
 var import_commander10 = require("commander");
-var import_child_process2 = require("child_process");
 var import_chalk10 = __toESM(require("chalk"));
+var import_bridge_protocol = require("@devpilot.sh/bridge-protocol");
+var newCommand = new import_commander10.Command("new").description("Create a shared session and print its join link").argument("<title>", "What this session is about (stored in plaintext \u2014 no secrets)").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-o, --org <orgId>", "Organization id that will own the session").option("--issue <identifier>", "Linear issue identifier to attach, e.g. ENG-394").action(async (title, options) => {
+  if (!options.url || !options.token) {
+    console.error(import_chalk10.default.red("\u2717 Bridge URL and token required"));
+    console.error(import_chalk10.default.gray("  --url / DEVPILOT_BRIDGE_URL, --token / DEVPILOT_BRIDGE_TOKEN"));
+    process.exit(1);
+  }
+  if (!options.org) {
+    console.error(import_chalk10.default.red("\u2717 --org <orgId> is required"));
+    console.error(import_chalk10.default.gray("  The token is bound to one org; this must be that org."));
+    process.exit(1);
+  }
+  const key = import_bridge_protocol.sessionCrypto.generateKey();
+  const { joinKeyHash } = await import_bridge_protocol.sessionCrypto.deriveJoinCredentials(key);
+  const base = options.url.replace(/\/+$/, "");
+  const res = await fetch(`${base}/api/sessions/shared`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${options.token}` },
+    body: JSON.stringify({
+      orgId: options.org,
+      title,
+      joinKeyHash,
+      ...options.issue ? { linearIdentifier: options.issue } : {}
+    })
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    console.error(import_chalk10.default.red(`\u2717 Could not create session (${res.status})`));
+    console.error(import_chalk10.default.gray(`  ${(0, import_bridge_protocol.formatApiError)(body, res.statusText)}`));
+    process.exit(1);
+  }
+  const { session } = await res.json();
+  const link = (0, import_bridge_protocol.buildJoinLink)(base, session.id, key);
+  console.log("");
+  console.log(import_chalk10.default.cyan(`  ${session.title}`));
+  console.log(import_chalk10.default.bold(`  ${link}`));
+  console.log("");
+  console.log(import_chalk10.default.yellow("  Anyone with this link can read the whole transcript."));
+  console.log(import_chalk10.default.gray("  It carries the encryption key after the #, which never reaches"));
+  console.log(import_chalk10.default.gray("  devpilot.sh. Send it the way you would send a password \u2014 not to"));
+  console.log(import_chalk10.default.gray("  a public channel. To revoke it, re-key the session; that ends"));
+  console.log(import_chalk10.default.gray("  access for this link but cannot un-send what was already read."));
+  console.log("");
+  console.log(import_chalk10.default.gray(`  Others join with:  devpilot session join "${import_chalk10.default.italic("<link>")}"`));
+  console.log("");
+});
+
+// src/commands/session/join.ts
+var import_os3 = __toESM(require("os"));
+var import_commander11 = require("commander");
+var import_chalk11 = __toESM(require("chalk"));
+var import_bridge_client2 = require("@devpilot.sh/bridge-client");
+var joinCommand = new import_commander11.Command("join").description("Join a shared session by link and post a message").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", import_os3.default.hostname()).option("-m, --message <text>", "Post this message after joining").action(async (url, options) => {
+  try {
+    const client = await import_bridge_client2.SharedSessionClient.join({ link: url, displayName: options.name });
+    const s = client.session;
+    console.log(import_chalk11.default.cyan(`
+  ${s.title}`));
+    console.log(import_chalk11.default.gray(`  mode: ${s.mode}  \xB7  messages: ${s.lastSeq ?? 0}
+`));
+    if (options.message) {
+      const posted = await client.post(options.message);
+      console.log(import_chalk11.default.green(`  posted #${posted.seq}
+`));
+    }
+    const participants = await client.who();
+    for (const p of participants) {
+      const agent = p.agentKind ? import_chalk11.default.gray(` [${p.agentKind}]`) : "";
+      console.log(`  \xB7 ${p.displayName}${agent}${p.leftAt ? import_chalk11.default.gray(" (left)") : ""}`);
+    }
+    console.log("");
+  } catch (err) {
+    console.error(import_chalk11.default.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
+    process.exit(1);
+  }
+});
+
+// src/commands/session/tail.ts
+var import_os4 = __toESM(require("os"));
+var import_commander12 = require("commander");
+var import_chalk12 = __toESM(require("chalk"));
+var import_bridge_client3 = require("@devpilot.sh/bridge-client");
+var tailCommand = new import_commander12.Command("tail").description("Follow a shared session transcript in the terminal").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", import_os4.default.hostname()).option("-i, --interval <seconds>", "Poll interval", "3").action(async (url, options) => {
+  const intervalMs = Math.max(1, parseInt(options.interval, 10) || 3) * 1e3;
+  let client;
+  try {
+    client = await import_bridge_client3.SharedSessionClient.join({ link: url, displayName: options.name });
+  } catch (err) {
+    console.error(import_chalk12.default.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
+    process.exit(1);
+    return;
+  }
+  const names = /* @__PURE__ */ new Map();
+  for (const p of await client.who()) names.set(p.id, p.displayName);
+  console.log(import_chalk12.default.cyan(`
+  ${client.session.title}`));
+  console.log(import_chalk12.default.gray(`  following \xB7 ctrl-c to stop
+`));
+  let cursor = 0;
+  let stopped = false;
+  process.on("SIGINT", () => {
+    stopped = true;
+    console.log(import_chalk12.default.gray("\n  stopped\n"));
+    process.exit(0);
+  });
+  while (!stopped) {
+    try {
+      const { entries, latestSeq } = await client.read(cursor);
+      if (entries.length > 0) {
+        if (entries.some((e) => e.participantId && !names.has(e.participantId))) {
+          for (const p of await client.who()) names.set(p.id, p.displayName);
+        }
+        for (const e of entries) console.log(format(e, names));
+        cursor = latestSeq;
+      }
+    } catch (err) {
+      console.error(import_chalk12.default.gray(`  \u2026 ${err instanceof Error ? err.message : String(err)}`));
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+});
+function format(e, names) {
+  const who = e.participantId ? names.get(e.participantId) ?? e.participantId : "system";
+  const seq = import_chalk12.default.gray(`#${String(e.seq).padStart(3)}`);
+  if (e.status === "system") {
+    const reason = e.systemNotice?.reason ? ` (${e.systemNotice.reason})` : "";
+    return `  ${seq} ${import_chalk12.default.yellow(`\u2699 ${e.systemNotice?.type ?? e.text}${reason}`)}`;
+  }
+  if (e.status === "undecryptable") {
+    return `  ${seq} ${import_chalk12.default.gray(`${who}: <sealed under an earlier key \u2014 not readable with this link>`)}`;
+  }
+  return `  ${seq} ${import_chalk12.default.bold(who)}: ${e.text}`;
+}
+
+// src/commands/session.ts
+var sessionCommand = new import_commander13.Command("session").description("Shared, end-to-end encrypted sessions across machines").addCommand(newCommand).addCommand(joinCommand).addCommand(tailCommand);
+
+// src/commands/update.ts
+var import_commander14 = require("commander");
+var import_child_process2 = require("child_process");
+var import_chalk13 = __toESM(require("chalk"));
 async function getLatestVersion() {
   try {
     const result = (0, import_child_process2.execSync)("npm view @devpilot.sh/cli version", {
@@ -2275,35 +2418,35 @@ function getUpdateCommand(pm) {
       return "npm install -g @devpilot.sh/cli@latest";
   }
 }
-var updateCommand = new import_commander10.Command("update").description("Update DevPilot CLI to the latest version").option("-c, --check", "Only check for updates without installing").option("--force", "Force update even if already on latest version").action(async (options) => {
-  console.log(import_chalk10.default.cyan("Checking for updates..."));
+var updateCommand = new import_commander14.Command("update").description("Update DevPilot CLI to the latest version").option("-c, --check", "Only check for updates without installing").option("--force", "Force update even if already on latest version").action(async (options) => {
+  console.log(import_chalk13.default.cyan("Checking for updates..."));
   const latestVersion = await getLatestVersion();
   if (!latestVersion) {
-    console.log(import_chalk10.default.yellow("Could not check for updates. Please check your network connection."));
-    console.log(import_chalk10.default.gray("You can manually update with: npm install -g @devpilot.sh/cli@latest"));
+    console.log(import_chalk13.default.yellow("Could not check for updates. Please check your network connection."));
+    console.log(import_chalk13.default.gray("You can manually update with: npm install -g @devpilot.sh/cli@latest"));
     return;
   }
   const comparison = compareVersions(latestVersion, VERSION);
   if (comparison === 0 && !options.force) {
-    console.log(import_chalk10.default.green(`You're already on the latest version (${VERSION})`));
+    console.log(import_chalk13.default.green(`You're already on the latest version (${VERSION})`));
     return;
   }
   if (comparison === -1 && !options.force) {
-    console.log(import_chalk10.default.yellow(`You're on a newer version (${VERSION}) than the latest release (${latestVersion})`));
-    console.log(import_chalk10.default.gray("This might be a pre-release or development version."));
+    console.log(import_chalk13.default.yellow(`You're on a newer version (${VERSION}) than the latest release (${latestVersion})`));
+    console.log(import_chalk13.default.gray("This might be a pre-release or development version."));
     return;
   }
   if (options.check) {
     if (comparison === 1) {
-      console.log(import_chalk10.default.yellow(`Update available: ${VERSION} \u2192 ${latestVersion}`));
-      console.log(import_chalk10.default.gray('Run "devpilot update" to install the latest version.'));
+      console.log(import_chalk13.default.yellow(`Update available: ${VERSION} \u2192 ${latestVersion}`));
+      console.log(import_chalk13.default.gray('Run "devpilot update" to install the latest version.'));
     }
     return;
   }
   const pm = detectPackageManager();
   const updateCmd = getUpdateCommand(pm);
-  console.log(import_chalk10.default.cyan(`Updating from ${VERSION} to ${latestVersion}...`));
-  console.log(import_chalk10.default.gray(`Using: ${updateCmd}`));
+  console.log(import_chalk13.default.cyan(`Updating from ${VERSION} to ${latestVersion}...`));
+  console.log(import_chalk13.default.gray(`Using: ${updateCmd}`));
   console.log("");
   try {
     const [cmd, ...args] = updateCmd.split(" ");
@@ -2314,40 +2457,40 @@ var updateCommand = new import_commander10.Command("update").description("Update
     child.on("close", (code) => {
       if (code === 0) {
         console.log("");
-        console.log(import_chalk10.default.green(`Successfully updated to ${latestVersion}`));
-        console.log(import_chalk10.default.gray('Run "devpilot --version" to verify.'));
+        console.log(import_chalk13.default.green(`Successfully updated to ${latestVersion}`));
+        console.log(import_chalk13.default.gray('Run "devpilot --version" to verify.'));
       } else {
         console.log("");
-        console.log(import_chalk10.default.red("Update failed. Please try manually:"));
-        console.log(import_chalk10.default.cyan(`  ${updateCmd}`));
+        console.log(import_chalk13.default.red("Update failed. Please try manually:"));
+        console.log(import_chalk13.default.cyan(`  ${updateCmd}`));
       }
     });
     child.on("error", (err) => {
-      console.log(import_chalk10.default.red(`Update failed: ${err.message}`));
-      console.log(import_chalk10.default.gray("Please try manually:"));
-      console.log(import_chalk10.default.cyan(`  ${updateCmd}`));
+      console.log(import_chalk13.default.red(`Update failed: ${err.message}`));
+      console.log(import_chalk13.default.gray("Please try manually:"));
+      console.log(import_chalk13.default.cyan(`  ${updateCmd}`));
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    console.log(import_chalk10.default.red(`Update failed: ${message}`));
-    console.log(import_chalk10.default.gray("Please try manually:"));
-    console.log(import_chalk10.default.cyan(`  ${updateCmd}`));
+    console.log(import_chalk13.default.red(`Update failed: ${message}`));
+    console.log(import_chalk13.default.gray("Please try manually:"));
+    console.log(import_chalk13.default.cyan(`  ${updateCmd}`));
   }
 });
 
 // src/commands/wiki.ts
-var import_commander11 = require("commander");
+var import_commander15 = require("commander");
 var import_fs6 = require("fs");
 var import_path6 = require("path");
-var import_chalk11 = __toESM(require("chalk"));
-var wikiCommand = new import_commander11.Command("wiki").description("LLM-compiled knowledge base \u2014 institutional memory for your codebase");
+var import_chalk14 = __toESM(require("chalk"));
+var wikiCommand = new import_commander15.Command("wiki").description("LLM-compiled knowledge base \u2014 institutional memory for your codebase");
 wikiCommand.command("init").description("Initialize the wiki system in the current repository").option("--wiki-dir <path>", "Wiki output directory", ".devpilot/wiki").action(async (options) => {
   const cwd = process.cwd();
   const devpilotDir = (0, import_path6.join)(cwd, ".devpilot");
   const wikiDir = (0, import_path6.join)(cwd, options.wikiDir);
   if (!(0, import_fs6.existsSync)(devpilotDir)) {
     console.log(
-      import_chalk11.default.yellow("\u26A0\uFE0F  DevPilot not initialized. Run `devpilot init` first.")
+      import_chalk14.default.yellow("\u26A0\uFE0F  DevPilot not initialized. Run `devpilot init` first.")
     );
     return;
   }
@@ -2390,23 +2533,23 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
     if (!gitignore.includes(".devpilot/wiki")) {
     }
   }
-  console.log(import_chalk11.default.green("\u2705 Wiki initialized!"));
+  console.log(import_chalk14.default.green("\u2705 Wiki initialized!"));
   console.log("");
-  console.log(import_chalk11.default.white("Wiki directory: ") + import_chalk11.default.cyan(wikiDir));
+  console.log(import_chalk14.default.white("Wiki directory: ") + import_chalk14.default.cyan(wikiDir));
   console.log("");
-  console.log(import_chalk11.default.white("Next steps:"));
+  console.log(import_chalk14.default.white("Next steps:"));
   console.log(
-    import_chalk11.default.gray("  1. ") + import_chalk11.default.cyan("devpilot wiki ingest --file <path>") + import_chalk11.default.gray(" to add source material")
+    import_chalk14.default.gray("  1. ") + import_chalk14.default.cyan("devpilot wiki ingest --file <path>") + import_chalk14.default.gray(" to add source material")
   );
   console.log(
-    import_chalk11.default.gray("  2. ") + import_chalk11.default.cyan('devpilot wiki query "How does auth work?"') + import_chalk11.default.gray(" to ask questions")
+    import_chalk14.default.gray("  2. ") + import_chalk14.default.cyan('devpilot wiki query "How does auth work?"') + import_chalk14.default.gray(" to ask questions")
   );
   console.log(
-    import_chalk11.default.gray("  3. ") + import_chalk11.default.cyan("devpilot wiki status") + import_chalk11.default.gray(" to check wiki health")
+    import_chalk14.default.gray("  3. ") + import_chalk14.default.cyan("devpilot wiki status") + import_chalk14.default.gray(" to check wiki health")
   );
   console.log("");
   console.log(
-    import_chalk11.default.gray(
+    import_chalk14.default.gray(
       "The wiki will grow automatically as agents work \u2014 each session compounds the knowledge base."
     )
   );
@@ -2415,7 +2558,7 @@ wikiCommand.command("ingest").description("Ingest a source document into the wik
   let content;
   if (options.file) {
     if (!(0, import_fs6.existsSync)(options.file)) {
-      console.log(import_chalk11.default.red(`\u274C File not found: ${options.file}`));
+      console.log(import_chalk14.default.red(`\u274C File not found: ${options.file}`));
       return;
     }
     content = (0, import_fs6.readFileSync)(options.file, "utf-8");
@@ -2423,20 +2566,20 @@ wikiCommand.command("ingest").description("Ingest a source document into the wik
     content = (0, import_fs6.readFileSync)(0, "utf-8");
   } else {
     console.log(
-      import_chalk11.default.red("\u274C Provide either --file <path> or --stdin")
+      import_chalk14.default.red("\u274C Provide either --file <path> or --stdin")
     );
     return;
   }
   const validTypes = ["session_log", "commit", "spec", "decision", "manual"];
   if (!validTypes.includes(options.type)) {
     console.log(
-      import_chalk11.default.red(
+      import_chalk14.default.red(
         `\u274C Invalid type "${options.type}". Must be one of: ${validTypes.join(", ")}`
       )
     );
     return;
   }
-  console.log(import_chalk11.default.gray(`Ingesting ${options.type}: "${options.title}"...`));
+  console.log(import_chalk14.default.gray(`Ingesting ${options.type}: "${options.title}"...`));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
@@ -2447,75 +2590,75 @@ wikiCommand.command("ingest").description("Ingest a source document into the wik
       options.title,
       options.origin
     );
-    console.log(import_chalk11.default.green("\u2705 Ingested successfully!"));
+    console.log(import_chalk14.default.green("\u2705 Ingested successfully!"));
     console.log(
-      import_chalk11.default.gray(`   Source ID: ${result.sourceId}`)
+      import_chalk14.default.gray(`   Source ID: ${result.sourceId}`)
     );
     if (result.articlesCreated.length > 0) {
       console.log(
-        import_chalk11.default.white(`   Articles created: `) + import_chalk11.default.cyan(result.articlesCreated.join(", "))
+        import_chalk14.default.white(`   Articles created: `) + import_chalk14.default.cyan(result.articlesCreated.join(", "))
       );
     }
     if (result.articlesUpdated.length > 0) {
       console.log(
-        import_chalk11.default.white(`   Articles updated: `) + import_chalk11.default.yellow(result.articlesUpdated.join(", "))
+        import_chalk14.default.white(`   Articles updated: `) + import_chalk14.default.yellow(result.articlesUpdated.join(", "))
       );
     }
     console.log(
-      import_chalk11.default.gray(`   Tokens used: ${result.tokensUsed}`)
+      import_chalk14.default.gray(`   Tokens used: ${result.tokensUsed}`)
     );
   } catch (error) {
     console.log(
-      import_chalk11.default.red(
+      import_chalk14.default.red(
         `\u274C Ingest failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
   }
 });
 wikiCommand.command("query <question>").description("Ask a question against the wiki").action(async (question) => {
-  console.log(import_chalk11.default.gray(`Searching wiki for: "${question}"...`));
+  console.log(import_chalk14.default.gray(`Searching wiki for: "${question}"...`));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const result = await compiler.query(question);
     console.log("");
-    console.log(import_chalk11.default.white(result.answer));
+    console.log(import_chalk14.default.white(result.answer));
     console.log("");
     if (result.citedArticles.length > 0) {
       console.log(
-        import_chalk11.default.gray("Cited: ") + import_chalk11.default.cyan(result.citedArticles.map((s) => `[[${s}]]`).join(", "))
+        import_chalk14.default.gray("Cited: ") + import_chalk14.default.cyan(result.citedArticles.map((s) => `[[${s}]]`).join(", "))
       );
     }
     if (result.newArticleSlug) {
       console.log(
-        import_chalk11.default.green(
+        import_chalk14.default.green(
           `\u{1F4DD} New article created from this query: [[${result.newArticleSlug}]]`
         )
       );
     }
-    console.log(import_chalk11.default.gray(`Tokens used: ${result.tokensUsed}`));
+    console.log(import_chalk14.default.gray(`Tokens used: ${result.tokensUsed}`));
   } catch (error) {
     console.log(
-      import_chalk11.default.red(
+      import_chalk14.default.red(
         `\u274C Query failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
   }
 });
 wikiCommand.command("lint").description("Check wiki health \u2014 find stale content, orphans, and gaps").action(async () => {
-  console.log(import_chalk11.default.gray("Linting wiki..."));
+  console.log(import_chalk14.default.gray("Linting wiki..."));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const result = await compiler.lint();
     if (result.findings.length === 0) {
-      console.log(import_chalk11.default.green("\u2705 Wiki is healthy \u2014 no issues found!"));
+      console.log(import_chalk14.default.green("\u2705 Wiki is healthy \u2014 no issues found!"));
       return;
     }
     console.log(
-      import_chalk11.default.yellow(`\u26A0\uFE0F  Found ${result.findings.length} issue(s):
+      import_chalk14.default.yellow(`\u26A0\uFE0F  Found ${result.findings.length} issue(s):
 `)
     );
     for (const finding of result.findings) {
@@ -2527,23 +2670,23 @@ wikiCommand.command("lint").description("Check wiki health \u2014 find stale con
         broken_link: "\u{1F494}"
       }[finding.type];
       console.log(
-        `  ${icon} ${import_chalk11.default.white(`[${finding.type}]`)} ${import_chalk11.default.cyan(`[[${finding.articleSlug}]]`)}`
+        `  ${icon} ${import_chalk14.default.white(`[${finding.type}]`)} ${import_chalk14.default.cyan(`[[${finding.articleSlug}]]`)}`
       );
-      console.log(import_chalk11.default.gray(`     ${finding.description}`));
-      console.log(import_chalk11.default.gray(`     \u2192 ${finding.suggestion}`));
+      console.log(import_chalk14.default.gray(`     ${finding.description}`));
+      console.log(import_chalk14.default.gray(`     \u2192 ${finding.suggestion}`));
       console.log("");
     }
     if (result.articlesMarkedStale.length > 0) {
       console.log(
-        import_chalk11.default.yellow(
+        import_chalk14.default.yellow(
           `Marked ${result.articlesMarkedStale.length} article(s) as stale.`
         )
       );
     }
-    console.log(import_chalk11.default.gray(`Tokens used: ${result.tokensUsed}`));
+    console.log(import_chalk14.default.gray(`Tokens used: ${result.tokensUsed}`));
   } catch (error) {
     console.log(
-      import_chalk11.default.red(
+      import_chalk14.default.red(
         `\u274C Lint failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -2555,46 +2698,46 @@ wikiCommand.command("status").description("Show wiki statistics").action(async (
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const status = await compiler.getStatus();
-    console.log(import_chalk11.default.white.bold("\n\u{1F4DA} Wiki Status\n"));
+    console.log(import_chalk14.default.white.bold("\n\u{1F4DA} Wiki Status\n"));
     console.log(
-      import_chalk11.default.gray("  Sources:    ") + import_chalk11.default.white(String(status.totalSources))
+      import_chalk14.default.gray("  Sources:    ") + import_chalk14.default.white(String(status.totalSources))
     );
     console.log(
-      import_chalk11.default.gray("  Articles:   ") + import_chalk11.default.white(String(status.totalArticles)) + import_chalk11.default.gray(" (") + import_chalk11.default.green(`${status.activeArticles} active`) + (status.staleArticles > 0 ? import_chalk11.default.yellow(`, ${status.staleArticles} stale`) : "") + (status.archivedArticles > 0 ? import_chalk11.default.gray(`, ${status.archivedArticles} archived`) : "") + import_chalk11.default.gray(")")
+      import_chalk14.default.gray("  Articles:   ") + import_chalk14.default.white(String(status.totalArticles)) + import_chalk14.default.gray(" (") + import_chalk14.default.green(`${status.activeArticles} active`) + (status.staleArticles > 0 ? import_chalk14.default.yellow(`, ${status.staleArticles} stale`) : "") + (status.archivedArticles > 0 ? import_chalk14.default.gray(`, ${status.archivedArticles} archived`) : "") + import_chalk14.default.gray(")")
     );
     if (Object.keys(status.categories).length > 0) {
-      console.log(import_chalk11.default.gray("\n  Categories:"));
+      console.log(import_chalk14.default.gray("\n  Categories:"));
       for (const [category, count] of Object.entries(status.categories).sort()) {
         console.log(
-          import_chalk11.default.gray("    ") + import_chalk11.default.cyan(category) + import_chalk11.default.gray(": ") + import_chalk11.default.white(String(count))
+          import_chalk14.default.gray("    ") + import_chalk14.default.cyan(category) + import_chalk14.default.gray(": ") + import_chalk14.default.white(String(count))
         );
       }
     }
     if (status.lastActivity) {
       console.log(
-        import_chalk11.default.gray("\n  Last activity: ") + import_chalk11.default.white(status.lastActivity.toISOString().split("T")[0])
+        import_chalk14.default.gray("\n  Last activity: ") + import_chalk14.default.white(status.lastActivity.toISOString().split("T")[0])
       );
     }
     console.log("");
   } catch (error) {
     console.log(
-      import_chalk11.default.red(
+      import_chalk14.default.red(
         `\u274C Status failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
   }
 });
 wikiCommand.command("flush").description("Export wiki to disk as markdown files").action(async () => {
-  console.log(import_chalk11.default.gray("Flushing wiki to disk..."));
+  console.log(import_chalk14.default.gray("Flushing wiki to disk..."));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const result = await compiler.flushToDisk();
-    console.log(import_chalk11.default.green(`\u2705 Wrote ${result.filesWritten} files to ${result.wikiDir}`));
+    console.log(import_chalk14.default.green(`\u2705 Wrote ${result.filesWritten} files to ${result.wikiDir}`));
   } catch (error) {
     console.log(
-      import_chalk11.default.red(
+      import_chalk14.default.red(
         `\u274C Flush failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -2610,7 +2753,7 @@ wikiCommand.command("index").description("Show the wiki table of contents").opti
       index = index.filter((e) => e.category === options.category);
     }
     if (index.length === 0) {
-      console.log(import_chalk11.default.gray("Wiki is empty. Run `devpilot wiki ingest` to add sources."));
+      console.log(import_chalk14.default.gray("Wiki is empty. Run `devpilot wiki ingest` to add sources."));
       return;
     }
     const byCategory = {};
@@ -2620,25 +2763,25 @@ wikiCommand.command("index").description("Show the wiki table of contents").opti
       }
       byCategory[entry.category].push(entry);
     }
-    console.log(import_chalk11.default.white.bold("\n\u{1F4D6} Wiki Index\n"));
+    console.log(import_chalk14.default.white.bold("\n\u{1F4D6} Wiki Index\n"));
     for (const [category, entries] of Object.entries(byCategory).sort()) {
       console.log(
-        import_chalk11.default.cyan.bold(
+        import_chalk14.default.cyan.bold(
           `  ${category.charAt(0).toUpperCase() + category.slice(1)}`
         )
       );
       for (const entry of entries) {
-        const statusColor = entry.status === "active" ? import_chalk11.default.green : entry.status === "stale" ? import_chalk11.default.yellow : import_chalk11.default.gray;
+        const statusColor = entry.status === "active" ? import_chalk14.default.green : entry.status === "stale" ? import_chalk14.default.yellow : import_chalk14.default.gray;
         const badge = statusColor(`[${entry.status}]`);
         console.log(
-          `    ${badge} ${import_chalk11.default.white(entry.title)} ${import_chalk11.default.gray(`[[${entry.slug}]]`)}`
+          `    ${badge} ${import_chalk14.default.white(entry.title)} ${import_chalk14.default.gray(`[[${entry.slug}]]`)}`
         );
       }
       console.log("");
     }
   } catch (error) {
     console.log(
-      import_chalk11.default.red(
+      import_chalk14.default.red(
         `\u274C Index failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -2651,30 +2794,30 @@ wikiCommand.command("read <slug>").description("Read a specific wiki article").a
     const compiler = createWikiCompiler(config);
     const article = await compiler.getArticle(slug);
     if (!article) {
-      console.log(import_chalk11.default.red(`\u274C Article not found: [[${slug}]]`));
+      console.log(import_chalk14.default.red(`\u274C Article not found: [[${slug}]]`));
       return;
     }
-    console.log(import_chalk11.default.white.bold(`
+    console.log(import_chalk14.default.white.bold(`
 # ${article.title}
 `));
     console.log(
-      import_chalk11.default.gray(
+      import_chalk14.default.gray(
         `Category: ${article.category} | Status: ${article.status} | v${article.version}`
       )
     );
     if (article.backlinks.length > 0) {
       console.log(
-        import_chalk11.default.gray(
+        import_chalk14.default.gray(
           `Related: ${article.backlinks.map((b) => `[[${b}]]`).join(", ")}`
         )
       );
     }
-    console.log(import_chalk11.default.gray("\u2500".repeat(60)));
+    console.log(import_chalk14.default.gray("\u2500".repeat(60)));
     console.log(article.content);
     console.log("");
   } catch (error) {
     console.log(
-      import_chalk11.default.red(
+      import_chalk14.default.red(
         `\u274C Read failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -2710,7 +2853,7 @@ var pkg = {
   name: "@devpilot.sh/cli",
   version: VERSION
 };
-var cli = new import_commander12.Command();
+var cli = new import_commander16.Command();
 cli.name("devpilot").description("DevPilot CLI - Manage your AI coding agent fleet").version(VERSION);
 cli.addCommand(initCommand);
 cli.addCommand(setupCommand);
@@ -2718,6 +2861,7 @@ cli.addCommand(serveCommand);
 cli.addCommand(statusCommand);
 cli.addCommand(configCommand);
 cli.addCommand(bridgeCommand);
+cli.addCommand(sessionCommand);
 cli.addCommand(updateCommand);
 cli.addCommand(wikiCommand);
 cli.addCommand(import_cli.benchCommand);

@@ -1,6 +1,16 @@
 # TRD 06 — Shared Agent Sessions
 ## Cross-Machine Agent Coordination · End-to-End Encrypted Transcripts · Join Links · MCP Bridge
-### v1.3 · August 2026 · Status: WAVES 1–3 SHIPPED
+### v1.4 · August 2026 · Status: WAVES 1–4 SHIPPED
+
+> **Change log — v1.4 (4 Aug 2026)**
+> - Wave 4 complete: `@devpilot.sh/mcp-session` and `devpilot session …`.
+>   T6-AC-10 proven against the live platform, not simulated.
+> - §5 create route now accepts a MACHINE TOKEN as well as a browser session.
+>   `devpilot session new` runs on a laptop, which has no cookie — the spec
+>   described a command that could not be built.
+> - §6.1 `SharedSessionSchema` gains `lastSeq`, which the Wave 3 route had been
+>   returning for a full wave without the contract declaring it.
+> - New known gap: re-joining creates a duplicate participant row (§6.3).
 
 > **Change log — v1.3 (3 Aug 2026)**
 > - Wave 3 complete: seven routes, participant tokens, rate limits. Verified
@@ -746,12 +756,57 @@ does not exist, so `sessionCrypto` still has not run in a real browser engine
 copy — is Wave 5 and is now MORE load-bearing than when written, because §3.2
 gained the `system`-message correction.
 
-### Wave 4 — Clients (public repo)
+### Wave 4 — Clients (public repo) ✅ COMPLETE
 
 | ID | Title | Files | Cx | Done-check |
 |---|---|---|---|---|
-| T6-W4-T1 | `@devpilot.sh/mcp-session` | `packages/mcp-session/**` | L | §8.7, T6-AC-10 |
-| T6-W4-T2 | CLI `session` commands | `packages/cli/src/commands/session/**` | M | Manual round trip |
+| T6-W4-T1 | `@devpilot.sh/mcp-session` | `packages/mcp-session/**` | L | ✅ §8.7, T6-AC-10 |
+| T6-W4-T2 | CLI `session` commands | `packages/cli/src/commands/session/**` | M | ✅ live round trip |
+
+165 tests (was 148). Both clients share ONE implementation —
+`SharedSessionClient` in `packages/bridge-client` — because two copies of the
+join/encrypt/decrypt logic is the drift that got `packages/bridge` deleted.
+
+**Verified against the deployed platform, not simulated.** The real CLI created
+a session, two named participants joined and posted from separate invocations,
+`session tail` decrypted the transcript locally, and the MCP server was spawned
+as a real subprocess speaking real MCP over stdio to join, post, read and list.
+The server held three messages and **zero** rows matching any plaintext.
+
+**§5 CORRECTED — the create route accepts a machine token.** §6.3 specifies
+`devpilot session new`, run by a human at a laptop; that laptop holds a
+`dp_orch_…` token and no browser cookie, so the documented command could not be
+built against a session-only guard. The token is bound to one org and already
+dispatches work there, so creating a session in that org is inside its existing
+authority. The org is taken FROM THE TOKEN — a body `orgId` that disagrees is a
+404, not a silent substitution.
+
+**T6-AC-10 is satisfied without touching Claude Code.** The MCP server is
+installed the way any MCP server is; nothing about the agent changes. DECISION A
+is carried in the tool *descriptions*, because those are what a model actually
+reads: `read` reports the session mode, and the default guidance is "do not post
+unprompted — a human is relaying this conversation." A test asserts that
+wording, since a future edit saying "reply as others post" would move the real
+default while the database still said `observe`.
+
+**Undecryptable messages are shown, not skipped.** Post-rotation history and
+server-authored `system` notices both render as visible entries. A transcript
+with silent holes is worse than one with marked gaps — the reader would not know
+to go looking, which is the §1.1 "summary of a summary" failure returning by
+another route.
+
+**KNOWN GAP — duplicate participants on re-join.** Participant tokens last an
+hour and the client re-joins transparently when one expires, but `POST /join`
+always INSERTs, so a long-running `session tail` gains a roster entry per hour.
+The transcript itself is unaffected (both ids resolve to the same display name);
+`devpilot_session_who` shows duplicates. The fix is for `/join` to accept an
+existing `participantId` and reuse that row when it belongs to the session —
+a route change, so it belongs with the Wave 5 portal work that surfaces rosters.
+
+**Not proven in Wave 4.** `sessionCrypto` still has not run in a real browser
+engine — Wave 1's outstanding gap, closed by T6-W5-T1's join page. No agent has
+yet run in `auto` mode against another agent; the budget and TTL are tested
+server-side, but two agents actually conversing has never been observed.
 
 ### Wave 5 — Portal, docs, copy
 
@@ -774,4 +829,4 @@ gained the `system`-message correction.
 - **Ciphertext is never rendered server-side**, encrypted or not.
 - The invariant from TRD 05 stands: **agents run locally.**
 
-*TRD 06 · v1.3 · August 2026 · Waves 1–3 shipped*
+*TRD 06 · v1.4 · August 2026 · Waves 1–4 shipped*

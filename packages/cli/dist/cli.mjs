@@ -7,7 +7,7 @@ var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require
 });
 
 // src/cli.ts
-import { Command as Command12 } from "commander";
+import { Command as Command16 } from "commander";
 import updateNotifier from "update-notifier";
 
 // src/version.ts
@@ -2206,10 +2206,153 @@ var statusCommand2 = new Command8("status").description("Check bridge connection
 // src/commands/bridge.ts
 var bridgeCommand = new Command9("bridge").description("Manage connection to DevPilot cloud bridge").addCommand(connectCommand).addCommand(disconnectCommand).addCommand(statusCommand2);
 
-// src/commands/update.ts
+// src/commands/session.ts
+import { Command as Command13 } from "commander";
+
+// src/commands/session/new.ts
 import { Command as Command10 } from "commander";
-import { execSync as execSync2, spawn } from "child_process";
 import chalk10 from "chalk";
+import { sessionCrypto, buildJoinLink, formatApiError } from "@devpilot.sh/bridge-protocol";
+var newCommand = new Command10("new").description("Create a shared session and print its join link").argument("<title>", "What this session is about (stored in plaintext \u2014 no secrets)").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-o, --org <orgId>", "Organization id that will own the session").option("--issue <identifier>", "Linear issue identifier to attach, e.g. ENG-394").action(async (title, options) => {
+  if (!options.url || !options.token) {
+    console.error(chalk10.red("\u2717 Bridge URL and token required"));
+    console.error(chalk10.gray("  --url / DEVPILOT_BRIDGE_URL, --token / DEVPILOT_BRIDGE_TOKEN"));
+    process.exit(1);
+  }
+  if (!options.org) {
+    console.error(chalk10.red("\u2717 --org <orgId> is required"));
+    console.error(chalk10.gray("  The token is bound to one org; this must be that org."));
+    process.exit(1);
+  }
+  const key = sessionCrypto.generateKey();
+  const { joinKeyHash } = await sessionCrypto.deriveJoinCredentials(key);
+  const base = options.url.replace(/\/+$/, "");
+  const res = await fetch(`${base}/api/sessions/shared`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${options.token}` },
+    body: JSON.stringify({
+      orgId: options.org,
+      title,
+      joinKeyHash,
+      ...options.issue ? { linearIdentifier: options.issue } : {}
+    })
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    console.error(chalk10.red(`\u2717 Could not create session (${res.status})`));
+    console.error(chalk10.gray(`  ${formatApiError(body, res.statusText)}`));
+    process.exit(1);
+  }
+  const { session } = await res.json();
+  const link = buildJoinLink(base, session.id, key);
+  console.log("");
+  console.log(chalk10.cyan(`  ${session.title}`));
+  console.log(chalk10.bold(`  ${link}`));
+  console.log("");
+  console.log(chalk10.yellow("  Anyone with this link can read the whole transcript."));
+  console.log(chalk10.gray("  It carries the encryption key after the #, which never reaches"));
+  console.log(chalk10.gray("  devpilot.sh. Send it the way you would send a password \u2014 not to"));
+  console.log(chalk10.gray("  a public channel. To revoke it, re-key the session; that ends"));
+  console.log(chalk10.gray("  access for this link but cannot un-send what was already read."));
+  console.log("");
+  console.log(chalk10.gray(`  Others join with:  devpilot session join "${chalk10.italic("<link>")}"`));
+  console.log("");
+});
+
+// src/commands/session/join.ts
+import os2 from "os";
+import { Command as Command11 } from "commander";
+import chalk11 from "chalk";
+import { SharedSessionClient } from "@devpilot.sh/bridge-client";
+var joinCommand = new Command11("join").description("Join a shared session by link and post a message").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", os2.hostname()).option("-m, --message <text>", "Post this message after joining").action(async (url, options) => {
+  try {
+    const client = await SharedSessionClient.join({ link: url, displayName: options.name });
+    const s = client.session;
+    console.log(chalk11.cyan(`
+  ${s.title}`));
+    console.log(chalk11.gray(`  mode: ${s.mode}  \xB7  messages: ${s.lastSeq ?? 0}
+`));
+    if (options.message) {
+      const posted = await client.post(options.message);
+      console.log(chalk11.green(`  posted #${posted.seq}
+`));
+    }
+    const participants = await client.who();
+    for (const p of participants) {
+      const agent = p.agentKind ? chalk11.gray(` [${p.agentKind}]`) : "";
+      console.log(`  \xB7 ${p.displayName}${agent}${p.leftAt ? chalk11.gray(" (left)") : ""}`);
+    }
+    console.log("");
+  } catch (err) {
+    console.error(chalk11.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
+    process.exit(1);
+  }
+});
+
+// src/commands/session/tail.ts
+import os3 from "os";
+import { Command as Command12 } from "commander";
+import chalk12 from "chalk";
+import { SharedSessionClient as SharedSessionClient2 } from "@devpilot.sh/bridge-client";
+var tailCommand = new Command12("tail").description("Follow a shared session transcript in the terminal").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", os3.hostname()).option("-i, --interval <seconds>", "Poll interval", "3").action(async (url, options) => {
+  const intervalMs = Math.max(1, parseInt(options.interval, 10) || 3) * 1e3;
+  let client;
+  try {
+    client = await SharedSessionClient2.join({ link: url, displayName: options.name });
+  } catch (err) {
+    console.error(chalk12.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
+    process.exit(1);
+    return;
+  }
+  const names = /* @__PURE__ */ new Map();
+  for (const p of await client.who()) names.set(p.id, p.displayName);
+  console.log(chalk12.cyan(`
+  ${client.session.title}`));
+  console.log(chalk12.gray(`  following \xB7 ctrl-c to stop
+`));
+  let cursor = 0;
+  let stopped = false;
+  process.on("SIGINT", () => {
+    stopped = true;
+    console.log(chalk12.gray("\n  stopped\n"));
+    process.exit(0);
+  });
+  while (!stopped) {
+    try {
+      const { entries, latestSeq } = await client.read(cursor);
+      if (entries.length > 0) {
+        if (entries.some((e) => e.participantId && !names.has(e.participantId))) {
+          for (const p of await client.who()) names.set(p.id, p.displayName);
+        }
+        for (const e of entries) console.log(format(e, names));
+        cursor = latestSeq;
+      }
+    } catch (err) {
+      console.error(chalk12.gray(`  \u2026 ${err instanceof Error ? err.message : String(err)}`));
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+});
+function format(e, names) {
+  const who = e.participantId ? names.get(e.participantId) ?? e.participantId : "system";
+  const seq = chalk12.gray(`#${String(e.seq).padStart(3)}`);
+  if (e.status === "system") {
+    const reason = e.systemNotice?.reason ? ` (${e.systemNotice.reason})` : "";
+    return `  ${seq} ${chalk12.yellow(`\u2699 ${e.systemNotice?.type ?? e.text}${reason}`)}`;
+  }
+  if (e.status === "undecryptable") {
+    return `  ${seq} ${chalk12.gray(`${who}: <sealed under an earlier key \u2014 not readable with this link>`)}`;
+  }
+  return `  ${seq} ${chalk12.bold(who)}: ${e.text}`;
+}
+
+// src/commands/session.ts
+var sessionCommand = new Command13("session").description("Shared, end-to-end encrypted sessions across machines").addCommand(newCommand).addCommand(joinCommand).addCommand(tailCommand);
+
+// src/commands/update.ts
+import { Command as Command14 } from "commander";
+import { execSync as execSync2, spawn } from "child_process";
+import chalk13 from "chalk";
 async function getLatestVersion() {
   try {
     const result = execSync2("npm view @devpilot.sh/cli version", {
@@ -2268,35 +2411,35 @@ function getUpdateCommand(pm) {
       return "npm install -g @devpilot.sh/cli@latest";
   }
 }
-var updateCommand = new Command10("update").description("Update DevPilot CLI to the latest version").option("-c, --check", "Only check for updates without installing").option("--force", "Force update even if already on latest version").action(async (options) => {
-  console.log(chalk10.cyan("Checking for updates..."));
+var updateCommand = new Command14("update").description("Update DevPilot CLI to the latest version").option("-c, --check", "Only check for updates without installing").option("--force", "Force update even if already on latest version").action(async (options) => {
+  console.log(chalk13.cyan("Checking for updates..."));
   const latestVersion = await getLatestVersion();
   if (!latestVersion) {
-    console.log(chalk10.yellow("Could not check for updates. Please check your network connection."));
-    console.log(chalk10.gray("You can manually update with: npm install -g @devpilot.sh/cli@latest"));
+    console.log(chalk13.yellow("Could not check for updates. Please check your network connection."));
+    console.log(chalk13.gray("You can manually update with: npm install -g @devpilot.sh/cli@latest"));
     return;
   }
   const comparison = compareVersions(latestVersion, VERSION);
   if (comparison === 0 && !options.force) {
-    console.log(chalk10.green(`You're already on the latest version (${VERSION})`));
+    console.log(chalk13.green(`You're already on the latest version (${VERSION})`));
     return;
   }
   if (comparison === -1 && !options.force) {
-    console.log(chalk10.yellow(`You're on a newer version (${VERSION}) than the latest release (${latestVersion})`));
-    console.log(chalk10.gray("This might be a pre-release or development version."));
+    console.log(chalk13.yellow(`You're on a newer version (${VERSION}) than the latest release (${latestVersion})`));
+    console.log(chalk13.gray("This might be a pre-release or development version."));
     return;
   }
   if (options.check) {
     if (comparison === 1) {
-      console.log(chalk10.yellow(`Update available: ${VERSION} \u2192 ${latestVersion}`));
-      console.log(chalk10.gray('Run "devpilot update" to install the latest version.'));
+      console.log(chalk13.yellow(`Update available: ${VERSION} \u2192 ${latestVersion}`));
+      console.log(chalk13.gray('Run "devpilot update" to install the latest version.'));
     }
     return;
   }
   const pm = detectPackageManager();
   const updateCmd = getUpdateCommand(pm);
-  console.log(chalk10.cyan(`Updating from ${VERSION} to ${latestVersion}...`));
-  console.log(chalk10.gray(`Using: ${updateCmd}`));
+  console.log(chalk13.cyan(`Updating from ${VERSION} to ${latestVersion}...`));
+  console.log(chalk13.gray(`Using: ${updateCmd}`));
   console.log("");
   try {
     const [cmd, ...args] = updateCmd.split(" ");
@@ -2307,40 +2450,40 @@ var updateCommand = new Command10("update").description("Update DevPilot CLI to 
     child.on("close", (code) => {
       if (code === 0) {
         console.log("");
-        console.log(chalk10.green(`Successfully updated to ${latestVersion}`));
-        console.log(chalk10.gray('Run "devpilot --version" to verify.'));
+        console.log(chalk13.green(`Successfully updated to ${latestVersion}`));
+        console.log(chalk13.gray('Run "devpilot --version" to verify.'));
       } else {
         console.log("");
-        console.log(chalk10.red("Update failed. Please try manually:"));
-        console.log(chalk10.cyan(`  ${updateCmd}`));
+        console.log(chalk13.red("Update failed. Please try manually:"));
+        console.log(chalk13.cyan(`  ${updateCmd}`));
       }
     });
     child.on("error", (err) => {
-      console.log(chalk10.red(`Update failed: ${err.message}`));
-      console.log(chalk10.gray("Please try manually:"));
-      console.log(chalk10.cyan(`  ${updateCmd}`));
+      console.log(chalk13.red(`Update failed: ${err.message}`));
+      console.log(chalk13.gray("Please try manually:"));
+      console.log(chalk13.cyan(`  ${updateCmd}`));
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    console.log(chalk10.red(`Update failed: ${message}`));
-    console.log(chalk10.gray("Please try manually:"));
-    console.log(chalk10.cyan(`  ${updateCmd}`));
+    console.log(chalk13.red(`Update failed: ${message}`));
+    console.log(chalk13.gray("Please try manually:"));
+    console.log(chalk13.cyan(`  ${updateCmd}`));
   }
 });
 
 // src/commands/wiki.ts
-import { Command as Command11 } from "commander";
+import { Command as Command15 } from "commander";
 import { existsSync as existsSync6, mkdirSync as mkdirSync3, readFileSync as readFileSync4, writeFileSync as writeFileSync5 } from "fs";
 import { join as join6 } from "path";
-import chalk11 from "chalk";
-var wikiCommand = new Command11("wiki").description("LLM-compiled knowledge base \u2014 institutional memory for your codebase");
+import chalk14 from "chalk";
+var wikiCommand = new Command15("wiki").description("LLM-compiled knowledge base \u2014 institutional memory for your codebase");
 wikiCommand.command("init").description("Initialize the wiki system in the current repository").option("--wiki-dir <path>", "Wiki output directory", ".devpilot/wiki").action(async (options) => {
   const cwd = process.cwd();
   const devpilotDir = join6(cwd, ".devpilot");
   const wikiDir = join6(cwd, options.wikiDir);
   if (!existsSync6(devpilotDir)) {
     console.log(
-      chalk11.yellow("\u26A0\uFE0F  DevPilot not initialized. Run `devpilot init` first.")
+      chalk14.yellow("\u26A0\uFE0F  DevPilot not initialized. Run `devpilot init` first.")
     );
     return;
   }
@@ -2383,23 +2526,23 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
     if (!gitignore.includes(".devpilot/wiki")) {
     }
   }
-  console.log(chalk11.green("\u2705 Wiki initialized!"));
+  console.log(chalk14.green("\u2705 Wiki initialized!"));
   console.log("");
-  console.log(chalk11.white("Wiki directory: ") + chalk11.cyan(wikiDir));
+  console.log(chalk14.white("Wiki directory: ") + chalk14.cyan(wikiDir));
   console.log("");
-  console.log(chalk11.white("Next steps:"));
+  console.log(chalk14.white("Next steps:"));
   console.log(
-    chalk11.gray("  1. ") + chalk11.cyan("devpilot wiki ingest --file <path>") + chalk11.gray(" to add source material")
+    chalk14.gray("  1. ") + chalk14.cyan("devpilot wiki ingest --file <path>") + chalk14.gray(" to add source material")
   );
   console.log(
-    chalk11.gray("  2. ") + chalk11.cyan('devpilot wiki query "How does auth work?"') + chalk11.gray(" to ask questions")
+    chalk14.gray("  2. ") + chalk14.cyan('devpilot wiki query "How does auth work?"') + chalk14.gray(" to ask questions")
   );
   console.log(
-    chalk11.gray("  3. ") + chalk11.cyan("devpilot wiki status") + chalk11.gray(" to check wiki health")
+    chalk14.gray("  3. ") + chalk14.cyan("devpilot wiki status") + chalk14.gray(" to check wiki health")
   );
   console.log("");
   console.log(
-    chalk11.gray(
+    chalk14.gray(
       "The wiki will grow automatically as agents work \u2014 each session compounds the knowledge base."
     )
   );
@@ -2408,7 +2551,7 @@ wikiCommand.command("ingest").description("Ingest a source document into the wik
   let content;
   if (options.file) {
     if (!existsSync6(options.file)) {
-      console.log(chalk11.red(`\u274C File not found: ${options.file}`));
+      console.log(chalk14.red(`\u274C File not found: ${options.file}`));
       return;
     }
     content = readFileSync4(options.file, "utf-8");
@@ -2416,20 +2559,20 @@ wikiCommand.command("ingest").description("Ingest a source document into the wik
     content = readFileSync4(0, "utf-8");
   } else {
     console.log(
-      chalk11.red("\u274C Provide either --file <path> or --stdin")
+      chalk14.red("\u274C Provide either --file <path> or --stdin")
     );
     return;
   }
   const validTypes = ["session_log", "commit", "spec", "decision", "manual"];
   if (!validTypes.includes(options.type)) {
     console.log(
-      chalk11.red(
+      chalk14.red(
         `\u274C Invalid type "${options.type}". Must be one of: ${validTypes.join(", ")}`
       )
     );
     return;
   }
-  console.log(chalk11.gray(`Ingesting ${options.type}: "${options.title}"...`));
+  console.log(chalk14.gray(`Ingesting ${options.type}: "${options.title}"...`));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
@@ -2440,75 +2583,75 @@ wikiCommand.command("ingest").description("Ingest a source document into the wik
       options.title,
       options.origin
     );
-    console.log(chalk11.green("\u2705 Ingested successfully!"));
+    console.log(chalk14.green("\u2705 Ingested successfully!"));
     console.log(
-      chalk11.gray(`   Source ID: ${result.sourceId}`)
+      chalk14.gray(`   Source ID: ${result.sourceId}`)
     );
     if (result.articlesCreated.length > 0) {
       console.log(
-        chalk11.white(`   Articles created: `) + chalk11.cyan(result.articlesCreated.join(", "))
+        chalk14.white(`   Articles created: `) + chalk14.cyan(result.articlesCreated.join(", "))
       );
     }
     if (result.articlesUpdated.length > 0) {
       console.log(
-        chalk11.white(`   Articles updated: `) + chalk11.yellow(result.articlesUpdated.join(", "))
+        chalk14.white(`   Articles updated: `) + chalk14.yellow(result.articlesUpdated.join(", "))
       );
     }
     console.log(
-      chalk11.gray(`   Tokens used: ${result.tokensUsed}`)
+      chalk14.gray(`   Tokens used: ${result.tokensUsed}`)
     );
   } catch (error) {
     console.log(
-      chalk11.red(
+      chalk14.red(
         `\u274C Ingest failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
   }
 });
 wikiCommand.command("query <question>").description("Ask a question against the wiki").action(async (question) => {
-  console.log(chalk11.gray(`Searching wiki for: "${question}"...`));
+  console.log(chalk14.gray(`Searching wiki for: "${question}"...`));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const result = await compiler.query(question);
     console.log("");
-    console.log(chalk11.white(result.answer));
+    console.log(chalk14.white(result.answer));
     console.log("");
     if (result.citedArticles.length > 0) {
       console.log(
-        chalk11.gray("Cited: ") + chalk11.cyan(result.citedArticles.map((s) => `[[${s}]]`).join(", "))
+        chalk14.gray("Cited: ") + chalk14.cyan(result.citedArticles.map((s) => `[[${s}]]`).join(", "))
       );
     }
     if (result.newArticleSlug) {
       console.log(
-        chalk11.green(
+        chalk14.green(
           `\u{1F4DD} New article created from this query: [[${result.newArticleSlug}]]`
         )
       );
     }
-    console.log(chalk11.gray(`Tokens used: ${result.tokensUsed}`));
+    console.log(chalk14.gray(`Tokens used: ${result.tokensUsed}`));
   } catch (error) {
     console.log(
-      chalk11.red(
+      chalk14.red(
         `\u274C Query failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
   }
 });
 wikiCommand.command("lint").description("Check wiki health \u2014 find stale content, orphans, and gaps").action(async () => {
-  console.log(chalk11.gray("Linting wiki..."));
+  console.log(chalk14.gray("Linting wiki..."));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const result = await compiler.lint();
     if (result.findings.length === 0) {
-      console.log(chalk11.green("\u2705 Wiki is healthy \u2014 no issues found!"));
+      console.log(chalk14.green("\u2705 Wiki is healthy \u2014 no issues found!"));
       return;
     }
     console.log(
-      chalk11.yellow(`\u26A0\uFE0F  Found ${result.findings.length} issue(s):
+      chalk14.yellow(`\u26A0\uFE0F  Found ${result.findings.length} issue(s):
 `)
     );
     for (const finding of result.findings) {
@@ -2520,23 +2663,23 @@ wikiCommand.command("lint").description("Check wiki health \u2014 find stale con
         broken_link: "\u{1F494}"
       }[finding.type];
       console.log(
-        `  ${icon} ${chalk11.white(`[${finding.type}]`)} ${chalk11.cyan(`[[${finding.articleSlug}]]`)}`
+        `  ${icon} ${chalk14.white(`[${finding.type}]`)} ${chalk14.cyan(`[[${finding.articleSlug}]]`)}`
       );
-      console.log(chalk11.gray(`     ${finding.description}`));
-      console.log(chalk11.gray(`     \u2192 ${finding.suggestion}`));
+      console.log(chalk14.gray(`     ${finding.description}`));
+      console.log(chalk14.gray(`     \u2192 ${finding.suggestion}`));
       console.log("");
     }
     if (result.articlesMarkedStale.length > 0) {
       console.log(
-        chalk11.yellow(
+        chalk14.yellow(
           `Marked ${result.articlesMarkedStale.length} article(s) as stale.`
         )
       );
     }
-    console.log(chalk11.gray(`Tokens used: ${result.tokensUsed}`));
+    console.log(chalk14.gray(`Tokens used: ${result.tokensUsed}`));
   } catch (error) {
     console.log(
-      chalk11.red(
+      chalk14.red(
         `\u274C Lint failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -2548,46 +2691,46 @@ wikiCommand.command("status").description("Show wiki statistics").action(async (
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const status = await compiler.getStatus();
-    console.log(chalk11.white.bold("\n\u{1F4DA} Wiki Status\n"));
+    console.log(chalk14.white.bold("\n\u{1F4DA} Wiki Status\n"));
     console.log(
-      chalk11.gray("  Sources:    ") + chalk11.white(String(status.totalSources))
+      chalk14.gray("  Sources:    ") + chalk14.white(String(status.totalSources))
     );
     console.log(
-      chalk11.gray("  Articles:   ") + chalk11.white(String(status.totalArticles)) + chalk11.gray(" (") + chalk11.green(`${status.activeArticles} active`) + (status.staleArticles > 0 ? chalk11.yellow(`, ${status.staleArticles} stale`) : "") + (status.archivedArticles > 0 ? chalk11.gray(`, ${status.archivedArticles} archived`) : "") + chalk11.gray(")")
+      chalk14.gray("  Articles:   ") + chalk14.white(String(status.totalArticles)) + chalk14.gray(" (") + chalk14.green(`${status.activeArticles} active`) + (status.staleArticles > 0 ? chalk14.yellow(`, ${status.staleArticles} stale`) : "") + (status.archivedArticles > 0 ? chalk14.gray(`, ${status.archivedArticles} archived`) : "") + chalk14.gray(")")
     );
     if (Object.keys(status.categories).length > 0) {
-      console.log(chalk11.gray("\n  Categories:"));
+      console.log(chalk14.gray("\n  Categories:"));
       for (const [category, count] of Object.entries(status.categories).sort()) {
         console.log(
-          chalk11.gray("    ") + chalk11.cyan(category) + chalk11.gray(": ") + chalk11.white(String(count))
+          chalk14.gray("    ") + chalk14.cyan(category) + chalk14.gray(": ") + chalk14.white(String(count))
         );
       }
     }
     if (status.lastActivity) {
       console.log(
-        chalk11.gray("\n  Last activity: ") + chalk11.white(status.lastActivity.toISOString().split("T")[0])
+        chalk14.gray("\n  Last activity: ") + chalk14.white(status.lastActivity.toISOString().split("T")[0])
       );
     }
     console.log("");
   } catch (error) {
     console.log(
-      chalk11.red(
+      chalk14.red(
         `\u274C Status failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
   }
 });
 wikiCommand.command("flush").description("Export wiki to disk as markdown files").action(async () => {
-  console.log(chalk11.gray("Flushing wiki to disk..."));
+  console.log(chalk14.gray("Flushing wiki to disk..."));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const result = await compiler.flushToDisk();
-    console.log(chalk11.green(`\u2705 Wrote ${result.filesWritten} files to ${result.wikiDir}`));
+    console.log(chalk14.green(`\u2705 Wrote ${result.filesWritten} files to ${result.wikiDir}`));
   } catch (error) {
     console.log(
-      chalk11.red(
+      chalk14.red(
         `\u274C Flush failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -2603,7 +2746,7 @@ wikiCommand.command("index").description("Show the wiki table of contents").opti
       index = index.filter((e) => e.category === options.category);
     }
     if (index.length === 0) {
-      console.log(chalk11.gray("Wiki is empty. Run `devpilot wiki ingest` to add sources."));
+      console.log(chalk14.gray("Wiki is empty. Run `devpilot wiki ingest` to add sources."));
       return;
     }
     const byCategory = {};
@@ -2613,25 +2756,25 @@ wikiCommand.command("index").description("Show the wiki table of contents").opti
       }
       byCategory[entry.category].push(entry);
     }
-    console.log(chalk11.white.bold("\n\u{1F4D6} Wiki Index\n"));
+    console.log(chalk14.white.bold("\n\u{1F4D6} Wiki Index\n"));
     for (const [category, entries] of Object.entries(byCategory).sort()) {
       console.log(
-        chalk11.cyan.bold(
+        chalk14.cyan.bold(
           `  ${category.charAt(0).toUpperCase() + category.slice(1)}`
         )
       );
       for (const entry of entries) {
-        const statusColor = entry.status === "active" ? chalk11.green : entry.status === "stale" ? chalk11.yellow : chalk11.gray;
+        const statusColor = entry.status === "active" ? chalk14.green : entry.status === "stale" ? chalk14.yellow : chalk14.gray;
         const badge = statusColor(`[${entry.status}]`);
         console.log(
-          `    ${badge} ${chalk11.white(entry.title)} ${chalk11.gray(`[[${entry.slug}]]`)}`
+          `    ${badge} ${chalk14.white(entry.title)} ${chalk14.gray(`[[${entry.slug}]]`)}`
         );
       }
       console.log("");
     }
   } catch (error) {
     console.log(
-      chalk11.red(
+      chalk14.red(
         `\u274C Index failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -2644,30 +2787,30 @@ wikiCommand.command("read <slug>").description("Read a specific wiki article").a
     const compiler = createWikiCompiler(config);
     const article = await compiler.getArticle(slug);
     if (!article) {
-      console.log(chalk11.red(`\u274C Article not found: [[${slug}]]`));
+      console.log(chalk14.red(`\u274C Article not found: [[${slug}]]`));
       return;
     }
-    console.log(chalk11.white.bold(`
+    console.log(chalk14.white.bold(`
 # ${article.title}
 `));
     console.log(
-      chalk11.gray(
+      chalk14.gray(
         `Category: ${article.category} | Status: ${article.status} | v${article.version}`
       )
     );
     if (article.backlinks.length > 0) {
       console.log(
-        chalk11.gray(
+        chalk14.gray(
           `Related: ${article.backlinks.map((b) => `[[${b}]]`).join(", ")}`
         )
       );
     }
-    console.log(chalk11.gray("\u2500".repeat(60)));
+    console.log(chalk14.gray("\u2500".repeat(60)));
     console.log(article.content);
     console.log("");
   } catch (error) {
     console.log(
-      chalk11.red(
+      chalk14.red(
         `\u274C Read failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -2703,7 +2846,7 @@ var pkg = {
   name: "@devpilot.sh/cli",
   version: VERSION
 };
-var cli = new Command12();
+var cli = new Command16();
 cli.name("devpilot").description("DevPilot CLI - Manage your AI coding agent fleet").version(VERSION);
 cli.addCommand(initCommand);
 cli.addCommand(setupCommand);
@@ -2711,6 +2854,7 @@ cli.addCommand(serveCommand);
 cli.addCommand(statusCommand);
 cli.addCommand(configCommand);
 cli.addCommand(bridgeCommand);
+cli.addCommand(sessionCommand);
 cli.addCommand(updateCommand);
 cli.addCommand(wikiCommand);
 cli.addCommand(benchCommand);

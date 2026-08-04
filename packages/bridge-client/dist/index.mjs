@@ -1,3 +1,12 @@
+var __typeError = (msg) => {
+  throw TypeError(msg);
+};
+var __accessCheck = (obj, member, msg) => member.has(obj) || __typeError("Cannot " + msg);
+var __privateGet = (obj, member, getter) => (__accessCheck(obj, member, "read from private field"), getter ? getter.call(obj) : member.get(obj));
+var __privateAdd = (obj, member, value) => member.has(obj) ? __typeError("Cannot add the same private member more than once") : member instanceof WeakSet ? member.add(obj) : member.set(obj, value);
+var __privateSet = (obj, member, value, setter) => (__accessCheck(obj, member, "write to private field"), setter ? setter.call(obj, value) : member.set(obj, value), value);
+var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "access private method"), method);
+
 // src/client.ts
 import {
   RegisterRequestSchema,
@@ -289,6 +298,193 @@ var HeartbeatService = class {
   }
 };
 
+// src/shared-session.ts
+import {
+  sessionCrypto,
+  parseJoinLink,
+  JOIN_PROOF_HEADER,
+  formatApiError as formatApiError2
+} from "@devpilot.sh/bridge-protocol";
+var SYSTEM_PREFIX = "system:";
+var _key, _token, _participantId, _session, _joinOptions, _fetchImpl, _SharedSessionClient_static, requestJoin_fn, _SharedSessionClient_instances, request_fn, decode_fn;
+var _SharedSessionClient = class _SharedSessionClient {
+  constructor(init) {
+    __privateAdd(this, _SharedSessionClient_instances);
+    __privateAdd(this, _key);
+    __privateAdd(this, _token);
+    __privateAdd(this, _participantId);
+    __privateAdd(this, _session);
+    __privateAdd(this, _joinOptions);
+    __privateAdd(this, _fetchImpl);
+    this.baseUrl = init.baseUrl;
+    this.sessionId = init.sessionId;
+    __privateSet(this, _key, init.key);
+    __privateSet(this, _token, init.token);
+    __privateSet(this, _participantId, init.participantId);
+    __privateSet(this, _session, init.session);
+    __privateSet(this, _joinOptions, init.joinOptions);
+    __privateSet(this, _fetchImpl, init.fetchImpl);
+  }
+  /** Joins by link. The key is taken from the fragment and kept in memory. */
+  static async join(options) {
+    var _a;
+    const { sessionId, key } = parseJoinLink(options.link);
+    const baseUrl = options.link.slice(0, options.link.indexOf("/s/")).replace(/\/+$/, "");
+    const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+    const joinOptions = {
+      displayName: options.displayName,
+      kind: options.kind ?? "human",
+      agentKind: options.agentKind,
+      orchestratorId: options.orchestratorId
+    };
+    const { token, participantId, session } = await __privateMethod(_a = _SharedSessionClient, _SharedSessionClient_static, requestJoin_fn).call(_a, fetchImpl, baseUrl, sessionId, key, joinOptions);
+    return new _SharedSessionClient({
+      baseUrl,
+      sessionId,
+      key,
+      token,
+      participantId,
+      session,
+      joinOptions,
+      fetchImpl
+    });
+  }
+  get participantId() {
+    return __privateGet(this, _participantId);
+  }
+  get session() {
+    return __privateGet(this, _session);
+  }
+  /** Encrypts locally, then posts. The bridge sees only ciphertext. */
+  async post(text, opts = {}) {
+    const ciphertext = await sessionCrypto.encrypt(text, __privateGet(this, _key));
+    const body = await __privateMethod(this, _SharedSessionClient_instances, request_fn).call(this, `/api/sessions/shared/${this.sessionId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        ciphertext,
+        kind: opts.kind ?? "chat",
+        keyVersion: __privateGet(this, _session).keyVersion,
+        ...opts.clientNonce ? { clientNonce: opts.clientNonce } : {}
+      })
+    });
+    return body.message;
+  }
+  /** Reads and decrypts locally. `since` is a seq cursor, never a clock. */
+  async read(since = 0) {
+    const page = await __privateMethod(this, _SharedSessionClient_instances, request_fn).call(this, `/api/sessions/shared/${this.sessionId}/messages?since=${since}`);
+    const entries = await Promise.all(page.messages.map((m) => __privateMethod(this, _SharedSessionClient_instances, decode_fn).call(this, m)));
+    return { entries, latestSeq: page.latestSeq, hasMore: page.hasMore };
+  }
+  async who() {
+    const { verifier } = await sessionCrypto.deriveJoinCredentials(__privateGet(this, _key));
+    const res = await __privateGet(this, _fetchImpl).call(this, `${this.baseUrl}/api/sessions/shared/${this.sessionId}`, {
+      headers: { [JOIN_PROOF_HEADER]: verifier }
+    });
+    if (!res.ok) {
+      const body2 = await res.json().catch(() => null);
+      throw new BridgeError(formatApiError2(body2, `Roster failed: ${res.status}`), res.status);
+    }
+    const body = await res.json();
+    __privateSet(this, _session, body.session);
+    return body.participants;
+  }
+  /**
+   * Keeps `console.log(client)` and `JSON.stringify(client)` from printing the
+   * key. Private fields are already invisible to JSON.stringify, but this is
+   * cheap and states the intent where someone adding a field will read it.
+   */
+  toJSON() {
+    return { sessionId: this.sessionId, baseUrl: this.baseUrl, participantId: __privateGet(this, _participantId) };
+  }
+};
+_key = new WeakMap();
+_token = new WeakMap();
+_participantId = new WeakMap();
+_session = new WeakMap();
+_joinOptions = new WeakMap();
+_fetchImpl = new WeakMap();
+_SharedSessionClient_static = new WeakSet();
+requestJoin_fn = async function(fetchImpl, baseUrl, sessionId, key, joinOptions) {
+  const { verifier } = await sessionCrypto.deriveJoinCredentials(key);
+  const res = await fetchImpl(`${baseUrl}/api/sessions/shared/${sessionId}/join`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", [JOIN_PROOF_HEADER]: verifier },
+    body: JSON.stringify(joinOptions)
+  });
+  if (!res.ok) {
+    const body2 = await res.json().catch(() => null);
+    if (res.status === 404) {
+      throw new BridgeError(
+        "This link is not valid for that session. Either the id is wrong or the session has been re-keyed \u2014 ask for the current link.",
+        404
+      );
+    }
+    throw new BridgeError(formatApiError2(body2, `Join failed: ${res.status}`), res.status);
+  }
+  const body = await res.json();
+  return {
+    token: body.participantToken,
+    participantId: body.participant.id,
+    session: body.session
+  };
+};
+_SharedSessionClient_instances = new WeakSet();
+request_fn = async function(path, init = {}, retried = false) {
+  var _a;
+  const res = await __privateGet(this, _fetchImpl).call(this, `${this.baseUrl}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${__privateGet(this, _token)}`,
+      ...init.headers ?? {}
+    }
+  });
+  if (res.status === 401 && !retried) {
+    const rejoined = await __privateMethod(_a = _SharedSessionClient, _SharedSessionClient_static, requestJoin_fn).call(_a, __privateGet(this, _fetchImpl), this.baseUrl, this.sessionId, __privateGet(this, _key), __privateGet(this, _joinOptions));
+    __privateSet(this, _token, rejoined.token);
+    __privateSet(this, _participantId, rejoined.participantId);
+    __privateSet(this, _session, rejoined.session);
+    return __privateMethod(this, _SharedSessionClient_instances, request_fn).call(this, path, init, true);
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new BridgeError(
+      formatApiError2(body, `${init.method ?? "GET"} ${path} failed: ${res.status}`),
+      res.status
+    );
+  }
+  return await res.json();
+};
+decode_fn = async function(m) {
+  const base = {
+    id: m.id,
+    seq: m.seq,
+    participantId: m.participantId,
+    kind: m.kind,
+    keyVersion: m.keyVersion,
+    createdAt: m.createdAt
+  };
+  if (m.kind === "system" || m.ciphertext.startsWith(SYSTEM_PREFIX)) {
+    let notice;
+    try {
+      notice = JSON.parse(m.ciphertext.slice(SYSTEM_PREFIX.length));
+    } catch {
+      notice = void 0;
+    }
+    return { ...base, text: m.ciphertext.slice(SYSTEM_PREFIX.length), status: "system", systemNotice: notice };
+  }
+  if (m.keyVersion !== __privateGet(this, _session).keyVersion) {
+    return { ...base, text: null, status: "undecryptable" };
+  }
+  try {
+    return { ...base, text: await sessionCrypto.decrypt(m.ciphertext, __privateGet(this, _key)), status: "ok" };
+  } catch {
+    return { ...base, text: null, status: "undecryptable" };
+  }
+};
+__privateAdd(_SharedSessionClient, _SharedSessionClient_static);
+var SharedSessionClient = _SharedSessionClient;
+
 // src/pubsub.ts
 var REMOVED = "@devpilot.sh/bridge-client: the Pub/Sub transport was removed in 0.2.0. Upgrade the DevPilot CLI (npm i -g @devpilot.sh/cli) and use `devpilot bridge connect`. GCP credentials are no longer required.";
 var PubSubSubscriber = class {
@@ -302,6 +498,7 @@ export {
   DispatchLoop,
   HeartbeatService,
   PubSubSubscriber,
-  RealtimeSubscriber
+  RealtimeSubscriber,
+  SharedSessionClient
 };
 //# sourceMappingURL=index.mjs.map

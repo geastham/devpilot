@@ -576,6 +576,17 @@ declare const SharedSessionSchema: z.ZodObject<{
     autoBudgetRemaining: z.ZodOptional<z.ZodNumber>;
     autoExpiresAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     closedAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    /**
+     * Highest assigned `seq`, so a joiner knows how far behind it is without
+     * fetching the transcript first.
+     *
+     * ADDED IN WAVE 4. Wave 2 introduced the column and Wave 3's route has been
+     * returning it since, but this schema — the thing that is supposed to BE the
+     * wire contract — never declared it. Caught by the MCP server, which is the
+     * first consumer to read the session object through the published types
+     * rather than through a hand-written fetch.
+     */
+    lastSeq: z.ZodOptional<z.ZodNumber>;
     createdAt: z.ZodString;
 }, "strip", z.ZodTypeAny, {
     title: string;
@@ -587,6 +598,7 @@ declare const SharedSessionSchema: z.ZodObject<{
     autoBudgetRemaining?: number | undefined;
     autoExpiresAt?: string | null | undefined;
     closedAt?: string | null | undefined;
+    lastSeq?: number | undefined;
 }, {
     title: string;
     id: string;
@@ -597,6 +609,7 @@ declare const SharedSessionSchema: z.ZodObject<{
     autoBudgetRemaining?: number | undefined;
     autoExpiresAt?: string | null | undefined;
     closedAt?: string | null | undefined;
+    lastSeq?: number | undefined;
 }>;
 type SharedSession = z.infer<typeof SharedSessionSchema>;
 /**
@@ -636,6 +649,17 @@ declare const CreateSharedSessionResponseSchema: z.ZodObject<{
         autoBudgetRemaining: z.ZodOptional<z.ZodNumber>;
         autoExpiresAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         closedAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        /**
+         * Highest assigned `seq`, so a joiner knows how far behind it is without
+         * fetching the transcript first.
+         *
+         * ADDED IN WAVE 4. Wave 2 introduced the column and Wave 3's route has been
+         * returning it since, but this schema — the thing that is supposed to BE the
+         * wire contract — never declared it. Caught by the MCP server, which is the
+         * first consumer to read the session object through the published types
+         * rather than through a hand-written fetch.
+         */
+        lastSeq: z.ZodOptional<z.ZodNumber>;
         createdAt: z.ZodString;
     }, "strip", z.ZodTypeAny, {
         title: string;
@@ -647,6 +671,7 @@ declare const CreateSharedSessionResponseSchema: z.ZodObject<{
         autoBudgetRemaining?: number | undefined;
         autoExpiresAt?: string | null | undefined;
         closedAt?: string | null | undefined;
+        lastSeq?: number | undefined;
     }, {
         title: string;
         id: string;
@@ -657,6 +682,7 @@ declare const CreateSharedSessionResponseSchema: z.ZodObject<{
         autoBudgetRemaining?: number | undefined;
         autoExpiresAt?: string | null | undefined;
         closedAt?: string | null | undefined;
+        lastSeq?: number | undefined;
     }>;
 }, "strip", z.ZodTypeAny, {
     session: {
@@ -669,6 +695,7 @@ declare const CreateSharedSessionResponseSchema: z.ZodObject<{
         autoBudgetRemaining?: number | undefined;
         autoExpiresAt?: string | null | undefined;
         closedAt?: string | null | undefined;
+        lastSeq?: number | undefined;
     };
 }, {
     session: {
@@ -681,6 +708,7 @@ declare const CreateSharedSessionResponseSchema: z.ZodObject<{
         autoBudgetRemaining?: number | undefined;
         autoExpiresAt?: string | null | undefined;
         closedAt?: string | null | undefined;
+        lastSeq?: number | undefined;
     };
 }>;
 type CreateSharedSessionResponse = z.infer<typeof CreateSharedSessionResponseSchema>;
@@ -756,6 +784,17 @@ declare const JoinSessionResponseSchema: z.ZodObject<{
         autoBudgetRemaining: z.ZodOptional<z.ZodNumber>;
         autoExpiresAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         closedAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        /**
+         * Highest assigned `seq`, so a joiner knows how far behind it is without
+         * fetching the transcript first.
+         *
+         * ADDED IN WAVE 4. Wave 2 introduced the column and Wave 3's route has been
+         * returning it since, but this schema — the thing that is supposed to BE the
+         * wire contract — never declared it. Caught by the MCP server, which is the
+         * first consumer to read the session object through the published types
+         * rather than through a hand-written fetch.
+         */
+        lastSeq: z.ZodOptional<z.ZodNumber>;
         createdAt: z.ZodString;
     }, "strip", z.ZodTypeAny, {
         title: string;
@@ -767,6 +806,7 @@ declare const JoinSessionResponseSchema: z.ZodObject<{
         autoBudgetRemaining?: number | undefined;
         autoExpiresAt?: string | null | undefined;
         closedAt?: string | null | undefined;
+        lastSeq?: number | undefined;
     }, {
         title: string;
         id: string;
@@ -777,6 +817,7 @@ declare const JoinSessionResponseSchema: z.ZodObject<{
         autoBudgetRemaining?: number | undefined;
         autoExpiresAt?: string | null | undefined;
         closedAt?: string | null | undefined;
+        lastSeq?: number | undefined;
     }>;
 }, "strip", z.ZodTypeAny, {
     expiresAt: string;
@@ -790,6 +831,7 @@ declare const JoinSessionResponseSchema: z.ZodObject<{
         autoBudgetRemaining?: number | undefined;
         autoExpiresAt?: string | null | undefined;
         closedAt?: string | null | undefined;
+        lastSeq?: number | undefined;
     };
     participantToken: string;
     participant: {
@@ -814,6 +856,7 @@ declare const JoinSessionResponseSchema: z.ZodObject<{
         autoBudgetRemaining?: number | undefined;
         autoExpiresAt?: string | null | undefined;
         closedAt?: string | null | undefined;
+        lastSeq?: number | undefined;
     };
     participantToken: string;
     participant: {

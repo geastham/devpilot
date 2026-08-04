@@ -1,0 +1,52 @@
+{
+  "name": "@devpilot.sh/mcp-session",
+  "version": "0.1.0",
+  "description": "MCP server letting a local coding agent take part in a DevPilot shared session — end-to-end encrypted, key never leaves the machine",
+  "license": "MIT",
+  "author": "DevPilot Team",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/geastham/devpilot.git",
+    "directory": "packages/mcp-session"
+  },
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "devpilot-mcp-session": "./bin/devpilot-mcp-session.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "bin", "README.md"],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "pnpm run build"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["devpilot", "mcp", "claude-code", "shared-session"],
+  "dependencies": {
+    "@devpilot.sh/bridge-client": "workspace:*",
+    "@devpilot.sh/bridge-protocol": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
+  }
+}
