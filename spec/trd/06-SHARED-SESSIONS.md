@@ -1,6 +1,15 @@
 # TRD 06 — Shared Agent Sessions
 ## Cross-Machine Agent Coordination · End-to-End Encrypted Transcripts · Join Links · MCP Bridge
-### v1.4 · August 2026 · Status: WAVES 1–4 SHIPPED
+### v1.5 · August 2026 · Status: COMPLETE
+
+> **Change log — v1.5 (4 Aug 2026)**
+> - Wave 5 complete. **TRD 06 is done.**
+> - §8.1 GENUINELY SATISFIED: `sessionCrypto` verified in a real Chrome engine,
+>   both directions — Node encrypt → browser decrypt, browser encrypt → Node
+>   decrypt. Waves 1–4 could only assert this statically.
+> - T6-AC-12 satisfied, and wider than written: the FAQ and hero carried the
+>   same claim in stronger form and were corrected too.
+> - Wave 4's duplicate-participant gap closed via expired-token resume.
 
 > **Change log — v1.4 (4 Aug 2026)**
 > - Wave 4 complete: `@devpilot.sh/mcp-session` and `devpilot session …`.
@@ -808,14 +817,70 @@ engine — Wave 1's outstanding gap, closed by T6-W5-T1's join page. No agent ha
 yet run in `auto` mode against another agent; the budget and TTL are tested
 server-side, but two agents actually conversing has never been observed.
 
-### Wave 5 — Portal, docs, copy
+### Wave 5 — Portal, docs, copy ✅ COMPLETE
 
 | ID | Title | Repo | Files | Cx | Done-check |
 |---|---|---|---|---|---|
-| T6-W5-T1 | Session UI + join page | website | `app/(dashboard)/sessions/shared/**`, `app/s/[id]/**` | L | T6-AC-01 |
-| T6-W5-T2 | Copy-link warning | website | same | S | §3.4 stated at copy time |
-| T6-W5-T3 | **Marketing accuracy** | website | `components/code-quality-section.tsx` | S | **T6-AC-12 — ships in the same PR** |
-| T6-W5-T4 | Docs | both | `docs/SHARED-SESSIONS.md` | M | §3.2 table published |
+| T6-W5-T1 | Session UI + join page | website | `app/(dashboard)/sessions/shared/**`, `app/s/[id]/**` | L | ✅ T6-AC-01 |
+| T6-W5-T2 | Copy-link warning | website | same | S | ✅ §3.4 at copy time |
+| T6-W5-T3 | **Marketing accuracy** | website | `code-quality-section.tsx`, `faq-section.tsx`, `hero-section.tsx` | S | ✅ **T6-AC-12, same PR** |
+| T6-W5-T4 | Docs | both | `docs/SHARED-SESSIONS.md` | M | ✅ §3.2 table published |
+
+**§8.1 IS NOW GENUINELY SATISFIED.** The join page is the first place
+`sessionCrypto` runs in a real browser engine. Verified in Chrome against a live
+deployment, in both directions:
+
+```
+CLI (Node)  ──encrypt──▶  relay  ──▶  Chrome decrypts:
+    "posted from the CLI — the browser should decrypt this"
+
+Chrome  ──encrypt──▶  relay  ──▶  CLI (Node) decrypts:
+    "encrypted in Chrome — the CLI should read this back"
+
+server holds: msgs=2  plaintext_hits=0
+```
+
+Every earlier wave could only assert this statically — jsdom has no
+SubtleCrypto, so a jsdom run would have failed for reasons unrelated to the
+code. "One format, three consumers" is now observed rather than argued.
+
+**T6-AC-12 was wider than the AC said.** §7.6 names the security section, and
+correcting it alone would have satisfied the letter while leaving the site
+untrue two scrolls further down. The FAQ ended *"there is no code path that
+uploads source"* and the hero said *"No source code leaving your laptop"* —
+both stronger than the corrected §3.2, and both now false in one specific case:
+pasting a diff into a shared transcript does move that text, encrypted and by
+your own choice. All three were fixed together.
+
+**The portal deliberately cannot preview a transcript.** The list page is a
+server component and the server cannot read messages, so a preview would either
+be impossible or would mean the design had been abandoned. `/s/[id]` sits
+outside `(dashboard)` because a participant may have no account at all.
+
+**Wave 4's duplicate-participant gap is closed.** Resume takes an EXPIRED
+participant token rather than a client-supplied `participantId`: an id would let
+anyone holding the link post as an existing participant and inherit their
+history, whereas an expired token is unforgeable proof the caller was that
+participant. Expiry is overlooked only to re-establish identity — the join proof
+still has to succeed independently.
+
+---
+
+## Remaining gaps, carried forward rather than closed
+
+TRD 06 is complete. These are known and belong to whatever comes next:
+
+- **`auto` mode has never been observed running.** The budget, TTL, transition
+  and system notice are all enforced and tested server-side, but two agents
+  actually conversing autonomously has not been watched happen.
+- **Realtime is still unwired** for `session_messages`, by choice. Polling with
+  a `seq` cursor cannot miss or duplicate a message; `SUPABASE_JWT_SECRET`
+  remains unset and Realtime has never connected in this project.
+- **Rotation has no UI.** `POST /rotate` works and is tested, but the portal
+  offers no button, so re-keying is currently an API call.
+- **Linear attachment is unused.** `linearIssueId` / `linearIdentifier` are
+  stored and settable, but nothing writes a session back to an issue — §1.2's
+  sixth goal is the one thing in this TRD not delivered.
 
 ---
 
@@ -829,4 +894,4 @@ server-side, but two agents actually conversing has never been observed.
 - **Ciphertext is never rendered server-side**, encrypted or not.
 - The invariant from TRD 05 stands: **agents run locally.**
 
-*TRD 06 · v1.4 · August 2026 · Waves 1–4 shipped*
+*TRD 06 · v1.5 · August 2026 · COMPLETE*

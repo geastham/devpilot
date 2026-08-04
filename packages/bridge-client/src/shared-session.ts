@@ -137,6 +137,8 @@ export class SharedSessionClient {
     sessionId: string,
     key: string,
     joinOptions: Omit<SharedSessionJoinOptions, 'link' | 'fetchImpl'>,
+    /** A lapsed participant token, to resume that identity instead of adding a row. */
+    resumeToken?: string,
   ) {
     // The verifier is an HKDF branch off the key and cannot decrypt anything,
     // which is what makes it safe to hand to the server (TRD 06 §5).
@@ -144,7 +146,11 @@ export class SharedSessionClient {
 
     const res = await fetchImpl(`${baseUrl}/api/sessions/shared/${sessionId}/join`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', [JOIN_PROOF_HEADER]: verifier },
+      headers: {
+        'Content-Type': 'application/json',
+        [JOIN_PROOF_HEADER]: verifier,
+        ...(resumeToken ? { 'x-session-resume': resumeToken } : {}),
+      },
       body: JSON.stringify(joinOptions),
     });
 
@@ -182,12 +188,11 @@ export class SharedSessionClient {
    * re-keyed, and no amount of retrying will help. Rotation is revocation
    * (T6-AC-07), and the honest response is to say the link is stale.
    *
-   * KNOWN GAP: re-joining creates a NEW participant row, so a long-running
-   * `session tail` accumulates one roster entry per hour as its token expires.
-   * The transcript itself reads correctly — both ids carry the same display
-   * name — but `devpilot_session_who` shows duplicates. Fixing it properly
-   * needs POST /join to accept an existing participantId and reuse that row
-   * when it belongs to the session; that is a route change, not a client one.
+   * The lapsed token is offered back on that re-join so the SAME participant
+   * row is reused rather than a second one created. Without it, a `session
+   * tail` left running grew the roster by one entry an hour. An expired token
+   * is unforgeable proof of prior identity; letting the client simply name a
+   * participantId would have let anyone with the link post as an existing one.
    */
   async #request<T>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
     const res = await this.#fetchImpl(`${this.baseUrl}${path}`, {
@@ -206,6 +211,7 @@ export class SharedSessionClient {
         this.sessionId,
         this.#key,
         this.#joinOptions,
+        this.#token,
       );
       this.#token = rejoined.token;
       this.#participantId = rejoined.participantId;
