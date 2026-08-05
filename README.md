@@ -161,7 +161,7 @@ npm install -g @devpilot.sh/cli
 
 cd your-project
 devpilot init          # writes .devpilot/{config.yaml,data.db}
-devpilot serve         # DevPilot server on port 3847
+devpilot serve         # the cockpit, on port 3847
 ```
 
 `devpilot status` prints fleet state, `devpilot config` edits the local config, and
@@ -305,7 +305,7 @@ flowchart TD
 | Package | Role |
 |---|---|
 | [`@devpilot.sh/core`](packages/core) | Schemas, wave planner, orchestrator, integrations, memory, wiki |
-| [`@devpilot.sh/cli`](packages/cli) | `devpilot` command + Fastify server (`devpilot serve`) |
+| [`@devpilot.sh/cli`](packages/cli) | `devpilot` command; `serve` runs the bundled cockpit |
 | [`@devpilot.sh/ui`](packages/ui) | Shared component library |
 | [`@devpilot.sh/benchmarks`](packages/benchmarks) | `devpilot-bench` harness, scoring, trend analysis |
 | [`@devpilot.sh/bridge-protocol`](packages/bridge-protocol) | The bridge wire contract (MIT) — implement it to run your own bridge |
@@ -356,6 +356,7 @@ to contribute something that matters.
 
 | Doc | What's in it |
 |---|---|
+| [docs/COCKPIT.md](docs/COCKPIT.md) | The work horizon, instruments, motion language, wave planning |
 | [docs/LOCAL-SETUP.md](docs/LOCAL-SETUP.md) | Install, init, serve, configuration |
 | [docs/API-REFERENCE.md](docs/API-REFERENCE.md) | HTTP surface |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Current state and prioritized next work |

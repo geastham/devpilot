@@ -1,6 +1,43 @@
 # DevPilot Roadmap — Where We Are & What's Next
 
 > Functionality review · July 2026 · Synthesized from `spec/DESIGN.md`, `spec/WAVE-PLANNER.md`, `spec/BENCHMARK-SUITE.md`, `design/*`, and a full pass over the implementation.
+>
+> **Updated August 2026** — see §0. Parts of §2 below were written when the CLI
+> still had its own Fastify server. That server no longer exists; the affected
+> claim is corrected in place rather than deleted, because the reasoning around
+> it is still worth reading.
+
+---
+
+## 0. August 2026 — what changed
+
+**TRD 06 (shared agent sessions) shipped**, all five waves. End-to-end encrypted
+transcripts, join links, an MCP server so Claude Code can take part, and CLI
+`session` commands. See `docs/SHARED-SESSIONS.md`.
+
+**The cockpit now ships in the CLI.** `devpilot serve` runs the cockpit's own
+Next server. Previously it started a second Fastify implementation of the API
+and served no UI at all — the cockpit existed and ran only from a repo checkout,
+so nobody installing from npm could reach it. See `docs/COCKPIT.md`.
+
+**Three server surfaces became two.** The CLI's Fastify server
+(`packages/cli/src/server`) is deleted. It reimplemented the same API over the
+same tables and was missing the wave-plan routes entirely, so the planner could
+never have worked through it.
+
+**The wave planner UI was orphaned and is now mounted** at `/waves`.
+`DAGVisualization`, `CriticalPathIndicator` and `WaveProgressBar` were all built,
+exported, and reachable from nowhere. The critical path renders and animates.
+
+**A motion language exists** (`src/styles/motion.css`), implementing the §2.2
+signals that were specified and never built — runway urgency, idle pulses, live
+agents. Rule: motion is diegetic, and everything is guarded by
+`prefers-reduced-motion`.
+
+**Still true from §2 below:** dispatch is the broken link. `dispatchToOrchestrator()`
+remains a no-op, and plan generation for the plan-review flow is still
+`generateMockWorkstreams()`. Tier 1 is unchanged and is still the most valuable
+work available.
 
 ---
 
@@ -42,7 +79,7 @@ Recent PRs added: Wiki system (#4), Caveman plugin in setup (#5), MemPalace memo
 **The full loop — capture → plan → dispatch → agents execute → progress flows back — is broken at "dispatch."** Everything upstream (UI, DB, AI wave planning) and downstream (orchestrator callback ingestion, Linear sync, score updates) is real, but the middle never fires:
 
 1. `dispatchToOrchestrator()` in `packages/core/src/wave-planner/execution/dispatch-coordinator.ts` is a no-op placeholder — wave dispatch only mutates DB status.
-2. The Next app never calls `initOrchestratorClient`, so `POST /api/fleet/dispatch/[itemId]` always takes the unconfigured branch — it creates a session row at 0% that nothing advances. Only the CLI's `devpilot serve` Fastify server wires an orchestrator end-to-end.
+2. The Next app never calls `initOrchestratorClient`, so `POST /api/fleet/dispatch/[itemId]` always takes the unconfigured branch — it creates a session row at 0% that nothing advances. ~~Only the CLI's `devpilot serve` Fastify server wires an orchestrator end-to-end.~~ **(Aug 2026: that server has been deleted — `serve` now runs the Next app, so the orchestrator wiring it had is gone with it. This makes the gap WORSE, not better: there is now no path that wires an orchestrator end-to-end, and Tier 1 has to supply one. The env plumbing survives — `serve` forwards `DEVPILOT_ORCHESTRATOR_*` into the Next server — so the config surface is in place and only the call site is missing.)**
 3. Plan generation for the plan-review flow is still `generateMockWorkstreams()` keyword templates (`src/app/api/items/[id]/plan/generate/route.ts:192`) even though the *wave* planner right next to it is real AI.
 
 ---

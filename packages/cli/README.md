@@ -33,6 +33,10 @@ Initialize DevPilot in the current directory. Creates a `.devpilot/` directory w
 
 ### `devpilot serve`
 
+Starts the cockpit — work horizon, planning agent, wave execution — on port 3847
+and opens it. The UI is bundled into this package; there is no separate app to
+run. See [docs/COCKPIT.md](../../docs/COCKPIT.md).
+
 Start the local DevPilot server with web UI.
 
 Options:
