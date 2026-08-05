@@ -1,5 +1,6 @@
 'use client';
 
+import { Rocket, ScanLine, Layers, Compass } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { HorizonItem, Zone } from '@/types';
 import { ReadyCard } from './ReadyCard';
@@ -13,33 +14,55 @@ interface HorizonZoneProps {
   className?: string;
 }
 
+/**
+ * DESIGN.md §2.1 assigns each zone a VISUAL WEIGHT — "Largest, highest
+ * contrast" for READY down to "Smallest, low contrast" for DIRECTIONAL — and
+ * the UI was rendering all four identically apart from a barely perceptible
+ * background tint. A conductor scanning this surface should be able to tell
+ * dispatchable work from a scratchpad thought without reading a word.
+ *
+ * `weight` drives header prominence and content opacity. READY is the only
+ * zone that means anything to an idle agent, so it is the only one at full
+ * strength.
+ */
 const zoneConfig: Record<
   Zone,
   {
     label: string;
     bgClass: string;
     headerClass: string;
+    /** Applied to the zone's content — quiets the far end of the horizon. */
+    weightClass: string;
+    labelClass: string;
   }
 > = {
   READY: {
     label: 'READY',
     bgClass: 'bg-bg-base',
-    headerClass: 'text-zone-ready border-zone-ready/30',
+    headerClass: 'text-zone-ready border-zone-ready/40',
+    weightClass: 'opacity-100',
+    labelClass: 'text-[13px] font-bold tracking-[0.1em]',
   },
   REFINING: {
     label: 'REFINING',
     bgClass: 'bg-bg-base/95',
     headerClass: 'text-zone-refining border-zone-refining/30',
+    weightClass: 'opacity-100',
+    labelClass: 'text-xs font-semibold tracking-[0.1em]',
   },
   SHAPING: {
     label: 'SHAPING',
     bgClass: 'bg-bg-base/90',
-    headerClass: 'text-zone-shaping border-zone-shaping/30',
+    headerClass: 'text-zone-shaping border-zone-shaping/20',
+    weightClass: 'opacity-90',
+    labelClass: 'text-xs font-medium tracking-[0.1em]',
   },
   DIRECTIONAL: {
     label: 'DIRECTIONAL',
     bgClass: 'bg-bg-base/85',
-    headerClass: 'text-zone-directional border-zone-directional/30',
+    headerClass: 'text-zone-directional border-zone-directional/15',
+    weightClass: 'opacity-75',
+    labelClass: 'text-[11px] font-medium tracking-[0.1em]',
   },
 };
 
@@ -76,9 +99,7 @@ export function HorizonZone({ zone, items, className }: HorizonZoneProps) {
         )}
       >
         <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold tracking-wider">
-            {config.label}
-          </span>
+          <span className={config.labelClass}>{config.label}</span>
           <span className="rounded-full bg-current/10 px-2 py-0.5 text-xs">
             {items.length}
           </span>
@@ -86,7 +107,14 @@ export function HorizonZone({ zone, items, className }: HorizonZoneProps) {
       </div>
 
       {/* Zone Content */}
-      <div className="flex-1 overflow-y-auto p-3 space-y-3">
+      {/* dp-stagger: cards land in sequence rather than all at once, which is
+          what makes a refreshed zone feel assembled instead of repainted. */}
+      <div
+        className={cn(
+          'dp-stagger flex-1 space-y-3 overflow-y-auto p-3',
+          config.weightClass
+        )}
+      >
         {items.length === 0 ? (
           <ZoneEmptyState zone={zone} />
         ) : (
@@ -103,37 +131,46 @@ export function HorizonZone({ zone, items, className }: HorizonZoneProps) {
 // Empty State
 // ============================================================================
 
+/**
+ * Line icons rather than emoji. The emoji rendered at a different weight and
+ * colour from everything around them — 🚀 next to a dense cost breakdown reads
+ * as a different product — and they render differently per platform, so the
+ * screen looked subtly wrong on Windows.
+ */
 function ZoneEmptyState({ zone }: { zone: Zone }) {
-  const config: Record<Zone, { icon: string; title: string; subtitle: string }> = {
+  const config: Record<
+    Zone,
+    { Icon: typeof Rocket; title: string; subtitle: string }
+  > = {
     READY: {
-      icon: '🚀',
+      Icon: Rocket,
       title: 'Nothing ready to launch',
       subtitle: 'Promote items from Refining to keep your fleet fed.',
     },
     REFINING: {
-      icon: '🔍',
+      Icon: ScanLine,
       title: 'No plans under review',
       subtitle: 'Shape an idea to trigger plan generation.',
     },
     SHAPING: {
-      icon: '🏺',
+      Icon: Layers,
       title: 'Nothing being shaped',
       subtitle: 'Promote a directional idea to start planning.',
     },
     DIRECTIONAL: {
-      icon: '🧭',
+      Icon: Compass,
       title: 'Capture your next idea',
       subtitle: 'Use Quick Capture below to add a rough thought.',
     },
   };
 
-  const { icon, title, subtitle } = config[zone];
+  const { Icon, title, subtitle } = config[zone];
 
   return (
     <div className="flex flex-col items-center justify-center py-12 text-center">
-      <div className="mb-3 text-3xl opacity-50">{icon}</div>
+      <Icon className="mb-3 h-5 w-5 text-text-muted/60" strokeWidth={1.5} />
       <p className="text-sm font-medium text-text-secondary">{title}</p>
-      <p className="mt-1 text-xs text-text-muted max-w-[200px]">{subtitle}</p>
+      <p className="mt-1 max-w-[200px] text-xs text-text-muted">{subtitle}</p>
     </div>
   );
 }

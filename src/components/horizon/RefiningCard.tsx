@@ -45,19 +45,24 @@ export function RefiningCard({ item }: RefiningCardProps) {
     >
       <CardContent className="p-4">
         {/* Header Row */}
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-2">
+        {/* min-w-0 + shrink-0 is load-bearing: without it the flex children
+            refuse to shrink and the 32px ring lands ON TOP of the ticket id in
+            a narrow zone. Text truncates, the ring never moves. */}
+        <div className="flex items-center justify-between gap-2 mb-2">
+          <div className="flex min-w-0 items-center gap-2">
             <RepoBadge repo={item.repo} />
             {item.linearTicketId && (
-              <span className="text-xs text-text-muted">{item.linearTicketId}</span>
+              <span className="truncate text-xs text-text-muted">{item.linearTicketId}</span>
             )}
           </div>
-          <ProgressRing
-            value={specCompletion}
-            size={32}
-            strokeWidth={3}
-            variant={specCompletion === 100 ? 'success' : 'default'}
-          />
+          <div className="shrink-0">
+            <ProgressRing
+              value={specCompletion}
+              size={32}
+              strokeWidth={3}
+              variant={specCompletion === 100 ? 'success' : 'default'}
+            />
+          </div>
         </div>
 
         {/* Title */}

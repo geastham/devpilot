@@ -3,6 +3,7 @@
 import { TopBar } from '@/components/topbar/TopBar';
 import { QuickCaptureInput } from '@/components/capture/QuickCaptureInput';
 import { AgenticAssistPanel } from '@/components/assist';
+import { CockpitBackdrop } from '@/components/visual';
 
 export default function MainLayout({
   children,
@@ -10,7 +11,12 @@ export default function MainLayout({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex min-h-screen flex-col">
+    // `relative` + `isolate` establish the stacking context the backdrop sits
+    // behind. Without isolate, the -z-10 layer escapes and paints over the page
+    // background instead of under the cockpit.
+    <div className="relative isolate flex min-h-screen flex-col">
+      <CockpitBackdrop className="-z-10" />
+
       {/* Top Bar - Always visible */}
       <TopBar />
 

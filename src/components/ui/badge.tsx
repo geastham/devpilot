@@ -115,7 +115,9 @@ export function StatusBadge({ status, className }: StatusBadgeProps) {
   const config = {
     active: {
       label: 'active',
-      dotClass: 'bg-accent-primary',
+      // Breathing, not pulsing. "Working" is the normal state and must not
+      // compete for attention with an amber idle warning two cards away.
+      dotClass: 'bg-accent-primary dp-breathe',
       textClass: 'text-accent-primary',
     },
     'needs-spec': {

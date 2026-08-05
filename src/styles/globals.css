@@ -2,6 +2,10 @@
 @tailwind components;
 @tailwind utilities;
 
+/* The cockpit motion language. See the header of motion.css for the rule that
+   governs what is allowed in it. */
+@import './motion.css';
+
 @layer base {
   :root {
     /* CSS custom properties for dynamic theming */
