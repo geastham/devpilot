@@ -33,6 +33,8 @@ interface Edge {
   type: 'hard' | 'soft';
   fromPos: Position;
   toPos: Position;
+  /** True only for consecutive pairs in the critical path — see the layout fn. */
+  onCriticalPath: boolean;
 }
 
 // ============================================================================
@@ -109,7 +111,8 @@ function calculateLayout(
 
 function calculateEdges(
   taskNodes: TaskNode[],
-  dependencyEdges: DependencyEdge[]
+  dependencyEdges: DependencyEdge[],
+  criticalPath: string[]
 ): Edge[] {
   const taskPositionMap = new Map<string, Position>();
   taskNodes.forEach((node) => {
@@ -137,6 +140,15 @@ function calculateEdges(
         from: edge.fromTaskCode,
         to: edge.toTaskCode,
         type: edge.edgeType,
+        // An edge is on the critical path only when BOTH endpoints are, and
+        // they are adjacent in it. Testing endpoints alone lights up every edge
+        // that merely touches the path, which turns the longest chain into a
+        // bush and defeats the point of showing it.
+        onCriticalPath: (() => {
+          const a = criticalPath.indexOf(edge.fromTaskCode);
+          const b = criticalPath.indexOf(edge.toTaskCode);
+          return a !== -1 && b !== -1 && b === a + 1;
+        })(),
         fromPos: fromCenter,
         toPos: toCenter,
       };
@@ -160,7 +172,7 @@ export function DAGVisualization({
 
   const { taskNodes, edges, viewBox } = useMemo(() => {
     const nodes = calculateLayout(waveTasks, criticalPath);
-    const calculatedEdges = calculateEdges(nodes, dependencyEdges);
+    const calculatedEdges = calculateEdges(nodes, dependencyEdges, criticalPath);
 
     // Calculate viewBox dimensions
     const maxX = Math.max(...nodes.map((n) => n.position.x + NODE_WIDTH));
@@ -248,8 +260,18 @@ export function DAGVisualization({
           viewBox={`0 0 ${viewBox.width} ${viewBox.height}`}
           className="min-w-full min-h-full"
         >
-          {/* Define arrow marker for edges */}
+          {/* Define arrow markers for edges */}
           <defs>
+            <marker
+              id="arrowhead-critical"
+              markerWidth="10"
+              markerHeight="10"
+              refX="9"
+              refY="3"
+              orient="auto"
+            >
+              <polygon points="0 0, 10 3, 0 6" fill="#34D399" />
+            </marker>
             <marker
               id="arrowhead"
               markerWidth="10"
@@ -270,6 +292,37 @@ export function DAGVisualization({
           <g className="edges">
             {edges.map((edge, index) => {
               const isDashed = edge.type === 'soft';
+
+              /*
+               * THE CRITICAL PATH, MOVING.
+               *
+               * Every edge rendered at #4B5563 before this, so the longest
+               * chain — the thing that actually determines when the work lands
+               * — was invisible in a diagram built to show it.
+               *
+               * Flow direction encodes dependency direction, so a glance tells
+               * you which way the chain runs. This is the animation the hero
+               * image on the marketing site depicts; product and page now
+               * rhyme. `dp-flow` is guarded by prefers-reduced-motion, and the
+               * colour and width carry the same signal on their own.
+               */
+              if (edge.onCriticalPath) {
+                return (
+                  <line
+                    key={`edge-${index}`}
+                    x1={edge.fromPos.x}
+                    y1={edge.fromPos.y}
+                    x2={edge.toPos.x}
+                    y2={edge.toPos.y}
+                    stroke="#34D399"
+                    strokeWidth="3"
+                    markerEnd="url(#arrowhead-critical)"
+                    className="dp-flow"
+                    style={{ filter: 'drop-shadow(0 0 4px rgba(52,211,153,0.5))' }}
+                  />
+                );
+              }
+
               return (
                 <line
                   key={`edge-${index}`}

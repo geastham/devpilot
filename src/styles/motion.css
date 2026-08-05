@@ -237,3 +237,37 @@
     transform: none !important;
   }
 }
+
+/* ── Boot sequence ────────────────────────────────────────────────────────── */
+/*
+ * Used by BootSequence, which honours prefers-reduced-motion in JS by not
+ * rendering at all — so these keyframes are unreachable in that mode and need
+ * no guard of their own.
+ */
+@keyframes dp-boot-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes dp-boot-settle {
+  0% {
+    opacity: 0;
+    transform: scale(0.4) rotate(-35deg);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+  }
+}
+
+@keyframes dp-boot-fade {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

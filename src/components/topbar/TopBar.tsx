@@ -5,6 +5,8 @@ import { useFleetStore, useUIStore } from '@/stores';
 import { FleetSummaryPills } from './FleetSummaryPills';
 import { ConductorScorePill } from './ConductorScorePill';
 import { RunwayIndicator } from './RunwayIndicator';
+import Link from 'next/link';
+import { GitBranch } from 'lucide-react';
 import { LayoutSwitcher } from './LayoutSwitcher';
 
 export function TopBar() {
@@ -76,6 +78,16 @@ export function TopBar() {
             </span>
           )}
         </button>
+
+        {/* The wave planner had no entry point anywhere in the UI — engine,
+            API and components all existed with no way to reach them. */}
+        <Link
+          href="/waves"
+          title="Wave execution"
+          className="flex h-8 w-8 items-center justify-center rounded-md text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+        >
+          <GitBranch className="h-4 w-4" />
+        </Link>
 
         <ConductorScorePill score={conductorScore} />
         <LayoutSwitcher />
