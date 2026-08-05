@@ -82,1020 +82,17 @@ ui:
 // src/commands/serve.ts
 import { Command as Command2 } from "commander";
 import chalk2 from "chalk";
-
-// src/server/index.ts
-import Fastify from "fastify";
-import { initDatabase } from "@devpilot.sh/core/db";
-import {
-  initOrchestratorService,
-  initStatusPoller,
-  createDbStatusPollerCallbacks
-} from "@devpilot.sh/core/orchestrator";
-import { initExecutionBridge } from "@devpilot.sh/core/wave-planner";
-
-// src/server/api/items.ts
-import {
-  horizonItems,
-  plans,
-  workstreams,
-  tasks,
-  touchedFiles,
-  activityEvents
-} from "@devpilot.sh/core/db";
-import { generatePlanForItem, projectWavePlanToPlan } from "@devpilot.sh/core/wave-planner";
-import { eq, and, desc } from "drizzle-orm";
-async function registerItemRoutes(app) {
-  const db2 = getDb();
-  app.get("/api/items", async (request, reply) => {
-    const { zone, repo } = request.query;
-    const conditions = [];
-    if (zone) conditions.push(eq(horizonItems.zone, zone));
-    if (repo) conditions.push(eq(horizonItems.repo, repo));
-    const items = await db2.query.horizonItems.findMany({
-      where: conditions.length > 0 ? and(...conditions) : void 0,
-      with: {
-        plan: {
-          with: {
-            workstreams: {
-              with: { tasks: true }
-            },
-            sequentialTasks: true,
-            filesTouched: true
-          }
-        },
-        conflictingFiles: true
-      },
-      orderBy: [desc(horizonItems.priority), desc(horizonItems.createdAt)]
-    });
-    return items;
-  });
-  app.post("/api/items", async (request, reply) => {
-    const { title, zone = "DIRECTIONAL", repo, complexity, priority = 0, linearTicketId } = request.body;
-    if (!title || !repo) {
-      reply.status(400).send({ error: "Title and repo are required" });
-      return;
-    }
-    const [item] = await db2.insert(horizonItems).values({
-      title,
-      zone,
-      repo,
-      complexity,
-      priority,
-      linearTicketId
-    }).returning();
-    const itemWithRelations = await db2.query.horizonItems.findFirst({
-      where: eq(horizonItems.id, item.id),
-      with: {
-        plan: true,
-        conflictingFiles: true
-      }
-    });
-    await db2.insert(activityEvents).values({
-      type: "ITEM_CREATED",
-      message: `New item "${title}" added to ${zone}`,
-      repo,
-      ticketId: linearTicketId
-    });
-    reply.status(201).send(itemWithRelations);
-  });
-  app.get("/api/items/:id", async (request, reply) => {
-    const { id } = request.params;
-    const item = await db2.query.horizonItems.findFirst({
-      where: eq(horizonItems.id, id),
-      with: {
-        plan: {
-          with: {
-            workstreams: {
-              with: { tasks: true }
-            },
-            sequentialTasks: true,
-            filesTouched: true
-          }
-        },
-        conflictingFiles: true
-      }
-    });
-    if (!item) {
-      reply.status(404).send({ error: "Item not found" });
-      return;
-    }
-    return item;
-  });
-  app.patch("/api/items/:id", async (request, reply) => {
-    const { id } = request.params;
-    const { title, zone, repo, complexity, priority, linearTicketId } = request.body;
-    const existingItem = await db2.query.horizonItems.findFirst({
-      where: eq(horizonItems.id, id)
-    });
-    if (!existingItem) {
-      reply.status(404).send({ error: "Item not found" });
-      return;
-    }
-    const updateData = {
-      updatedAt: /* @__PURE__ */ new Date()
-    };
-    if (title !== void 0) updateData.title = title;
-    if (zone !== void 0) updateData.zone = zone;
-    if (repo !== void 0) updateData.repo = repo;
-    if (complexity !== void 0) updateData.complexity = complexity;
-    if (priority !== void 0) updateData.priority = priority;
-    if (linearTicketId !== void 0) updateData.linearTicketId = linearTicketId;
-    await db2.update(horizonItems).set(updateData).where(eq(horizonItems.id, id));
-    const item = await db2.query.horizonItems.findFirst({
-      where: eq(horizonItems.id, id),
-      with: {
-        plan: {
-          with: {
-            workstreams: {
-              with: { tasks: true }
-            },
-            sequentialTasks: true,
-            filesTouched: true
-          }
-        },
-        conflictingFiles: true
-      }
-    });
-    if (zone && zone !== existingItem.zone && item) {
-      await db2.insert(activityEvents).values({
-        type: "RUNWAY_UPDATE",
-        message: `"${item.title}" moved from ${existingItem.zone} to ${zone}`,
-        repo: item.repo,
-        ticketId: item.linearTicketId
-      });
-    }
-    return item;
-  });
-  app.delete("/api/items/:id", async (request, reply) => {
-    const { id } = request.params;
-    const existingItem = await db2.query.horizonItems.findFirst({
-      where: eq(horizonItems.id, id)
-    });
-    if (!existingItem) {
-      reply.status(404).send({ error: "Item not found" });
-      return;
-    }
-    await db2.delete(horizonItems).where(eq(horizonItems.id, id));
-    return { success: true };
-  });
-  app.post("/api/items/:id/plan/generate", async (request, reply) => {
-    const { id } = request.params;
-    const item = await db2.query.horizonItems.findFirst({
-      where: eq(horizonItems.id, id),
-      with: { plan: true }
-    });
-    if (!item) {
-      reply.status(404).send({ error: "Item not found" });
-      return;
-    }
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
-      reply.status(503).send({
-        error: "PLAN_AI_UNAVAILABLE",
-        detail: "ANTHROPIC_API_KEY is not configured"
-      });
-      return;
-    }
-    const allInFlightFiles = await db2.query.inFlightFiles.findMany();
-    const inFlightPaths = allInFlightFiles.map((f) => f.path);
-    const priorVersion = item.plan?.version ?? 0;
-    if (item.plan) {
-      await db2.delete(tasks).where(eq(tasks.planId, item.plan.id));
-      const existingWorkstreams = await db2.query.workstreams.findMany({
-        where: eq(workstreams.planId, item.plan.id)
-      });
-      for (const ws of existingWorkstreams) {
-        await db2.delete(tasks).where(eq(tasks.workstreamId, ws.id));
-      }
-      await db2.delete(workstreams).where(eq(workstreams.planId, item.plan.id));
-      await db2.delete(touchedFiles).where(eq(touchedFiles.planId, item.plan.id));
-      await db2.delete(plans).where(eq(plans.id, item.plan.id));
-    }
-    const workingDir = process.env.WORKING_DIR || process.cwd();
-    const { generation, planId } = await generatePlanForItem({
-      horizonItemId: id,
-      title: item.title,
-      repo: item.repo,
-      workingDir,
-      apiKey
-    });
-    await projectWavePlanToPlan({ planId, generation, inFlightPaths });
-    if (priorVersion > 0) {
-      await db2.update(plans).set({ version: priorVersion + 1 }).where(eq(plans.id, planId));
-    }
-    if (item.zone === "SHAPING") {
-      await db2.update(horizonItems).set({ zone: "REFINING", updatedAt: /* @__PURE__ */ new Date() }).where(eq(horizonItems.id, id));
-    }
-    const completePlan = await db2.query.plans.findFirst({
-      where: eq(plans.id, planId),
-      with: {
-        workstreams: {
-          with: { tasks: true }
-        },
-        sequentialTasks: true,
-        filesTouched: true
-      }
-    });
-    await db2.insert(activityEvents).values({
-      type: "PLAN_GENERATED",
-      message: `Plan generated for "${item.title}" ($${(completePlan?.estimatedCostUsd ?? 0).toFixed(2)})`,
-      repo: item.repo,
-      ticketId: item.linearTicketId,
-      metadata: { planId }
-    });
-    reply.status(201).send(completePlan);
-  });
-  app.get("/api/items/:id/plan", async (request, reply) => {
-    const { id } = request.params;
-    const item = await db2.query.horizonItems.findFirst({
-      where: eq(horizonItems.id, id),
-      with: {
-        plan: {
-          with: {
-            workstreams: {
-              with: { tasks: true }
-            },
-            sequentialTasks: true,
-            filesTouched: true,
-            previousPlan: true
-          }
-        }
-      }
-    });
-    if (!item) {
-      reply.status(404).send({ error: "Item not found" });
-      return;
-    }
-    if (!item.plan) {
-      reply.status(404).send({ error: "No plan exists for this item" });
-      return;
-    }
-    return item.plan;
-  });
-  app.post("/api/items/:id/plan/replan", async (request, reply) => {
-    const { id } = request.params;
-    const { constraint } = request.body;
-    const item = await db2.query.horizonItems.findFirst({
-      where: eq(horizonItems.id, id),
-      with: {
-        plan: {
-          with: {
-            workstreams: {
-              with: { tasks: true }
-            },
-            sequentialTasks: true,
-            filesTouched: true
-          }
-        }
-      }
-    });
-    if (!item) {
-      reply.status(404).send({ error: "Item not found" });
-      return;
-    }
-    if (!item.plan) {
-      reply.status(400).send({ error: "No existing plan to replan" });
-      return;
-    }
-    const [newPlan] = await db2.insert(plans).values({
-      horizonItemId: id,
-      version: item.plan.version + 1,
-      estimatedCostUsd: item.plan.estimatedCostUsd * 0.9,
-      baselineCostUsd: item.plan.baselineCostUsd,
-      acceptanceCriteria: item.plan.acceptanceCriteria,
-      confidenceSignals: item.plan.confidenceSignals,
-      fleetContextSnapshot: item.plan.fleetContextSnapshot,
-      memorySessionsUsed: item.plan.memorySessionsUsed,
-      previousPlanId: item.plan.id
-    }).returning();
-    for (const ws of item.plan.workstreams) {
-      const [workstream] = await db2.insert(workstreams).values({
-        planId: newPlan.id,
-        label: ws.label,
-        repo: ws.repo,
-        workerCount: ws.workerCount,
-        orderIndex: ws.orderIndex
-      }).returning();
-      for (const task of ws.tasks) {
-        await db2.insert(tasks).values({
-          workstreamId: workstream.id,
-          label: task.label,
-          model: task.model,
-          complexity: task.complexity,
-          estimatedCostUsd: task.estimatedCostUsd,
-          filePaths: task.filePaths,
-          conflictWarning: task.conflictWarning,
-          dependsOn: task.dependsOn,
-          orderIndex: task.orderIndex
-        });
-      }
-    }
-    for (const f of item.plan.filesTouched) {
-      await db2.insert(touchedFiles).values({
-        planId: newPlan.id,
-        path: f.path,
-        status: f.status,
-        inFlightVia: f.inFlightVia
-      });
-    }
-    const completePlan = await db2.query.plans.findFirst({
-      where: eq(plans.id, newPlan.id),
-      with: {
-        workstreams: {
-          with: { tasks: true }
-        },
-        sequentialTasks: true,
-        filesTouched: true,
-        previousPlan: true
-      }
-    });
-    await db2.insert(activityEvents).values({
-      type: "PLAN_GENERATED",
-      message: `Plan replanned for "${item.title}" with constraint: "${constraint || "manual"}"`,
-      repo: item.repo,
-      ticketId: item.linearTicketId,
-      metadata: { planId: newPlan.id, version: newPlan.version }
-    });
-    return completePlan;
-  });
-  app.patch("/api/items/:id/plan/tasks/:taskId", async (request, reply) => {
-    const { id, taskId } = request.params;
-    const { model, complexity, modelOverride } = request.body;
-    const updateData = {};
-    if (model !== void 0) updateData.model = model;
-    if (modelOverride !== void 0) updateData.modelOverride = modelOverride;
-    if (complexity !== void 0) updateData.complexity = complexity;
-    const [updatedTask] = await db2.update(tasks).set(updateData).where(eq(tasks.id, taskId)).returning();
-    if (!updatedTask) {
-      reply.status(404).send({ error: "Task not found" });
-      return;
-    }
-    return { task: updatedTask };
-  });
-}
-
-// src/server/api/fleet.ts
-import {
-  horizonItems as horizonItems2,
-  rufloSessions,
-  inFlightFiles as inFlightFiles2,
-  touchedFiles as touchedFiles2,
-  activityEvents as activityEvents2,
-  conductorScores
-} from "@devpilot.sh/core/db";
-import {
-  getOrchestratorServiceOrNull,
-  buildDispatchRequest
-} from "@devpilot.sh/core/orchestrator";
-import { eq as eq2, or, desc as desc2, and as and2, asc } from "drizzle-orm";
-async function registerFleetRoutes(app) {
-  const db2 = getDb();
-  app.get("/api/fleet/sessions", async (request, reply) => {
-    const { status, repo } = request.query;
-    const conditions = [];
-    if (status) conditions.push(eq2(rufloSessions.status, status));
-    if (repo) conditions.push(eq2(rufloSessions.repo, repo));
-    const sessions = await db2.query.rufloSessions.findMany({
-      where: conditions.length > 0 ? and2(...conditions) : void 0,
-      with: {
-        completedTasks: true
-      },
-      orderBy: [asc(rufloSessions.status), desc2(rufloSessions.updatedAt)]
-    });
-    return sessions;
-  });
-  app.post("/api/fleet/sessions", async (request, reply) => {
-    const {
-      repo,
-      linearTicketId,
-      ticketTitle,
-      currentWorkstream,
-      estimatedRemainingMinutes,
-      inFlightFiles: inFlightFilePaths = []
-    } = request.body;
-    if (!repo || !linearTicketId || !ticketTitle) {
-      reply.status(400).send({ error: "repo, linearTicketId, and ticketTitle are required" });
-      return;
-    }
-    const [session] = await db2.insert(rufloSessions).values({
-      repo,
-      linearTicketId,
-      ticketTitle,
-      currentWorkstream: currentWorkstream || "Main",
-      status: "ACTIVE",
-      progressPercent: 0,
-      elapsedMinutes: 0,
-      estimatedRemainingMinutes: estimatedRemainingMinutes || 30,
-      inFlightFiles: inFlightFilePaths
-    }).returning();
-    for (const filePath of inFlightFilePaths) {
-      await db2.insert(inFlightFiles2).values({
-        path: filePath,
-        activeSessionId: session.id,
-        linearTicketId,
-        estimatedMinutesRemaining: estimatedRemainingMinutes || 30
-      });
-    }
-    await db2.insert(activityEvents2).values({
-      type: "ITEM_DISPATCHED",
-      message: `Session started: "${ticketTitle}"`,
-      repo,
-      ticketId: linearTicketId,
-      metadata: { sessionId: session.id }
-    });
-    const sessionWithRelations = await db2.query.rufloSessions.findFirst({
-      where: eq2(rufloSessions.id, session.id),
-      with: {
-        completedTasks: true
-      }
-    });
-    reply.status(201).send(sessionWithRelations);
-  });
-  app.get("/api/fleet/state", async (request, reply) => {
-    const sessions = await db2.query.rufloSessions.findMany({
-      where: or(
-        eq2(rufloSessions.status, "ACTIVE"),
-        eq2(rufloSessions.status, "NEEDS_SPEC")
-      ),
-      with: {
-        completedTasks: true
-      },
-      orderBy: desc2(rufloSessions.updatedAt)
-    });
-    const allInFlightFiles = await db2.query.inFlightFiles.findMany();
-    const totalEstimatedMinutes = sessions.reduce(
-      (sum, s) => sum + s.estimatedRemainingMinutes,
-      0
-    );
-    const readyItemsList = await db2.query.horizonItems.findMany({
-      where: eq2(horizonItems2.zone, "READY")
-    });
-    const readyItems = readyItemsList.length;
-    const refiningItemsList = await db2.query.horizonItems.findMany({
-      where: eq2(horizonItems2.zone, "REFINING")
-    });
-    const refiningItems = refiningItemsList.length;
-    const maxSessions = 8;
-    const activeSessions = sessions.filter((s) => s.status === "ACTIVE").length;
-    const fleetUtilization = Math.round(activeSessions / maxSessions * 100);
-    const avgCompletionMinutes = 45;
-    const runwayMinutes = readyItems * avgCompletionMinutes + totalEstimatedMinutes + refiningItems * avgCompletionMinutes * 0.5;
-    let runwayStatus = "HEALTHY";
-    const runwayHours = runwayMinutes / 60;
-    if (runwayHours < 2) {
-      runwayStatus = "CRITICAL";
-    } else if (runwayHours < 8) {
-      runwayStatus = "WARNING";
-    }
-    const recentEvents = await db2.query.activityEvents.findMany({
-      orderBy: desc2(activityEvents2.createdAt),
-      limit: 10
-    });
-    const score = await db2.query.conductorScores.findFirst({
-      orderBy: desc2(conductorScores.updatedAt)
-    });
-    return {
-      sessions,
-      inFlightFiles: allInFlightFiles,
-      runway: {
-        totalMinutes: runwayMinutes,
-        hours: Math.round(runwayHours * 10) / 10,
-        status: runwayStatus,
-        readyItems,
-        refiningItems
-      },
-      fleet: {
-        activeSessions,
-        maxSessions,
-        utilization: fleetUtilization,
-        needsSpecCount: sessions.filter((s) => s.status === "NEEDS_SPEC").length
-      },
-      recentEvents,
-      conductorScore: score ? {
-        total: score.total,
-        breakdown: {
-          fleetUtilization: score.fleetUtilization,
-          runwayHealth: score.runwayHealth,
-          planAccuracy: score.planAccuracy,
-          costEfficiency: score.costEfficiency,
-          velocityTrend: score.velocityTrend
-        },
-        leaderboardRank: score.leaderboardRank
-      } : null
-    };
-  });
-  app.post("/api/fleet/dispatch/:itemId", async (request, reply) => {
-    const { itemId } = request.params;
-    const item = await db2.query.horizonItems.findFirst({
-      where: eq2(horizonItems2.id, itemId),
-      with: {
-        plan: {
-          with: {
-            workstreams: {
-              with: { tasks: true }
-            },
-            filesTouched: true
-          }
-        }
-      }
-    });
-    if (!item) {
-      reply.status(404).send({ error: "Item not found" });
-      return;
-    }
-    if (item.zone !== "READY") {
-      reply.status(400).send({ error: "Item must be in READY zone to dispatch" });
-      return;
-    }
-    if (!item.plan) {
-      reply.status(400).send({ error: "Item must have an approved plan to dispatch" });
-      return;
-    }
-    const sortedWorkstreams = [...item.plan.workstreams].sort(
-      (a, b) => a.orderIndex - b.orderIndex
-    );
-    const totalTasks = item.plan.workstreams.reduce(
-      (sum, ws) => sum + ws.tasks.length,
-      0
-    );
-    const estimatedMinutes = totalTasks * 15;
-    const filePaths = item.plan.filesTouched.map((f) => f.path);
-    const [session] = await db2.insert(rufloSessions).values({
-      repo: item.repo,
-      linearTicketId: item.linearTicketId || `DP-${Date.now()}`,
-      ticketTitle: item.title,
-      currentWorkstream: sortedWorkstreams[0]?.label || "Main",
-      status: "ACTIVE",
-      progressPercent: 0,
-      elapsedMinutes: 0,
-      estimatedRemainingMinutes: estimatedMinutes,
-      inFlightFiles: filePaths
-    }).returning();
-    const orchestrator2 = getOrchestratorServiceOrNull();
-    if (orchestrator2 && orchestrator2.isEnabled) {
-      const dispatchRequest = buildDispatchRequest({
-        sessionId: session.id,
-        repo: item.repo,
-        title: item.title,
-        filePaths,
-        model: "sonnet",
-        workstream: sortedWorkstreams[0]?.label,
-        linearTicketId: session.linearTicketId,
-        callbackUrl: "",
-        // Will use the one from orchestrator config
-        estimatedMinutes
-      });
-      const dispatchResult = await orchestrator2.dispatch(dispatchRequest);
-      if (dispatchResult.accepted && dispatchResult.orchestratorJobId) {
-        await db2.update(rufloSessions).set({
-          externalSessionId: dispatchResult.orchestratorJobId,
-          orchestratorMode: dispatchResult.mode
-        }).where(eq2(rufloSessions.id, session.id));
-        await db2.insert(activityEvents2).values({
-          type: "ITEM_DISPATCHED",
-          message: `Orchestrator accepted: ${dispatchResult.orchestratorJobId}`,
-          repo: item.repo,
-          ticketId: session.linearTicketId,
-          metadata: {
-            sessionId: session.id,
-            externalJobId: dispatchResult.orchestratorJobId,
-            mode: dispatchResult.mode
-          }
-        });
-      } else if (!dispatchResult.accepted) {
-        await db2.insert(activityEvents2).values({
-          type: "ITEM_DISPATCHED",
-          message: `Orchestrator dispatch failed: ${dispatchResult.error}`,
-          repo: item.repo,
-          ticketId: session.linearTicketId,
-          metadata: {
-            sessionId: session.id,
-            error: dispatchResult.error
-          }
-        });
-      }
-    }
-    for (const file of item.plan.filesTouched) {
-      await db2.insert(inFlightFiles2).values({
-        path: file.path,
-        activeSessionId: session.id,
-        linearTicketId: session.linearTicketId,
-        estimatedMinutesRemaining: estimatedMinutes,
-        horizonItemId: itemId
-      });
-      await db2.update(touchedFiles2).set({
-        status: "IN_FLIGHT",
-        inFlightVia: session.id
-      }).where(eq2(touchedFiles2.id, file.id));
-    }
-    await db2.delete(horizonItems2).where(eq2(horizonItems2.id, itemId));
-    await db2.insert(activityEvents2).values({
-      type: "ITEM_DISPATCHED",
-      message: `Dispatched "${item.title}" to fleet`,
-      repo: item.repo,
-      ticketId: session.linearTicketId,
-      metadata: {
-        sessionId: session.id,
-        itemId,
-        estimatedMinutes,
-        workstreams: item.plan.workstreams.length,
-        tasks: totalTasks
-      }
-    });
-    const score = await db2.query.conductorScores.findFirst();
-    if (score) {
-      await db2.update(conductorScores).set({
-        velocityTrend: Math.min(200, score.velocityTrend + 5),
-        total: Math.min(1e3, score.total + 10)
-      }).where(eq2(conductorScores.id, score.id));
-      await db2.insert(activityEvents2).values({
-        type: "SCORE_UPDATE",
-        message: `Score +10 for dispatching work`,
-        metadata: { delta: 10, reason: "dispatch" }
-      });
-    }
-    const sessionWithRelations = await db2.query.rufloSessions.findFirst({
-      where: eq2(rufloSessions.id, session.id),
-      with: {
-        completedTasks: true
-      }
-    });
-    return {
-      session: sessionWithRelations,
-      message: `Successfully dispatched "${item.title}" to fleet`
-    };
-  });
-}
-
-// src/server/api/score.ts
-import { conductorScores as conductorScores2, scoreHistory } from "@devpilot.sh/core/db";
-import { eq as eq3, gte, and as and3, asc as asc2, desc as desc3 } from "drizzle-orm";
-async function registerScoreRoutes(app) {
-  const db2 = getDb();
-  app.get("/api/score", async (request, reply) => {
-    const existingScore = await db2.query.conductorScores.findFirst({
-      with: {
-        history: true
-      }
-    });
-    let scoreId;
-    let total;
-    let fleetUtilization;
-    let runwayHealth;
-    let planAccuracy;
-    let costEfficiency;
-    let velocityTrend;
-    let leaderboardRank;
-    let updatedAt;
-    if (existingScore) {
-      scoreId = existingScore.id;
-      total = existingScore.total;
-      fleetUtilization = existingScore.fleetUtilization;
-      runwayHealth = existingScore.runwayHealth;
-      planAccuracy = existingScore.planAccuracy;
-      costEfficiency = existingScore.costEfficiency;
-      velocityTrend = existingScore.velocityTrend;
-      leaderboardRank = existingScore.leaderboardRank;
-      updatedAt = existingScore.updatedAt;
-    } else {
-      const [newScore] = await db2.insert(conductorScores2).values({
-        userId: "default",
-        total: 500,
-        fleetUtilization: 100,
-        runwayHealth: 100,
-        planAccuracy: 100,
-        costEfficiency: 100,
-        velocityTrend: 100,
-        leaderboardRank: 1
-      }).returning();
-      scoreId = newScore.id;
-      total = newScore.total;
-      fleetUtilization = newScore.fleetUtilization;
-      runwayHealth = newScore.runwayHealth;
-      planAccuracy = newScore.planAccuracy;
-      costEfficiency = newScore.costEfficiency;
-      velocityTrend = newScore.velocityTrend;
-      leaderboardRank = newScore.leaderboardRank;
-      updatedAt = newScore.updatedAt;
-    }
-    const historyData = await db2.query.scoreHistory.findMany({
-      where: eq3(scoreHistory.scoreId, scoreId),
-      orderBy: desc3(scoreHistory.recordedAt),
-      limit: 30
-    });
-    const breakdown = {
-      fleetUtilization: {
-        value: fleetUtilization,
-        max: 200,
-        percent: Math.round(fleetUtilization / 200 * 100),
-        label: "Fleet Utilization",
-        description: "How well you keep your fleet busy"
-      },
-      runwayHealth: {
-        value: runwayHealth,
-        max: 200,
-        percent: Math.round(runwayHealth / 200 * 100),
-        label: "Runway Health",
-        description: "Maintaining healthy work pipeline"
-      },
-      planAccuracy: {
-        value: planAccuracy,
-        max: 200,
-        percent: Math.round(planAccuracy / 200 * 100),
-        label: "Plan Accuracy",
-        description: "How accurate your cost estimates are"
-      },
-      costEfficiency: {
-        value: costEfficiency,
-        max: 200,
-        percent: Math.round(costEfficiency / 200 * 100),
-        label: "Cost Efficiency",
-        description: "Optimizing model selection for tasks"
-      },
-      velocityTrend: {
-        value: velocityTrend,
-        max: 200,
-        percent: Math.round(velocityTrend / 200 * 100),
-        label: "Velocity Trend",
-        description: "Improving throughput over time"
-      }
-    };
-    const sparklineData = historyData.map((h) => ({
-      date: h.recordedAt,
-      value: h.total
-    }));
-    return {
-      total,
-      max: 1e3,
-      percent: Math.round(total / 1e3 * 100),
-      leaderboardRank,
-      breakdown,
-      sparklineData,
-      updatedAt
-    };
-  });
-  app.get("/api/score/history", async (request, reply) => {
-    const { days = "7" } = request.query;
-    const numDays = parseInt(days, 10);
-    const score = await db2.query.conductorScores.findFirst();
-    if (!score) {
-      return { history: [], summary: null };
-    }
-    const startDate = /* @__PURE__ */ new Date();
-    startDate.setDate(startDate.getDate() - numDays);
-    const history = await db2.query.scoreHistory.findMany({
-      where: and3(
-        eq3(scoreHistory.scoreId, score.id),
-        gte(scoreHistory.recordedAt, startDate)
-      ),
-      orderBy: asc2(scoreHistory.recordedAt)
-    });
-    const totals = history.map((h) => h.total);
-    const summary = totals.length > 0 ? {
-      current: totals[totals.length - 1],
-      min: Math.min(...totals),
-      max: Math.max(...totals),
-      average: Math.round(totals.reduce((a, b) => a + b, 0) / totals.length),
-      trend: totals.length > 1 ? totals[totals.length - 1] - totals[0] > 0 ? "up" : totals[totals.length - 1] - totals[0] < 0 ? "down" : "stable" : "stable",
-      delta: totals.length > 1 ? totals[totals.length - 1] - totals[0] : 0
-    } : null;
-    const chartData = history.map((h) => ({
-      date: h.recordedAt.toISOString().split("T")[0],
-      total: h.total,
-      fleetUtilization: h.fleetUtilization,
-      runwayHealth: h.runwayHealth,
-      planAccuracy: h.planAccuracy,
-      costEfficiency: h.costEfficiency,
-      velocityTrend: h.velocityTrend
-    }));
-    return {
-      history: chartData,
-      summary,
-      period: { days: numDays, start: startDate.toISOString(), end: (/* @__PURE__ */ new Date()).toISOString() }
-    };
-  });
-  app.post("/api/score/history", async (request, reply) => {
-    const score = await db2.query.conductorScores.findFirst();
-    if (!score) {
-      reply.status(404).send({ error: "No score exists to record" });
-      return;
-    }
-    const [historyEntry] = await db2.insert(scoreHistory).values({
-      scoreId: score.id,
-      total: score.total,
-      fleetUtilization: score.fleetUtilization,
-      runwayHealth: score.runwayHealth,
-      planAccuracy: score.planAccuracy,
-      costEfficiency: score.costEfficiency,
-      velocityTrend: score.velocityTrend
-    }).returning();
-    reply.status(201).send(historyEntry);
-  });
-}
-
-// src/server/api/events.ts
-import { activityEvents as activityEvents3, rufloSessions as rufloSessions2 } from "@devpilot.sh/core/db";
-import { eq as eq4, and as and4, gt, desc as desc4, asc as asc3 } from "drizzle-orm";
-async function registerEventRoutes(app) {
-  const db2 = getDb();
-  app.get("/api/events", async (request, reply) => {
-    const { limit = "50", type, repo, after } = request.query;
-    const numLimit = Math.min(parseInt(limit, 10), 100);
-    const conditions = [];
-    if (type) conditions.push(eq4(activityEvents3.type, type));
-    if (repo) conditions.push(eq4(activityEvents3.repo, repo));
-    if (after) conditions.push(gt(activityEvents3.createdAt, new Date(after)));
-    const events = await db2.query.activityEvents.findMany({
-      where: conditions.length > 0 ? and4(...conditions) : void 0,
-      orderBy: desc4(activityEvents3.createdAt),
-      limit: numLimit
-    });
-    return {
-      events,
-      count: events.length,
-      hasMore: events.length === numLimit
-    };
-  });
-  app.post("/api/events", async (request, reply) => {
-    const { type, message, repo, ticketId, metadata } = request.body;
-    if (!type || !message) {
-      reply.status(400).send({ error: "type and message are required" });
-      return;
-    }
-    const [event] = await db2.insert(activityEvents3).values({
-      type,
-      message,
-      repo,
-      ticketId,
-      metadata
-    }).returning();
-    reply.status(201).send(event);
-  });
-  app.get("/api/events/stream", async (request, reply) => {
-    reply.raw.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive"
-    });
-    reply.raw.write(`data: ${JSON.stringify({ type: "connected", timestamp: (/* @__PURE__ */ new Date()).toISOString() })}
-
-`);
-    let lastEventId = null;
-    let isActive = true;
-    const pollInterval = setInterval(async () => {
-      if (!isActive) {
-        clearInterval(pollInterval);
-        return;
-      }
-      try {
-        const events = await db2.query.activityEvents.findMany({
-          where: lastEventId ? gt(activityEvents3.id, lastEventId) : gt(activityEvents3.createdAt, new Date(Date.now() - 5e3)),
-          orderBy: asc3(activityEvents3.createdAt),
-          limit: 20
-        });
-        if (events.length > 0) {
-          lastEventId = events[events.length - 1].id;
-          for (const event of events) {
-            const sseData = {
-              id: event.id,
-              type: event.type,
-              message: event.message,
-              repo: event.repo,
-              ticketId: event.ticketId,
-              metadata: event.metadata,
-              createdAt: event.createdAt
-            };
-            reply.raw.write(`data: ${JSON.stringify(sseData)}
-
-`);
-          }
-        }
-        const sessions = await db2.query.rufloSessions.findMany({
-          where: eq4(rufloSessions2.status, "ACTIVE")
-        });
-        reply.raw.write(
-          `data: ${JSON.stringify({
-            type: "fleet_heartbeat",
-            sessions: sessions.map((s) => ({
-              id: s.id,
-              progress: s.progressPercent,
-              status: s.status,
-              eta: s.estimatedRemainingMinutes
-            })),
-            timestamp: (/* @__PURE__ */ new Date()).toISOString()
-          })}
-
-`
-        );
-      } catch (error) {
-        console.error("SSE poll error:", error);
-        reply.raw.write(
-          `data: ${JSON.stringify({ type: "error", message: "Poll failed" })}
-
-`
-        );
-      }
-    }, 2e3);
-    request.raw.on("close", () => {
-      isActive = false;
-      clearInterval(pollInterval);
-    });
-    return reply;
-  });
-}
-
-// src/server/index.ts
-function waveExecutionConfigFromEnv(port) {
-  const failurePolicy = process.env.DEVPILOT_WAVE_FAILURE_POLICY === "continue" ? "continue" : "halt";
-  return {
-    maxConcurrentSubagents: Number(process.env.DEVPILOT_WAVE_MAX_CONCURRENT) || 4,
-    maxTotalActiveTasks: Number(process.env.DEVPILOT_WAVE_MAX_TOTAL) || 8,
-    subagentDispatchDelayMs: 500,
-    waveAdvanceDelayMs: 2e3,
-    retryLimit: Number(process.env.DEVPILOT_WAVE_RETRY_LIMIT) || 1,
-    failurePolicy,
-    autoAdvance: process.env.DEVPILOT_WAVE_AUTO_ADVANCE !== "false",
-    callbackUrl: `http://127.0.0.1:${port}/api/orchestrator`
-  };
-}
-var db;
-function getDb() {
-  return db;
-}
-async function createServer(options) {
-  db = initDatabase({
-    type: "sqlite",
-    sqlitePath: options.dbPath
-  });
-  if (options.orchestrator && options.orchestrator.mode !== "disabled") {
-    const orchestratorConfig = {
-      mode: options.orchestrator.mode,
-      aoProjectName: options.orchestrator.aoProjectName,
-      aoPath: options.orchestrator.aoPath,
-      url: options.orchestrator.httpUrl,
-      apiKey: options.orchestrator.apiKey,
-      sessionApiUrl: options.orchestrator.sessionApiUrl,
-      sessionApiKey: options.orchestrator.sessionApiKey,
-      sessionEnvironmentId: options.orchestrator.sessionEnvironmentId,
-      callbackToken: options.orchestrator.callbackToken,
-      callbackUrl: `http://127.0.0.1:${options.port}/api/orchestrator`
-    };
-    const orchestrator2 = initOrchestratorService(orchestratorConfig);
-    initStatusPoller(orchestrator2, {
-      pollIntervalMs: 5e3,
-      ...createDbStatusPollerCallbacks()
-    });
-    initExecutionBridge(orchestrator2, {
-      execution: waveExecutionConfigFromEnv(options.port)
-    }).start();
-    console.log(`Orchestrator initialized in ${options.orchestrator.mode} mode`);
-  }
-  const app = Fastify({
-    logger: {
-      level: "info",
-      transport: {
-        target: "pino-pretty",
-        options: {
-          colorize: true,
-          ignore: "pid,hostname",
-          translateTime: "HH:MM:ss"
-        }
-      }
-    }
-  });
-  app.addHook("preHandler", async (request, reply) => {
-    reply.header("Access-Control-Allow-Origin", "*");
-    reply.header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
-    reply.header("Access-Control-Allow-Headers", "Content-Type");
-    if (request.method === "OPTIONS") {
-      reply.status(204).send();
-    }
-  });
-  await registerItemRoutes(app);
-  await registerFleetRoutes(app);
-  await registerScoreRoutes(app);
-  await registerEventRoutes(app);
-  app.get("/api/health", async () => {
-    return { status: "ok", timestamp: (/* @__PURE__ */ new Date()).toISOString() };
-  });
-  return app;
-}
-async function startServer(options) {
-  const app = await createServer(options);
-  const host = options.host || "127.0.0.1";
-  await app.listen({ port: options.port, host });
-  const url = `http://${host}:${options.port}`;
-  return {
-    url,
-    close: async () => {
-      await app.close();
-    }
-  };
-}
-
-// src/commands/serve.ts
+import open from "open";
+import { spawn } from "child_process";
 import { existsSync as existsSync2, mkdirSync as mkdirSync2 } from "fs";
-import { join as join2 } from "path";
+import { join as join2, resolve } from "path";
+function cockpitEntry() {
+  for (const rel of ["../ui/server.js", "../../ui/server.js", "./ui/server.js"]) {
+    const entry = resolve(__dirname, rel);
+    if (existsSync2(entry)) return entry;
+  }
+  return null;
+}
 var serveCommand = new Command2("serve").description("Start the local DevPilot Conductor API server").option("-p, --port <port>", "Port to run the server on", "3847").option("--no-open", "Do not open browser automatically").option("--sync", "Enable cloud sync").option("--db <path>", "Path to SQLite database", ".devpilot/data.db").option(
   "--orchestrator-mode <mode>",
   "Orchestrator mode: claude-session | ao-cli | http | disabled"
@@ -1113,55 +110,74 @@ var serveCommand = new Command2("serve").description("Start the local DevPilot C
     httpUrl: options.orchestratorUrl || process.env.DEVPILOT_ORCHESTRATOR_URL,
     apiKey: process.env.DEVPILOT_ORCHESTRATOR_API_KEY
   } : void 0;
+  const dbPath = options.db.startsWith("/") ? options.db : join2(process.cwd(), options.db);
   console.log(chalk2.cyan("\u{1F680} Starting DevPilot Conductor..."));
   console.log("");
   console.log(chalk2.gray(`   Port: ${port}`));
-  console.log(chalk2.gray(`   Database: ${options.db}`));
-  console.log(chalk2.gray(`   Sync: ${options.sync ? "enabled" : "disabled"}`));
+  console.log(chalk2.gray(`   Database: ${dbPath}`));
   console.log("");
   const dbDir = join2(process.cwd(), ".devpilot");
   if (!existsSync2(dbDir)) {
     mkdirSync2(dbDir, { recursive: true });
     console.log(chalk2.gray(`   Created: ${dbDir}`));
   }
-  try {
-    const dbPath = options.db.startsWith("/") ? options.db : join2(process.cwd(), options.db);
-    const { url, close } = await startServer({
-      port,
-      dbPath,
-      orchestrator: orchestrator2
-    });
-    console.log(chalk2.green("\u2713 Server started successfully"));
-    console.log("");
-    console.log(chalk2.cyan(`   API: ${url}`));
-    console.log(chalk2.gray(`   Health: ${url}/api/health`));
-    console.log("");
-    console.log(chalk2.gray("   Press Ctrl+C to stop"));
-    console.log("");
-    if (options.open) {
-      console.log(chalk2.yellow("   Note: Static UI not bundled yet."));
-      console.log(chalk2.gray("   To view the UI, run the Next.js app:"));
-      console.log(chalk2.cyan("   cd apps/web && pnpm dev"));
-      console.log("");
-    }
-    process.on("SIGINT", async () => {
-      console.log("");
-      console.log(chalk2.yellow("Shutting down..."));
-      await close();
-      console.log(chalk2.green("\u2713 Server stopped"));
-      process.exit(0);
-    });
-    process.on("SIGTERM", async () => {
-      await close();
-      process.exit(0);
-    });
-    await new Promise(() => {
-    });
-  } catch (error) {
-    console.error(chalk2.red("\u2717 Failed to start server:"));
-    console.error(chalk2.red(`   ${error instanceof Error ? error.message : error}`));
+  const entry = cockpitEntry();
+  if (!entry) {
+    console.error(chalk2.red("\u2717 The cockpit bundle is missing from this install."));
+    console.error("");
+    console.error(chalk2.gray("  Expected: <package>/ui/server.js"));
+    console.error(chalk2.gray("  From a repo checkout, build it with:"));
+    console.error(chalk2.cyan("    pnpm --filter @devpilot.sh/cli bundle:cockpit"));
+    console.error("");
+    console.error(chalk2.gray("  If you installed from npm, this is a packaging bug \u2014 please file"));
+    console.error(chalk2.gray("  an issue at https://github.com/geastham/devpilot/issues"));
     process.exit(1);
+    return;
   }
+  const child = spawn(process.execPath, [entry], {
+    stdio: ["ignore", "pipe", "inherit"],
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOSTNAME: "127.0.0.1",
+      DEVPILOT_SQLITE_PATH: dbPath,
+      ...orchestrator2?.mode ? { DEVPILOT_ORCHESTRATOR_MODE: orchestrator2.mode } : {},
+      ...orchestrator2?.sessionApiUrl ? { DEVPILOT_SESSION_API_URL: orchestrator2.sessionApiUrl } : {},
+      ...orchestrator2?.sessionApiKey ? { DEVPILOT_SESSION_API_KEY: orchestrator2.sessionApiKey } : {},
+      ...orchestrator2?.aoProjectName ? { DEVPILOT_AO_PROJECT: orchestrator2.aoProjectName } : {},
+      ...orchestrator2?.aoPath ? { DEVPILOT_AO_PATH: orchestrator2.aoPath } : {},
+      ...orchestrator2?.httpUrl ? { DEVPILOT_ORCHESTRATOR_URL: orchestrator2.httpUrl } : {}
+    }
+  });
+  const url = `http://127.0.0.1:${port}`;
+  let opened = false;
+  child.stdout?.on("data", (chunk) => {
+    const text = chunk.toString();
+    process.stdout.write(chalk2.gray(text.replace(/^/gm, "   ")));
+    if (!opened && /Ready in|started server|Local:/i.test(text)) {
+      opened = true;
+      console.log("");
+      console.log(chalk2.green("\u2713 Cockpit ready"));
+      console.log("");
+      console.log(chalk2.cyan(`   ${url}`));
+      console.log("");
+      console.log(chalk2.gray("   Press Ctrl+C to stop"));
+      console.log("");
+      if (options.open) void open(url);
+    }
+  });
+  child.on("exit", (code) => {
+    if (code && code !== 0) {
+      console.error(chalk2.red(`
+\u2717 Cockpit exited with code ${code}`));
+    }
+    process.exit(code ?? 0);
+  });
+  const stop = () => {
+    child.kill("SIGTERM");
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
 });
 
 // src/commands/status.ts
@@ -1619,10 +635,10 @@ function prompt(question) {
     input: process.stdin,
     output: process.stdout
   });
-  return new Promise((resolve) => {
+  return new Promise((resolve2) => {
     rl.question(question, (answer) => {
       rl.close();
-      resolve(answer.trim());
+      resolve2(answer.trim());
     });
   });
 }
@@ -1968,8 +984,8 @@ function createBridgeDispatchHandler(opts) {
         linearTicketId: linearIdentifier,
         callbackUrl: opts.callbackUrl ?? ""
       });
-      const settled = new Promise((resolve) => {
-        inFlight.set(sessionId, resolve);
+      const settled = new Promise((resolve2) => {
+        inFlight.set(sessionId, resolve2);
       });
       const response = await svc.dispatch(request);
       if (!response.accepted) {
@@ -2351,7 +1367,7 @@ var sessionCommand = new Command13("session").description("Shared, end-to-end en
 
 // src/commands/update.ts
 import { Command as Command14 } from "commander";
-import { execSync as execSync2, spawn } from "child_process";
+import { execSync as execSync2, spawn as spawn2 } from "child_process";
 import chalk13 from "chalk";
 async function getLatestVersion() {
   try {
@@ -2443,7 +1459,7 @@ var updateCommand = new Command14("update").description("Update DevPilot CLI to 
   console.log("");
   try {
     const [cmd, ...args] = updateCmd.split(" ");
-    const child = spawn(cmd, args, {
+    const child = spawn2(cmd, args, {
       stdio: "inherit",
       shell: true
     });

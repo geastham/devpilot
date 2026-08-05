@@ -22,6 +22,7 @@
   "files": [
     "dist",
     "bin",
+    "ui",
     "README.md"
   ],
   "scripts": {
@@ -29,9 +30,10 @@
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
     "start": "node bin/devpilot.js",
-    "prepublishOnly": "pnpm run build",
+    "prepublishOnly": "pnpm run build && pnpm run bundle:cockpit",
     "test": "vitest run --passWithNoTests",
-    "harness:dispatch": "node tests/harness/run-local-dispatch.mjs"
+    "harness:dispatch": "node tests/harness/run-local-dispatch.mjs",
+    "bundle:cockpit": "node scripts/bundle-cockpit.mjs"
   },
   "publishConfig": {
     "access": "public",
@@ -45,7 +47,6 @@
     "chokidar": "^3.6.0",
     "commander": "^12.0.0",
     "drizzle-orm": "^0.30.0",
-    "fastify": "^4.26.0",
     "inquirer": "^9.2.0",
     "open": "^10.0.0",
     "ora": "^8.0.0",

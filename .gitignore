@@ -13,3 +13,7 @@ out/
 /.devpilot/
 *.db-shm
 *.db-wal
+
+# Built cockpit bundle for the CLI. ~32 MB of traced Next output — produced by
+# `pnpm --filter @devpilot.sh/cli bundle:cockpit` at publish time, never committed.
+packages/cli/ui/
