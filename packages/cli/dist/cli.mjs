@@ -7,7 +7,7 @@ var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require
 });
 
 // src/cli.ts
-import { Command as Command16 } from "commander";
+import { Command as Command17 } from "commander";
 import updateNotifier from "update-notifier";
 
 // src/version.ts
@@ -359,8 +359,8 @@ function versionMeetsMinimum(version, minimum) {
 function checkSystemRequirements() {
   const node = checkCommand("node");
   const nodeMeetsMin = versionMeetsMinimum(node.version, "20.0.0");
-  const git = checkCommand("git");
-  const gitMeetsMin = versionMeetsMinimum(git.version, "2.25.0");
+  const git2 = checkCommand("git");
+  const gitMeetsMin = versionMeetsMinimum(git2.version, "2.25.0");
   const tmux = checkCommand("tmux", "-V");
   const gh = checkCommand("gh");
   let ghAuthenticated = false;
@@ -376,7 +376,7 @@ function checkSystemRequirements() {
   const cavemanInstalled = isCavemanInstalled();
   return {
     node: { ...node, meetsMinimum: nodeMeetsMin },
-    git: { ...git, meetsMinimum: gitMeetsMin },
+    git: { ...git2, meetsMinimum: gitMeetsMin },
     tmux: { installed: tmux.installed },
     gh: { installed: gh.installed, authenticated: ghAuthenticated },
     rtk: { installed: rtk.installed, version: rtk.version },
@@ -635,10 +635,10 @@ function prompt(question) {
     input: process.stdin,
     output: process.stdout
   });
-  return new Promise((resolve2) => {
+  return new Promise((resolve4) => {
     rl.question(question, (answer) => {
       rl.close();
-      resolve2(answer.trim());
+      resolve4(answer.trim());
     });
   });
 }
@@ -984,8 +984,8 @@ function createBridgeDispatchHandler(opts) {
         linearTicketId: linearIdentifier,
         callbackUrl: opts.callbackUrl ?? ""
       });
-      const settled = new Promise((resolve2) => {
-        inFlight.set(sessionId, resolve2);
+      const settled = new Promise((resolve4) => {
+        inFlight.set(sessionId, resolve4);
       });
       const response = await svc.dispatch(request);
       if (!response.accepted) {
@@ -1365,10 +1365,623 @@ function format(e, names) {
 // src/commands/session.ts
 var sessionCommand = new Command13("session").description("Shared, end-to-end encrypted sessions across machines").addCommand(newCommand).addCommand(joinCommand).addCommand(tailCommand);
 
-// src/commands/update.ts
+// src/commands/session-runner/index.ts
 import { Command as Command14 } from "commander";
-import { execSync as execSync2, spawn as spawn2 } from "child_process";
 import chalk13 from "chalk";
+import { resolve as resolve3 } from "path";
+
+// src/commands/session-runner/server.ts
+import { createServer } from "http";
+import { randomUUID } from "crypto";
+import { existsSync as existsSync6 } from "fs";
+import { basename as basename2, isAbsolute, resolve as resolve2 } from "path";
+
+// src/commands/session-runner/claude-runner.ts
+import { spawn as spawn2, execFile } from "child_process";
+import { promisify } from "util";
+import { mkdtempSync, rmSync, writeFileSync as writeFileSync5 } from "fs";
+import { tmpdir } from "os";
+import { join as join6 } from "path";
+var execFileAsync = promisify(execFile);
+async function git(workdir, args) {
+  const { stdout } = await execFileAsync("git", args, {
+    cwd: workdir,
+    maxBuffer: 32 * 1024 * 1024
+  });
+  return stdout;
+}
+async function snapshot(workdir) {
+  const state = /* @__PURE__ */ new Map();
+  try {
+    const out = await git(workdir, ["status", "--porcelain", "-uall"]);
+    for (const line of out.split("\n")) {
+      if (line.length < 4) continue;
+      state.set(line.slice(3).trim(), line.slice(0, 2));
+    }
+  } catch {
+  }
+  return state;
+}
+async function headSha(workdir) {
+  try {
+    return (await git(workdir, ["rev-parse", "HEAD"])).trim();
+  } catch {
+    return void 0;
+  }
+}
+function classify(before, after) {
+  const filesModified = [];
+  const filesCreated = [];
+  const filesDeleted = [];
+  for (const [path, code] of after) {
+    if (before.get(path) === code) continue;
+    if (code.includes("?")) filesCreated.push(path);
+    else if (code.includes("D")) filesDeleted.push(path);
+    else if (code.includes("A")) filesCreated.push(path);
+    else filesModified.push(path);
+  }
+  return { filesModified, filesCreated, filesDeleted };
+}
+function parseEnvelope(stdout) {
+  const trimmed = stdout.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+  }
+  const start = trimmed.lastIndexOf("\n{");
+  if (start !== -1) {
+    try {
+      return JSON.parse(trimmed.slice(start + 1));
+    } catch {
+    }
+  }
+  return null;
+}
+function writeSessionMcpConfig(sessionLink) {
+  const dir = mkdtempSync(join6(tmpdir(), "devpilot-mcp-"));
+  const file = join6(dir, "mcp.json");
+  writeFileSync5(
+    file,
+    JSON.stringify(
+      {
+        mcpServers: {
+          "devpilot-session": {
+            command: "npx",
+            args: ["-y", "@devpilot.sh/mcp-session"],
+            env: { DEVPILOT_SESSION_LINK: sessionLink }
+          }
+        }
+      },
+      null,
+      2
+    ),
+    { mode: 384 }
+  );
+  return { dir, file };
+}
+function sessionPreamble() {
+  return [
+    "# Shared session",
+    "",
+    "You are working inside a DevPilot shared session. Your collaborators can",
+    "watch this session and join it while you work.",
+    "",
+    "1. Call `devpilot_session_join` FIRST, with no `url` argument \u2014 the runner",
+    "   has already supplied the link out of band.",
+    "2. Post a short plan before you change anything.",
+    "3. Post a summary of what you did and why when you finish.",
+    "",
+    "Never print the join link or any key material into the transcript.",
+    "",
+    "---",
+    ""
+  ].join("\n");
+}
+async function runClaudeSession(options) {
+  const { workdir, prompt: prompt2, sessionLink, model, claudePath, permissionMode, timeoutMs, onLog, onSpawn } = options;
+  const before = await snapshot(workdir);
+  const startedAt = Date.now();
+  const args = ["-p", "--output-format", "json", "--permission-mode", permissionMode];
+  if (model) args.push("--model", model);
+  let mcpDir;
+  let effectivePrompt = prompt2;
+  if (sessionLink) {
+    const cfg = writeSessionMcpConfig(sessionLink);
+    mcpDir = cfg.dir;
+    args.push("--mcp-config", cfg.file, "--strict-mcp-config");
+    effectivePrompt = sessionPreamble() + prompt2;
+  }
+  const outcome = await new Promise((resolve4) => {
+    const child = spawn2(claudePath, args, {
+      cwd: workdir,
+      // The prompt goes in on stdin, not argv. A composed prompt carries
+      // newlines, backticks and quotes, and is easily tens of kilobytes — well
+      // past ARG_MAX on a long file scope.
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let killed = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 5e3).unref();
+    }, timeoutMs);
+    onSpawn?.(() => {
+      killed = true;
+      child.kill("SIGTERM");
+    });
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      const text = chunk.toString();
+      stderr += text;
+      onLog?.(text.trimEnd());
+    });
+    child.on("error", (error2) => {
+      clearTimeout(timer);
+      resolve4({ code: null, stdout, stderr: `${stderr}
+${error2.message}`, timedOut, killed });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve4({ code, stdout, stderr, timedOut, killed });
+    });
+    child.stdin.write(effectivePrompt);
+    child.stdin.end();
+  }).finally(() => {
+    if (mcpDir) rmSync(mcpDir, { recursive: true, force: true });
+  });
+  const after = await snapshot(workdir);
+  const files = classify(before, after);
+  const envelope = parseEnvelope(outcome.stdout);
+  const usage = envelope?.usage ?? {};
+  const tokensUsed = (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
+  const durationMs = envelope?.duration_ms ?? Date.now() - startedAt;
+  const processOk = outcome.code === 0 && !outcome.timedOut && !outcome.killed;
+  const envelopeOk = envelope ? envelope.is_error !== true : false;
+  const success = processOk && envelopeOk;
+  let error;
+  if (outcome.timedOut) error = `Session exceeded ${Math.round(timeoutMs / 1e3)}s timeout`;
+  else if (outcome.killed) error = "Session stopped by operator";
+  else if (!envelope) error = `No JSON result from claude. stderr: ${outcome.stderr.slice(-2e3)}`;
+  else if (envelope.is_error) error = envelope.result ?? `claude reported ${envelope.subtype}`;
+  else if (outcome.code !== 0) error = `claude exited ${outcome.code}. stderr: ${outcome.stderr.slice(-2e3)}`;
+  return {
+    success,
+    summary: envelope?.result?.trim() || (success ? "Session completed." : error || "Session failed."),
+    error,
+    tokensUsed,
+    costUsd: envelope?.total_cost_usd ?? 0,
+    durationMinutes: Math.round(durationMs / 6e4 * 100) / 100,
+    ...files,
+    commitSha: await headSha(workdir)
+  };
+}
+
+// src/commands/session-runner/callbacks.ts
+var BACKOFF_MS = [1e3, 2e3, 4e3, 8e3, 16e3, 32e3, 6e4, 12e4, 24e4, 24e4];
+function sleep(ms) {
+  return new Promise((resolve4) => setTimeout(resolve4, ms));
+}
+async function post(url, body, token, log) {
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers["X-DevPilot-Callback-Token"] = token;
+  for (let attempt = 0; attempt <= BACKOFF_MS.length; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(3e4)
+      });
+      if (res.ok) return true;
+      if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+        log(`callback ${url} rejected: ${res.status} ${await res.text().catch(() => "")}`);
+        return false;
+      }
+      log(`callback ${url} failed: ${res.status} (attempt ${attempt + 1})`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log(`callback ${url} error: ${message} (attempt ${attempt + 1})`);
+    }
+    if (attempt < BACKOFF_MS.length) await sleep(BACKOFF_MS[attempt]);
+  }
+  log(`callback ${url} GAVE UP after ${BACKOFF_MS.length + 1} attempts`);
+  return false;
+}
+function sendStatus(callbackUrl, update, token, log) {
+  return post(`${callbackUrl.replace(/\/$/, "")}/status`, update, token, log);
+}
+function sendCompletion(callbackUrl, report, token, log) {
+  return post(`${callbackUrl.replace(/\/$/, "")}/complete`, report, token, log);
+}
+
+// src/commands/session-runner/server.ts
+var VERSION2 = "1.0.0";
+function json(res, status, body) {
+  const payload = JSON.stringify(body);
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    "Content-Length": Buffer.byteLength(payload)
+  });
+  res.end(payload);
+}
+async function readBody(req) {
+  const chunks = [];
+  let bytes = 0;
+  for await (const chunk of req) {
+    bytes += chunk.length;
+    if (bytes > 8 * 1024 * 1024) throw new Error("PAYLOAD_TOO_LARGE");
+    chunks.push(chunk);
+  }
+  if (chunks.length === 0) return {};
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+var SessionRunner = class {
+  constructor(config) {
+    this.config = config;
+    /** Keyed by runner-side externalSessionId. */
+    this.sessions = /* @__PURE__ */ new Map();
+    /** DevPilot sessionId -> externalSessionId. The §7.1 idempotency index. */
+    this.byDevpilotId = /* @__PURE__ */ new Map();
+    this.server = null;
+  }
+  get activeCount() {
+    let n = 0;
+    for (const session of this.sessions.values()) {
+      if (session.status === "queued" || session.status === "running") n++;
+    }
+    return n;
+  }
+  /**
+   * Resolve `owner/name` to a checkout on this machine.
+   *
+   * Explicit `--repo` mappings win; otherwise the repo's basename is looked up
+   * under `--workspace`. A repo that resolves nowhere is rejected at create
+   * time with a message naming the path it tried, because the alternative —
+   * spawning the agent in the wrong directory — produces a session that edits
+   * unrelated files and reports success.
+   */
+  resolveWorkdir(repo) {
+    const mapped = this.config.repoMap.get(repo);
+    if (mapped) {
+      return existsSync6(mapped) ? { workdir: mapped } : { error: `Mapped path for '${repo}' does not exist: ${mapped}` };
+    }
+    const candidate = isAbsolute(repo) ? repo : resolve2(this.config.workspace, basename2(repo));
+    if (!existsSync6(candidate)) {
+      return {
+        error: `No checkout for '${repo}'. Tried ${candidate}. Pass --repo ${repo}=/path/to/checkout, or set --workspace.`
+      };
+    }
+    return { workdir: candidate };
+  }
+  authorized(req) {
+    if (!this.config.apiKey) return true;
+    return req.headers.authorization === `Bearer ${this.config.apiKey}`;
+  }
+  /** Fire-and-forget status callback; delivery failures are logged, not thrown. */
+  reportStatus(session, callbackUrl, callbackToken, patch) {
+    const update = {
+      sessionId: session.devpilotSessionId,
+      status: session.status,
+      progressPercent: session.progressPercent,
+      filesModified: session.filesModified,
+      tokensUsed: session.tokensUsed,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      ...patch
+    };
+    void sendStatus(callbackUrl, update, callbackToken, this.config.log);
+  }
+  /**
+   * Run a session to completion and report. Never rejects: a throw here would be
+   * an unhandled rejection in a detached promise, and — worse — would leave the
+   * wave task stuck on `dispatched` with no completion callback ever sent.
+   */
+  async execute(session, request) {
+    const { callbackUrl, callbackToken } = request;
+    try {
+      session.status = "running";
+      session.progressPercent = 5;
+      session.currentStep = "session started";
+      this.reportStatus(session, callbackUrl, callbackToken, {
+        currentStep: "session started",
+        message: `Claude Code session running in ${session.workdir}`
+      });
+      const heartbeat = setInterval(() => {
+        if (session.terminal) return;
+        session.progressPercent = Math.min(90, session.progressPercent + 5);
+        this.reportStatus(session, callbackUrl, callbackToken, {
+          currentStep: "working",
+          message: "Session in progress"
+        });
+      }, 9e4);
+      heartbeat.unref();
+      const outcome = await runClaudeSession({
+        workdir: session.workdir,
+        prompt: request.prompt,
+        sessionLink: request.sessionLink,
+        model: request.model,
+        claudePath: this.config.claudePath,
+        permissionMode: this.config.permissionMode,
+        timeoutMs: this.config.timeoutMs,
+        onLog: (line) => this.config.log(`[${session.externalSessionId}] ${line}`),
+        onSpawn: (kill) => {
+          session.kill = kill;
+        }
+      });
+      clearInterval(heartbeat);
+      session.terminal = true;
+      session.status = outcome.success ? "complete" : "error";
+      session.progressPercent = outcome.success ? 100 : session.progressPercent;
+      session.filesModified = outcome.filesModified;
+      session.tokensUsed = outcome.tokensUsed;
+      session.message = outcome.summary;
+      this.config.log(
+        `[${session.externalSessionId}] ${outcome.success ? "complete" : "FAILED"} \u2014 ${outcome.filesModified.length} modified, ${outcome.filesCreated.length} created, $${outcome.costUsd.toFixed(4)}, ${outcome.durationMinutes}m`
+      );
+      await sendCompletion(
+        callbackUrl,
+        {
+          sessionId: session.devpilotSessionId,
+          success: outcome.success,
+          commitSha: outcome.commitSha,
+          filesModified: outcome.filesModified,
+          filesCreated: outcome.filesCreated,
+          filesDeleted: outcome.filesDeleted,
+          summary: outcome.summary,
+          tokensUsed: outcome.tokensUsed,
+          costUsd: outcome.costUsd,
+          durationMinutes: outcome.durationMinutes,
+          error: outcome.error,
+          metadata: request.metadata
+        },
+        callbackToken,
+        this.config.log
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.config.log(`[${session.externalSessionId}] runner error: ${message}`);
+      session.terminal = true;
+      session.status = "error";
+      await sendCompletion(
+        callbackUrl,
+        {
+          sessionId: session.devpilotSessionId,
+          success: false,
+          filesModified: [],
+          filesCreated: [],
+          filesDeleted: [],
+          summary: "The session runner failed before the agent could report.",
+          tokensUsed: 0,
+          costUsd: 0,
+          durationMinutes: (Date.now() - session.startedAt) / 6e4,
+          error: message,
+          metadata: request.metadata
+        },
+        callbackToken,
+        this.config.log
+      ).catch(() => void 0);
+    }
+  }
+  async handleCreate(req, res) {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (error2) {
+      const message = error2 instanceof Error ? error2.message : "invalid JSON";
+      return json(res, 400, { error: "INVALID_PAYLOAD", message });
+    }
+    if (!body?.sessionId || !body?.repo || !body?.prompt || !body?.callbackUrl) {
+      return json(res, 400, {
+        error: "INVALID_PAYLOAD",
+        message: "sessionId, repo, prompt and callbackUrl are required"
+      });
+    }
+    const existing = this.byDevpilotId.get(body.sessionId);
+    if (existing) {
+      const session2 = this.sessions.get(existing);
+      return json(res, 200, {
+        externalSessionId: existing,
+        status: session2?.status ?? "running",
+        createdAt: session2?.createdAt,
+        idempotent: true
+      });
+    }
+    if (this.activeCount >= this.config.maxConcurrent) {
+      return json(res, 429, { error: "CAPACITY", retryAfterSeconds: 60 });
+    }
+    const { workdir, error } = this.resolveWorkdir(body.repo);
+    if (!workdir) {
+      this.config.log(`create rejected: ${error}`);
+      return json(res, 400, { error: "REPO_NOT_FOUND", message: error });
+    }
+    const externalSessionId = `run_${randomUUID()}`;
+    const session = {
+      externalSessionId,
+      devpilotSessionId: body.sessionId,
+      repo: body.repo,
+      workdir,
+      status: "queued",
+      progressPercent: 0,
+      filesModified: [],
+      tokensUsed: 0,
+      startedAt: Date.now(),
+      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+      terminal: false
+    };
+    this.sessions.set(externalSessionId, session);
+    this.byDevpilotId.set(body.sessionId, externalSessionId);
+    this.config.log(
+      `dispatch ${body.sessionId} -> ${externalSessionId} (${body.repo} @ ${workdir}, model=${body.model ?? "default"}${body.sessionLink ? ", shared-session" : ""})`
+    );
+    json(res, 201, { externalSessionId, status: "queued", createdAt: session.createdAt });
+    void this.execute(session, body);
+  }
+  handleGet(res, externalSessionId) {
+    const session = this.sessions.get(externalSessionId);
+    if (!session) return json(res, 404, { error: "NOT_FOUND" });
+    json(res, 200, {
+      status: session.status,
+      progressPercent: session.progressPercent,
+      currentStep: session.currentStep,
+      message: session.message,
+      filesModified: session.filesModified,
+      tokensUsed: session.tokensUsed
+    });
+  }
+  async handleMessages(req, res, externalSessionId) {
+    const session = this.sessions.get(externalSessionId);
+    if (!session) return json(res, 404, { error: "NOT_FOUND" });
+    if (session.terminal) return json(res, 410, { error: "TERMINAL" });
+    await readBody(req).catch(() => ({}));
+    json(res, 501, {
+      error: "NOT_IMPLEMENTED",
+      message: "Mid-session steering requires streaming input mode; not supported by this runner."
+    });
+  }
+  handleStop(res, externalSessionId) {
+    const session = this.sessions.get(externalSessionId);
+    if (!session) return json(res, 404, { error: "NOT_FOUND" });
+    if (session.terminal) return json(res, 410, { success: true, message: "already stopped" });
+    session.kill?.();
+    this.config.log(`stop requested for ${externalSessionId}`);
+    json(res, 202, { success: true, message: "stopping" });
+  }
+  async route(req, res) {
+    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    const path = url.pathname;
+    if (path === "/v1/health" && req.method === "GET") {
+      return json(res, 200, {
+        status: "healthy",
+        version: VERSION2,
+        activeSessions: this.activeCount
+      });
+    }
+    if (!this.authorized(req)) return json(res, 401, { error: "UNAUTHORIZED" });
+    if (path === "/v1/sessions" && req.method === "POST") {
+      return this.handleCreate(req, res);
+    }
+    const match = path.match(/^\/v1\/sessions\/([^/]+)(\/messages|\/stop)?$/);
+    if (match) {
+      const [, id, suffix] = match;
+      if (!suffix && req.method === "GET") return this.handleGet(res, id);
+      if (suffix === "/messages" && req.method === "POST") return this.handleMessages(req, res, id);
+      if (suffix === "/stop" && req.method === "POST") return this.handleStop(res, id);
+      return json(res, 405, { error: "METHOD_NOT_ALLOWED" });
+    }
+    json(res, 404, { error: "NOT_FOUND" });
+  }
+  start() {
+    return new Promise((resolvePromise, reject) => {
+      this.server = createServer((req, res) => {
+        this.route(req, res).catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          this.config.log(`unhandled: ${message}`);
+          if (!res.headersSent) json(res, 500, { error: "INTERNAL", message });
+        });
+      });
+      this.server.on("error", reject);
+      this.server.listen(this.config.port, this.config.host, () => resolvePromise());
+    });
+  }
+  async stop() {
+    for (const session of this.sessions.values()) {
+      if (!session.terminal) session.kill?.();
+    }
+    await new Promise((resolvePromise) => {
+      if (!this.server) return resolvePromise();
+      this.server.close(() => resolvePromise());
+    });
+  }
+};
+
+// src/commands/session-runner/index.ts
+function parseRepoMap(values) {
+  const map = /* @__PURE__ */ new Map();
+  for (const entry of values) {
+    const idx = entry.indexOf("=");
+    if (idx === -1) {
+      throw new Error(`--repo expects <repo>=<path>, got '${entry}'`);
+    }
+    map.set(entry.slice(0, idx).trim(), resolve3(entry.slice(idx + 1).trim()));
+  }
+  return map;
+}
+var sessionRunnerCommand = new Command14("session-runner").description("Run Claude Code sessions dispatched by DevPilot (claude-session mode)").option("-p, --port <port>", "Port to listen on", "3900").option("--host <host>", "Interface to bind", "127.0.0.1").option("--token <token>", "Bearer token the dispatcher must present").option("-w, --workspace <dir>", "Directory containing repo checkouts", process.cwd()).option(
+  "--repo <mapping>",
+  "Explicit repo mapping, <owner/name>=<path> (repeatable)",
+  (value, previous) => [...previous, value],
+  []
+).option("--claude-path <path>", "Path to the claude executable", "claude").option(
+  "--permission-mode <mode>",
+  "claude --permission-mode (acceptEdits | bypassPermissions | plan)",
+  "acceptEdits"
+).option("--max-concurrent <n>", "Max simultaneous sessions before answering 429", "3").option("--timeout <minutes>", "Wall-clock cap per session", "30").action(async (options) => {
+  let repoMap;
+  try {
+    repoMap = parseRepoMap(options.repo ?? []);
+  } catch (error) {
+    console.error(chalk13.red(error instanceof Error ? error.message : String(error)));
+    process.exitCode = 1;
+    return;
+  }
+  const config = {
+    port: parseInt(options.port, 10),
+    host: options.host,
+    apiKey: options.token ?? process.env.DEVPILOT_SESSION_API_KEY,
+    workspace: resolve3(options.workspace),
+    repoMap,
+    claudePath: options.claudePath,
+    permissionMode: options.permissionMode,
+    maxConcurrent: parseInt(options.maxConcurrent, 10),
+    timeoutMs: parseInt(options.timeout, 10) * 6e4,
+    log: (line) => console.log(chalk13.dim(`[runner] ${line}`))
+  };
+  const runner = new SessionRunner(config);
+  try {
+    await runner.start();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(chalk13.red(`Failed to start session runner: ${message}`));
+    process.exitCode = 1;
+    return;
+  }
+  const base = `http://${config.host}:${config.port}`;
+  console.log(chalk13.bold("\n  DevPilot session runner\n"));
+  console.log(`  ${chalk13.dim("listening")}   ${base}`);
+  console.log(`  ${chalk13.dim("workspace")}   ${config.workspace}`);
+  console.log(`  ${chalk13.dim("claude")}      ${config.claudePath} (${config.permissionMode})`);
+  console.log(`  ${chalk13.dim("concurrency")} ${config.maxConcurrent}`);
+  if (repoMap.size > 0) {
+    for (const [repo, path] of repoMap) console.log(`  ${chalk13.dim("repo")}        ${repo} \u2192 ${path}`);
+  }
+  if (!config.apiKey) {
+    console.log(chalk13.yellow("\n  No --token set: the dispatcher API is unauthenticated."));
+  }
+  console.log(chalk13.dim("\n  Point DevPilot at it:"));
+  console.log(
+    chalk13.dim(
+      `    DEVPILOT_ORCHESTRATOR_MODE=claude-session DEVPILOT_SESSION_API_URL=${base} devpilot serve
+`
+    )
+  );
+  const shutdown = async () => {
+    console.log(chalk13.dim("\n[runner] shutting down\u2026"));
+    await runner.stop();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+});
+
+// src/commands/update.ts
+import { Command as Command15 } from "commander";
+import { execSync as execSync2, spawn as spawn3 } from "child_process";
+import chalk14 from "chalk";
 async function getLatestVersion() {
   try {
     const result = execSync2("npm view @devpilot.sh/cli version", {
@@ -1427,87 +2040,87 @@ function getUpdateCommand(pm) {
       return "npm install -g @devpilot.sh/cli@latest";
   }
 }
-var updateCommand = new Command14("update").description("Update DevPilot CLI to the latest version").option("-c, --check", "Only check for updates without installing").option("--force", "Force update even if already on latest version").action(async (options) => {
-  console.log(chalk13.cyan("Checking for updates..."));
+var updateCommand = new Command15("update").description("Update DevPilot CLI to the latest version").option("-c, --check", "Only check for updates without installing").option("--force", "Force update even if already on latest version").action(async (options) => {
+  console.log(chalk14.cyan("Checking for updates..."));
   const latestVersion = await getLatestVersion();
   if (!latestVersion) {
-    console.log(chalk13.yellow("Could not check for updates. Please check your network connection."));
-    console.log(chalk13.gray("You can manually update with: npm install -g @devpilot.sh/cli@latest"));
+    console.log(chalk14.yellow("Could not check for updates. Please check your network connection."));
+    console.log(chalk14.gray("You can manually update with: npm install -g @devpilot.sh/cli@latest"));
     return;
   }
   const comparison = compareVersions(latestVersion, VERSION);
   if (comparison === 0 && !options.force) {
-    console.log(chalk13.green(`You're already on the latest version (${VERSION})`));
+    console.log(chalk14.green(`You're already on the latest version (${VERSION})`));
     return;
   }
   if (comparison === -1 && !options.force) {
-    console.log(chalk13.yellow(`You're on a newer version (${VERSION}) than the latest release (${latestVersion})`));
-    console.log(chalk13.gray("This might be a pre-release or development version."));
+    console.log(chalk14.yellow(`You're on a newer version (${VERSION}) than the latest release (${latestVersion})`));
+    console.log(chalk14.gray("This might be a pre-release or development version."));
     return;
   }
   if (options.check) {
     if (comparison === 1) {
-      console.log(chalk13.yellow(`Update available: ${VERSION} \u2192 ${latestVersion}`));
-      console.log(chalk13.gray('Run "devpilot update" to install the latest version.'));
+      console.log(chalk14.yellow(`Update available: ${VERSION} \u2192 ${latestVersion}`));
+      console.log(chalk14.gray('Run "devpilot update" to install the latest version.'));
     }
     return;
   }
   const pm = detectPackageManager();
   const updateCmd = getUpdateCommand(pm);
-  console.log(chalk13.cyan(`Updating from ${VERSION} to ${latestVersion}...`));
-  console.log(chalk13.gray(`Using: ${updateCmd}`));
+  console.log(chalk14.cyan(`Updating from ${VERSION} to ${latestVersion}...`));
+  console.log(chalk14.gray(`Using: ${updateCmd}`));
   console.log("");
   try {
     const [cmd, ...args] = updateCmd.split(" ");
-    const child = spawn2(cmd, args, {
+    const child = spawn3(cmd, args, {
       stdio: "inherit",
       shell: true
     });
     child.on("close", (code) => {
       if (code === 0) {
         console.log("");
-        console.log(chalk13.green(`Successfully updated to ${latestVersion}`));
-        console.log(chalk13.gray('Run "devpilot --version" to verify.'));
+        console.log(chalk14.green(`Successfully updated to ${latestVersion}`));
+        console.log(chalk14.gray('Run "devpilot --version" to verify.'));
       } else {
         console.log("");
-        console.log(chalk13.red("Update failed. Please try manually:"));
-        console.log(chalk13.cyan(`  ${updateCmd}`));
+        console.log(chalk14.red("Update failed. Please try manually:"));
+        console.log(chalk14.cyan(`  ${updateCmd}`));
       }
     });
     child.on("error", (err) => {
-      console.log(chalk13.red(`Update failed: ${err.message}`));
-      console.log(chalk13.gray("Please try manually:"));
-      console.log(chalk13.cyan(`  ${updateCmd}`));
+      console.log(chalk14.red(`Update failed: ${err.message}`));
+      console.log(chalk14.gray("Please try manually:"));
+      console.log(chalk14.cyan(`  ${updateCmd}`));
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    console.log(chalk13.red(`Update failed: ${message}`));
-    console.log(chalk13.gray("Please try manually:"));
-    console.log(chalk13.cyan(`  ${updateCmd}`));
+    console.log(chalk14.red(`Update failed: ${message}`));
+    console.log(chalk14.gray("Please try manually:"));
+    console.log(chalk14.cyan(`  ${updateCmd}`));
   }
 });
 
 // src/commands/wiki.ts
-import { Command as Command15 } from "commander";
-import { existsSync as existsSync6, mkdirSync as mkdirSync3, readFileSync as readFileSync4, writeFileSync as writeFileSync5 } from "fs";
-import { join as join6 } from "path";
-import chalk14 from "chalk";
-var wikiCommand = new Command15("wiki").description("LLM-compiled knowledge base \u2014 institutional memory for your codebase");
+import { Command as Command16 } from "commander";
+import { existsSync as existsSync7, mkdirSync as mkdirSync3, readFileSync as readFileSync4, writeFileSync as writeFileSync6 } from "fs";
+import { join as join7 } from "path";
+import chalk15 from "chalk";
+var wikiCommand = new Command16("wiki").description("LLM-compiled knowledge base \u2014 institutional memory for your codebase");
 wikiCommand.command("init").description("Initialize the wiki system in the current repository").option("--wiki-dir <path>", "Wiki output directory", ".devpilot/wiki").action(async (options) => {
   const cwd = process.cwd();
-  const devpilotDir = join6(cwd, ".devpilot");
-  const wikiDir = join6(cwd, options.wikiDir);
-  if (!existsSync6(devpilotDir)) {
+  const devpilotDir = join7(cwd, ".devpilot");
+  const wikiDir = join7(cwd, options.wikiDir);
+  if (!existsSync7(devpilotDir)) {
     console.log(
-      chalk14.yellow("\u26A0\uFE0F  DevPilot not initialized. Run `devpilot init` first.")
+      chalk15.yellow("\u26A0\uFE0F  DevPilot not initialized. Run `devpilot init` first.")
     );
     return;
   }
-  if (!existsSync6(wikiDir)) {
+  if (!existsSync7(wikiDir)) {
     mkdirSync3(wikiDir, { recursive: true });
   }
-  const indexPath = join6(wikiDir, "index.md");
-  if (!existsSync6(indexPath)) {
+  const indexPath = join7(wikiDir, "index.md");
+  if (!existsSync7(indexPath)) {
     const initialIndex = `# Wiki Index
 
 > Auto-generated wiki \u2014 compiled from session logs, commits, specs, and decisions.
@@ -1522,11 +2135,11 @@ This wiki will grow automatically as you work with DevPilot:
 
 Run \`devpilot wiki ingest\` to manually add sources, or let the session hook capture knowledge automatically.
 `;
-    writeFileSync5(indexPath, initialIndex);
+    writeFileSync6(indexPath, initialIndex);
   }
-  const logPath = join6(wikiDir, "log.md");
-  if (!existsSync6(logPath)) {
-    writeFileSync5(
+  const logPath = join7(wikiDir, "log.md");
+  if (!existsSync7(logPath)) {
+    writeFileSync6(
       logPath,
       `# Wiki Activity Log
 
@@ -1536,29 +2149,29 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
 `
     );
   }
-  const gitignorePath = join6(cwd, ".gitignore");
-  if (existsSync6(gitignorePath)) {
+  const gitignorePath = join7(cwd, ".gitignore");
+  if (existsSync7(gitignorePath)) {
     const gitignore = readFileSync4(gitignorePath, "utf-8");
     if (!gitignore.includes(".devpilot/wiki")) {
     }
   }
-  console.log(chalk14.green("\u2705 Wiki initialized!"));
+  console.log(chalk15.green("\u2705 Wiki initialized!"));
   console.log("");
-  console.log(chalk14.white("Wiki directory: ") + chalk14.cyan(wikiDir));
+  console.log(chalk15.white("Wiki directory: ") + chalk15.cyan(wikiDir));
   console.log("");
-  console.log(chalk14.white("Next steps:"));
+  console.log(chalk15.white("Next steps:"));
   console.log(
-    chalk14.gray("  1. ") + chalk14.cyan("devpilot wiki ingest --file <path>") + chalk14.gray(" to add source material")
+    chalk15.gray("  1. ") + chalk15.cyan("devpilot wiki ingest --file <path>") + chalk15.gray(" to add source material")
   );
   console.log(
-    chalk14.gray("  2. ") + chalk14.cyan('devpilot wiki query "How does auth work?"') + chalk14.gray(" to ask questions")
+    chalk15.gray("  2. ") + chalk15.cyan('devpilot wiki query "How does auth work?"') + chalk15.gray(" to ask questions")
   );
   console.log(
-    chalk14.gray("  3. ") + chalk14.cyan("devpilot wiki status") + chalk14.gray(" to check wiki health")
+    chalk15.gray("  3. ") + chalk15.cyan("devpilot wiki status") + chalk15.gray(" to check wiki health")
   );
   console.log("");
   console.log(
-    chalk14.gray(
+    chalk15.gray(
       "The wiki will grow automatically as agents work \u2014 each session compounds the knowledge base."
     )
   );
@@ -1566,8 +2179,8 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
 wikiCommand.command("ingest").description("Ingest a source document into the wiki").requiredOption("--type <type>", "Source type: session_log, commit, spec, decision, manual").requiredOption("--title <title>", "Human-readable title for the source").option("--file <path>", "Path to source file").option("--stdin", "Read source from stdin").option("--origin <origin>", "Origin identifier (e.g. session ID, commit SHA)").action(async (options) => {
   let content;
   if (options.file) {
-    if (!existsSync6(options.file)) {
-      console.log(chalk14.red(`\u274C File not found: ${options.file}`));
+    if (!existsSync7(options.file)) {
+      console.log(chalk15.red(`\u274C File not found: ${options.file}`));
       return;
     }
     content = readFileSync4(options.file, "utf-8");
@@ -1575,20 +2188,20 @@ wikiCommand.command("ingest").description("Ingest a source document into the wik
     content = readFileSync4(0, "utf-8");
   } else {
     console.log(
-      chalk14.red("\u274C Provide either --file <path> or --stdin")
+      chalk15.red("\u274C Provide either --file <path> or --stdin")
     );
     return;
   }
   const validTypes = ["session_log", "commit", "spec", "decision", "manual"];
   if (!validTypes.includes(options.type)) {
     console.log(
-      chalk14.red(
+      chalk15.red(
         `\u274C Invalid type "${options.type}". Must be one of: ${validTypes.join(", ")}`
       )
     );
     return;
   }
-  console.log(chalk14.gray(`Ingesting ${options.type}: "${options.title}"...`));
+  console.log(chalk15.gray(`Ingesting ${options.type}: "${options.title}"...`));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
@@ -1599,75 +2212,75 @@ wikiCommand.command("ingest").description("Ingest a source document into the wik
       options.title,
       options.origin
     );
-    console.log(chalk14.green("\u2705 Ingested successfully!"));
+    console.log(chalk15.green("\u2705 Ingested successfully!"));
     console.log(
-      chalk14.gray(`   Source ID: ${result.sourceId}`)
+      chalk15.gray(`   Source ID: ${result.sourceId}`)
     );
     if (result.articlesCreated.length > 0) {
       console.log(
-        chalk14.white(`   Articles created: `) + chalk14.cyan(result.articlesCreated.join(", "))
+        chalk15.white(`   Articles created: `) + chalk15.cyan(result.articlesCreated.join(", "))
       );
     }
     if (result.articlesUpdated.length > 0) {
       console.log(
-        chalk14.white(`   Articles updated: `) + chalk14.yellow(result.articlesUpdated.join(", "))
+        chalk15.white(`   Articles updated: `) + chalk15.yellow(result.articlesUpdated.join(", "))
       );
     }
     console.log(
-      chalk14.gray(`   Tokens used: ${result.tokensUsed}`)
+      chalk15.gray(`   Tokens used: ${result.tokensUsed}`)
     );
   } catch (error) {
     console.log(
-      chalk14.red(
+      chalk15.red(
         `\u274C Ingest failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
   }
 });
 wikiCommand.command("query <question>").description("Ask a question against the wiki").action(async (question) => {
-  console.log(chalk14.gray(`Searching wiki for: "${question}"...`));
+  console.log(chalk15.gray(`Searching wiki for: "${question}"...`));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const result = await compiler.query(question);
     console.log("");
-    console.log(chalk14.white(result.answer));
+    console.log(chalk15.white(result.answer));
     console.log("");
     if (result.citedArticles.length > 0) {
       console.log(
-        chalk14.gray("Cited: ") + chalk14.cyan(result.citedArticles.map((s) => `[[${s}]]`).join(", "))
+        chalk15.gray("Cited: ") + chalk15.cyan(result.citedArticles.map((s) => `[[${s}]]`).join(", "))
       );
     }
     if (result.newArticleSlug) {
       console.log(
-        chalk14.green(
+        chalk15.green(
           `\u{1F4DD} New article created from this query: [[${result.newArticleSlug}]]`
         )
       );
     }
-    console.log(chalk14.gray(`Tokens used: ${result.tokensUsed}`));
+    console.log(chalk15.gray(`Tokens used: ${result.tokensUsed}`));
   } catch (error) {
     console.log(
-      chalk14.red(
+      chalk15.red(
         `\u274C Query failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
   }
 });
 wikiCommand.command("lint").description("Check wiki health \u2014 find stale content, orphans, and gaps").action(async () => {
-  console.log(chalk14.gray("Linting wiki..."));
+  console.log(chalk15.gray("Linting wiki..."));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const result = await compiler.lint();
     if (result.findings.length === 0) {
-      console.log(chalk14.green("\u2705 Wiki is healthy \u2014 no issues found!"));
+      console.log(chalk15.green("\u2705 Wiki is healthy \u2014 no issues found!"));
       return;
     }
     console.log(
-      chalk14.yellow(`\u26A0\uFE0F  Found ${result.findings.length} issue(s):
+      chalk15.yellow(`\u26A0\uFE0F  Found ${result.findings.length} issue(s):
 `)
     );
     for (const finding of result.findings) {
@@ -1679,23 +2292,23 @@ wikiCommand.command("lint").description("Check wiki health \u2014 find stale con
         broken_link: "\u{1F494}"
       }[finding.type];
       console.log(
-        `  ${icon} ${chalk14.white(`[${finding.type}]`)} ${chalk14.cyan(`[[${finding.articleSlug}]]`)}`
+        `  ${icon} ${chalk15.white(`[${finding.type}]`)} ${chalk15.cyan(`[[${finding.articleSlug}]]`)}`
       );
-      console.log(chalk14.gray(`     ${finding.description}`));
-      console.log(chalk14.gray(`     \u2192 ${finding.suggestion}`));
+      console.log(chalk15.gray(`     ${finding.description}`));
+      console.log(chalk15.gray(`     \u2192 ${finding.suggestion}`));
       console.log("");
     }
     if (result.articlesMarkedStale.length > 0) {
       console.log(
-        chalk14.yellow(
+        chalk15.yellow(
           `Marked ${result.articlesMarkedStale.length} article(s) as stale.`
         )
       );
     }
-    console.log(chalk14.gray(`Tokens used: ${result.tokensUsed}`));
+    console.log(chalk15.gray(`Tokens used: ${result.tokensUsed}`));
   } catch (error) {
     console.log(
-      chalk14.red(
+      chalk15.red(
         `\u274C Lint failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -1707,46 +2320,46 @@ wikiCommand.command("status").description("Show wiki statistics").action(async (
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const status = await compiler.getStatus();
-    console.log(chalk14.white.bold("\n\u{1F4DA} Wiki Status\n"));
+    console.log(chalk15.white.bold("\n\u{1F4DA} Wiki Status\n"));
     console.log(
-      chalk14.gray("  Sources:    ") + chalk14.white(String(status.totalSources))
+      chalk15.gray("  Sources:    ") + chalk15.white(String(status.totalSources))
     );
     console.log(
-      chalk14.gray("  Articles:   ") + chalk14.white(String(status.totalArticles)) + chalk14.gray(" (") + chalk14.green(`${status.activeArticles} active`) + (status.staleArticles > 0 ? chalk14.yellow(`, ${status.staleArticles} stale`) : "") + (status.archivedArticles > 0 ? chalk14.gray(`, ${status.archivedArticles} archived`) : "") + chalk14.gray(")")
+      chalk15.gray("  Articles:   ") + chalk15.white(String(status.totalArticles)) + chalk15.gray(" (") + chalk15.green(`${status.activeArticles} active`) + (status.staleArticles > 0 ? chalk15.yellow(`, ${status.staleArticles} stale`) : "") + (status.archivedArticles > 0 ? chalk15.gray(`, ${status.archivedArticles} archived`) : "") + chalk15.gray(")")
     );
     if (Object.keys(status.categories).length > 0) {
-      console.log(chalk14.gray("\n  Categories:"));
+      console.log(chalk15.gray("\n  Categories:"));
       for (const [category, count] of Object.entries(status.categories).sort()) {
         console.log(
-          chalk14.gray("    ") + chalk14.cyan(category) + chalk14.gray(": ") + chalk14.white(String(count))
+          chalk15.gray("    ") + chalk15.cyan(category) + chalk15.gray(": ") + chalk15.white(String(count))
         );
       }
     }
     if (status.lastActivity) {
       console.log(
-        chalk14.gray("\n  Last activity: ") + chalk14.white(status.lastActivity.toISOString().split("T")[0])
+        chalk15.gray("\n  Last activity: ") + chalk15.white(status.lastActivity.toISOString().split("T")[0])
       );
     }
     console.log("");
   } catch (error) {
     console.log(
-      chalk14.red(
+      chalk15.red(
         `\u274C Status failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
   }
 });
 wikiCommand.command("flush").description("Export wiki to disk as markdown files").action(async () => {
-  console.log(chalk14.gray("Flushing wiki to disk..."));
+  console.log(chalk15.gray("Flushing wiki to disk..."));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const result = await compiler.flushToDisk();
-    console.log(chalk14.green(`\u2705 Wrote ${result.filesWritten} files to ${result.wikiDir}`));
+    console.log(chalk15.green(`\u2705 Wrote ${result.filesWritten} files to ${result.wikiDir}`));
   } catch (error) {
     console.log(
-      chalk14.red(
+      chalk15.red(
         `\u274C Flush failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -1762,7 +2375,7 @@ wikiCommand.command("index").description("Show the wiki table of contents").opti
       index = index.filter((e) => e.category === options.category);
     }
     if (index.length === 0) {
-      console.log(chalk14.gray("Wiki is empty. Run `devpilot wiki ingest` to add sources."));
+      console.log(chalk15.gray("Wiki is empty. Run `devpilot wiki ingest` to add sources."));
       return;
     }
     const byCategory = {};
@@ -1772,25 +2385,25 @@ wikiCommand.command("index").description("Show the wiki table of contents").opti
       }
       byCategory[entry.category].push(entry);
     }
-    console.log(chalk14.white.bold("\n\u{1F4D6} Wiki Index\n"));
+    console.log(chalk15.white.bold("\n\u{1F4D6} Wiki Index\n"));
     for (const [category, entries] of Object.entries(byCategory).sort()) {
       console.log(
-        chalk14.cyan.bold(
+        chalk15.cyan.bold(
           `  ${category.charAt(0).toUpperCase() + category.slice(1)}`
         )
       );
       for (const entry of entries) {
-        const statusColor = entry.status === "active" ? chalk14.green : entry.status === "stale" ? chalk14.yellow : chalk14.gray;
+        const statusColor = entry.status === "active" ? chalk15.green : entry.status === "stale" ? chalk15.yellow : chalk15.gray;
         const badge = statusColor(`[${entry.status}]`);
         console.log(
-          `    ${badge} ${chalk14.white(entry.title)} ${chalk14.gray(`[[${entry.slug}]]`)}`
+          `    ${badge} ${chalk15.white(entry.title)} ${chalk15.gray(`[[${entry.slug}]]`)}`
         );
       }
       console.log("");
     }
   } catch (error) {
     console.log(
-      chalk14.red(
+      chalk15.red(
         `\u274C Index failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -1803,30 +2416,30 @@ wikiCommand.command("read <slug>").description("Read a specific wiki article").a
     const compiler = createWikiCompiler(config);
     const article = await compiler.getArticle(slug);
     if (!article) {
-      console.log(chalk14.red(`\u274C Article not found: [[${slug}]]`));
+      console.log(chalk15.red(`\u274C Article not found: [[${slug}]]`));
       return;
     }
-    console.log(chalk14.white.bold(`
+    console.log(chalk15.white.bold(`
 # ${article.title}
 `));
     console.log(
-      chalk14.gray(
+      chalk15.gray(
         `Category: ${article.category} | Status: ${article.status} | v${article.version}`
       )
     );
     if (article.backlinks.length > 0) {
       console.log(
-        chalk14.gray(
+        chalk15.gray(
           `Related: ${article.backlinks.map((b) => `[[${b}]]`).join(", ")}`
         )
       );
     }
-    console.log(chalk14.gray("\u2500".repeat(60)));
+    console.log(chalk15.gray("\u2500".repeat(60)));
     console.log(article.content);
     console.log("");
   } catch (error) {
     console.log(
-      chalk14.red(
+      chalk15.red(
         `\u274C Read failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -1839,7 +2452,7 @@ function getWikiConfig() {
     model: process.env.WIKI_MODEL || "claude-sonnet-4-20250514",
     maxTokens: parseInt(process.env.WIKI_MAX_TOKENS || "8192", 10),
     repo: getRepoName(cwd),
-    wikiDir: join6(cwd, ".devpilot", "wiki")
+    wikiDir: join7(cwd, ".devpilot", "wiki")
   };
 }
 function getRepoName(cwd) {
@@ -1862,7 +2475,7 @@ var pkg = {
   name: "@devpilot.sh/cli",
   version: VERSION
 };
-var cli = new Command16();
+var cli = new Command17();
 cli.name("devpilot").description("DevPilot CLI - Manage your AI coding agent fleet").version(VERSION);
 cli.addCommand(initCommand);
 cli.addCommand(setupCommand);
@@ -1871,6 +2484,7 @@ cli.addCommand(statusCommand);
 cli.addCommand(configCommand);
 cli.addCommand(bridgeCommand);
 cli.addCommand(sessionCommand);
+cli.addCommand(sessionRunnerCommand);
 cli.addCommand(updateCommand);
 cli.addCommand(wikiCommand);
 cli.addCommand(benchCommand);

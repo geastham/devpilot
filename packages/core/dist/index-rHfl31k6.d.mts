@@ -1192,7 +1192,12 @@ interface RefinementResult {
  * - Fall back to flat plan on complete failure
  */
 declare class PlanRefinementService {
-    private promptConstructor;
+    /**
+     * Public so a host can attach a MemPalace service after construction —
+     * `setMemPalaceService` is how recall reaches the planning prompt. Without an
+     * accessor the service was unreachable and every memory written was write-only.
+     */
+    readonly promptConstructor: PromptConstructor;
     private aiClient;
     private config;
     constructor(aiClientConfig: AIClientConfig, refinementConfig?: Partial<PlanRefinementConfig>);
@@ -1210,15 +1215,35 @@ declare class PlanRefinementService {
     /**
      * Generate initial plan without refinement.
      */
-    private generateInitialPlan;
+    /**
+     * Public because the conductor graph (`@devpilot.sh/conductor-agent`) drives
+     * generation and refinement as separate nodes with its own scoring gate
+     * between them. `generateAndRefine` remains the batteries-included entry point
+     * for callers that just want a plan.
+     */
+    generateInitialPlan(specContent: string, itemTitle: string, itemId: string, repo: string, constructorConfig: PromptConstructorConfig): Promise<{
+        plan: ParsedWavePlan;
+        score: PlanScore;
+        tokensUsed: number;
+    }>;
     /**
      * Refine an existing plan to improve parallelization.
      */
-    private refineplan;
+    /** Public for the same reason as `generateInitialPlan`. */
+    refineplan(specContent: string, itemTitle: string, itemId: string, repo: string, constructorConfig: PromptConstructorConfig, currentPlan: ParsedWavePlan, currentScore: number): Promise<{
+        plan: ParsedWavePlan;
+        score: PlanScore;
+        tokensUsed: number;
+    }>;
     /**
      * Score a parsed wave plan.
+     *
+     * Public alongside `generateInitialPlan` / `refineplan`: the conductor graph
+     * branches on this score between its generate and refine nodes, and the
+     * standalone `scorePlan()` export needs the wave assignment and critical path
+     * computed first — which is exactly what this composes.
      */
-    private scorePlan;
+    scorePlan(plan: ParsedWavePlan): PlanScore;
     /**
      * Create a fallback flat plan from specification.
      * This is a last resort when AI generation completely fails.
@@ -1301,7 +1326,12 @@ declare class WavePlanGenerator {
     /**
      * Persist a wave plan to the database.
      */
-    private persistWavePlan;
+    /**
+     * Public so the conductor graph can persist an approved plan as its own node.
+     * The graph decides *when* a plan is approved (after a human interrupt); the
+     * write itself is unchanged and still versions against prior plans.
+     */
+    persistWavePlan(horizonItemId: string, planId: string, wavePlan: ParsedWavePlan, criticalPath: CriticalPathResult, waveAssignment: WaveAssignmentResult, score: PlanScore): Promise<string>;
     /**
      * Extract task descriptions from specification text.
      */

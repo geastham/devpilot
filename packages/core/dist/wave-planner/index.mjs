@@ -3281,6 +3281,12 @@ var PlanRefinementService = class {
   /**
    * Generate initial plan without refinement.
    */
+  /**
+   * Public because the conductor graph (`@devpilot.sh/conductor-agent`) drives
+   * generation and refinement as separate nodes with its own scoring gate
+   * between them. `generateAndRefine` remains the batteries-included entry point
+   * for callers that just want a plan.
+   */
   async generateInitialPlan(specContent, itemTitle, itemId, repo, constructorConfig) {
     const prompt = await this.promptConstructor.constructPrompt(
       specContent,
@@ -3307,6 +3313,7 @@ var PlanRefinementService = class {
   /**
    * Refine an existing plan to improve parallelization.
    */
+  /** Public for the same reason as `generateInitialPlan`. */
   async refineplan(specContent, itemTitle, itemId, repo, constructorConfig, currentPlan, currentScore) {
     const prompt = await this.promptConstructor.constructRefinementPrompt(
       specContent,
@@ -3334,6 +3341,11 @@ var PlanRefinementService = class {
   }
   /**
    * Score a parsed wave plan.
+   *
+   * Public alongside `generateInitialPlan` / `refineplan`: the conductor graph
+   * branches on this score between its generate and refine nodes, and the
+   * standalone `scorePlan()` export needs the wave assignment and critical path
+   * computed first — which is exactly what this composes.
    */
   scorePlan(plan) {
     const allTasks = plan.waves.flatMap((w) => w.tasks);
@@ -3537,6 +3549,11 @@ var WavePlanGenerator = class {
   }
   /**
    * Persist a wave plan to the database.
+   */
+  /**
+   * Public so the conductor graph can persist an approved plan as its own node.
+   * The graph decides *when* a plan is approved (after a human interrupt); the
+   * write itself is unchanged and still versions against prior plans.
    */
   async persistWavePlan(horizonItemId, planId, wavePlan, criticalPath, waveAssignment, score) {
     const db2 = getDatabase();
@@ -4664,9 +4681,12 @@ Replace \`<callback-token>\` with the token provided by your runner. Send the co
 }
 
 // src/orchestrator/service.ts
-var serviceInstance = null;
+var globalForOrchestrator = globalThis;
+function getInstance() {
+  return globalForOrchestrator.__devpilotOrchestratorService ?? null;
+}
 function getOrchestratorServiceOrNull() {
-  return serviceInstance;
+  return getInstance();
 }
 
 // src/orchestrator/host-wiring.ts

@@ -1248,25 +1248,34 @@ var OrchestratorService = class {
     this.eventCallbacks.clear();
   }
 };
-var serviceInstance = null;
+var globalForOrchestrator = globalThis;
+function getInstance() {
+  return globalForOrchestrator.__devpilotOrchestratorService ?? null;
+}
+function setInstance(service) {
+  globalForOrchestrator.__devpilotOrchestratorService = service;
+}
 function initOrchestratorService(config, sessionTransport) {
-  if (serviceInstance) {
-    serviceInstance.shutdown();
+  const existing = getInstance();
+  if (existing) {
+    existing.shutdown();
   }
-  serviceInstance = new OrchestratorService(config, sessionTransport);
-  return serviceInstance;
+  const service = new OrchestratorService(config, sessionTransport);
+  setInstance(service);
+  return service;
 }
 function getOrchestratorService() {
-  if (!serviceInstance) {
+  const service = getInstance();
+  if (!service) {
     throw new Error("Orchestrator service not initialized. Call initOrchestratorService first.");
   }
-  return serviceInstance;
+  return service;
 }
 function isOrchestratorServiceInitialized() {
-  return serviceInstance !== null;
+  return getInstance() !== null;
 }
 function getOrchestratorServiceOrNull() {
-  return serviceInstance;
+  return getInstance();
 }
 
 // src/orchestrator/status-poller.ts
