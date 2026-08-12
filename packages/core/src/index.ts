@@ -17,5 +17,8 @@ export * as wiki from './wiki';
 // that augments (never replaces) the Wiki.
 export * as mempalace from './mempalace';
 
+// Conductor Score model — the single declaration of dimension maxima (TRD 16)
+export * as score from './score';
+
 // Version
 export const VERSION = '0.1.0';

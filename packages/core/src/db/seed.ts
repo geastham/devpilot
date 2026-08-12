@@ -436,7 +436,9 @@ async function seed() {
     runwayHealth: 148,
     planAccuracy: 162,
     costEfficiency: 138,
-    velocityTrend: 138,
+    // Was 138 — impossible under the specified cap of 100, and the value that
+    // exposed the weighting divergence when the breakdown was first rendered.
+    velocityTrend: 88,
     leaderboardRank: 23,
   });
 

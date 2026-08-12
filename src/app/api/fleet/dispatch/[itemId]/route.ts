@@ -9,7 +9,7 @@ import {
   conductorScores,
   eq,
 } from '@/lib/db';
-import { linear } from '@devpilot.sh/core';
+import { linear, score as scoreModel } from '@devpilot.sh/core';
 import { getServerOrchestrator } from '@/lib/orchestrator';
 
 interface RouteParams {
@@ -200,7 +200,7 @@ export async function POST(_request: NextRequest, { params }: RouteParams) {
     if (score) {
       await db.update(conductorScores)
         .set({
-          velocityTrend: Math.min(200, score.velocityTrend + 5),
+          velocityTrend: scoreModel.clampDimension('velocityTrend', score.velocityTrend + 5),
           total: Math.min(1000, score.total + 10),
         })
         .where(eq(conductorScores.id, score.id));

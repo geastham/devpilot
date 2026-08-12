@@ -37,6 +37,11 @@
       "types": "./dist/wave-planner/index.d.ts",
       "import": "./dist/wave-planner/index.mjs",
       "require": "./dist/wave-planner/index.js"
+    },
+    "./score": {
+      "types": "./dist/score/index.d.ts",
+      "import": "./dist/score/index.mjs",
+      "require": "./dist/score/index.js"
     }
   },
   "files": [

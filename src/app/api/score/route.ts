@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { db, conductorScores, scoreHistory, eq, desc } from '@/lib/db';
+import { score as scoreModel } from '@devpilot.sh/core';
 
 // GET /api/score - Get the current conductor score
 export async function GET() {
@@ -37,44 +38,28 @@ export async function GET() {
       limit: 30,
     });
 
-    // Calculate component percentages (each out of 200, total out of 1000)
-    const breakdown = {
-      fleetUtilization: {
-        value: score.fleetUtilization,
-        max: 200,
-        percent: Math.round((score.fleetUtilization / 200) * 100),
-        label: 'Fleet Utilization',
-        description: 'How well you keep your fleet busy',
-      },
-      runwayHealth: {
-        value: score.runwayHealth,
-        max: 200,
-        percent: Math.round((score.runwayHealth / 200) * 100),
-        label: 'Runway Health',
-        description: 'Maintaining healthy work pipeline',
-      },
-      planAccuracy: {
-        value: score.planAccuracy,
-        max: 200,
-        percent: Math.round((score.planAccuracy / 200) * 100),
-        label: 'Plan Accuracy',
-        description: 'How accurate your cost estimates are',
-      },
-      costEfficiency: {
-        value: score.costEfficiency,
-        max: 200,
-        percent: Math.round((score.costEfficiency / 200) * 100),
-        label: 'Cost Efficiency',
-        description: 'Optimizing model selection for tasks',
-      },
-      velocityTrend: {
-        value: score.velocityTrend,
-        max: 200,
-        percent: Math.round((score.velocityTrend / 200) * 100),
-        label: 'Velocity Trend',
-        description: 'Improving throughput over time',
-      },
-    };
+    // Breakdown derived from SCORE_MODEL (TRD 16) — the maxima used to be
+    // hard-coded here as `200` across the board, which is one of the four places
+    // that drifted from spec/DESIGN.md 8.1 and from each other.
+    const breakdown = Object.fromEntries(
+      scoreModel.SCORE_MODEL.map((dimension) => {
+        const value = scoreModel.clampDimension(
+          dimension.key,
+          (score as unknown as Record<string, number>)[dimension.key] ?? 0
+        );
+        return [
+          dimension.key,
+          {
+            value,
+            max: dimension.max,
+            percent: Math.round((value / dimension.max) * 100),
+            label: dimension.label,
+            description: dimension.meaning,
+            method: dimension.method,
+          },
+        ];
+      })
+    );
 
     // Format history for sparkline
     const sparklineData = historyData.map((h) => ({
@@ -82,10 +67,27 @@ export async function GET() {
       value: h.total,
     }));
 
+    // Recomputed from the clamped dimensions, NOT the stored total.
+    //
+    // Stored totals were accumulated under the previous weighting (a flat 200
+    // per dimension), so a persisted 822 does not equal the sum of the same
+    // dimensions read through SCORE_MODEL — the breakdown showed 716. Serving
+    // the stored number next to components that contradict it is worse than
+    // serving a number that moved: it is a total nobody can derive.
+    //
+    // TRD 16 §4.4 marks pre-migration scores `model_version: 0` and excludes
+    // them from ranking. Until that lands, `storedTotal` is returned alongside
+    // so the drift is visible rather than silently reconciled.
+    const recomputedTotal = scoreModel.totalFrom(
+      score as unknown as Record<scoreModel.ScoreDimensionKey, number>
+    );
+
     return NextResponse.json({
-      total: score.total,
-      max: 1000,
-      percent: Math.round((score.total / 1000) * 100),
+      total: recomputedTotal,
+      storedTotal: score.total,
+      max: scoreModel.SCORE_TOTAL,
+      percent: Math.round((score.total / scoreModel.SCORE_TOTAL) * 100),
+      modelVersion: scoreModel.SCORE_MODEL_VERSION,
       leaderboardRank: score.leaderboardRank,
       breakdown,
       sparklineData,

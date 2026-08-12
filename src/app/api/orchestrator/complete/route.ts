@@ -9,7 +9,7 @@ import {
   completedTasks,
   eq,
 } from '@/lib/db';
-import { linear } from '@devpilot.sh/core';
+import { linear, score as scoreModel } from '@devpilot.sh/core';
 import type { CompletionReport } from '@devpilot.sh/core/orchestrator';
 import { getServerOrchestrator } from '@/lib/orchestrator';
 import { resumeConductorForTask, waveForSession } from '@/lib/conductor-resume';
@@ -133,8 +133,8 @@ export async function POST(request: Request) {
       await db.update(conductorScores)
         .set({
           total: Math.max(0, Math.min(1000, score.total + scoreDelta)),
-          velocityTrend: Math.max(0, Math.min(200, score.velocityTrend + (report.success ? 3 : -2))),
-          costEfficiency: Math.max(0, Math.min(200, score.costEfficiency + costEfficiencyDelta)),
+          velocityTrend: scoreModel.clampDimension('velocityTrend', score.velocityTrend + (report.success ? 3 : -2)),
+          costEfficiency: scoreModel.clampDimension('costEfficiency', score.costEfficiency + costEfficiencyDelta),
         })
         .where(eq(conductorScores.id, score.id));
 
