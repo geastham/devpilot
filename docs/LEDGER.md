@@ -17,7 +17,8 @@ this wins.
 | # | Workstream | State | Blocked by |
 |---|---|---|---|
 | **V1.1** | Conductor Score definition | 🟡 Wave 1 done — TRD 16 | **Confirm the weighting** (§3); then waves 2–5 |
-| **V1.2** | Close the memory loop (`evolve`) | 🔴 Not started | Decide MemPalace vs Synaptic Wiki |
+| **V1.2** | Close the memory loop | 🟠 **Re-scoped** — see `MEMORY-LANDSCAPE.md` | Decide mine-vs-evolve; may delete the work |
+| **V1.4** | Adopt a code-structure MCP for planner context | 🔴 New — not started | Licence check |
 | **V1.3** | Benchmarks into CI | 🔴 Not started | Needs an API key in CI |
 | V2 | Open the arena | ⚪ Blocked | All of V1 |
 | V3 | Pattern extraction → planner + content | ⚪ Blocked | V1.2, V2 consent model |
@@ -86,7 +87,7 @@ Compiles, tests pass, nobody has watched it work.
 | Decision | Why it is blocking | Where |
 |---|---|---|
 | **Score weighting** — spec's 250/250/200/200/100 or the implemented flat 5×200 | You cannot rank people on an ambiguous number. Blocks the whole arena | TRD 16 §3 |
-| **MemPalace or Synaptic Wiki** | Two graph memories in one org. Adopting Synaptic Wiki inherits a working `evolve` and deletes V1.2 | TRD 15 §8.5 |
+| **Which memory construct survives** | **Four** exist across the org, two inside `packages/core`, one of which does not work. Mining (Template KE) may delete V1.2 rather than implement it | `docs/MEMORY-LANDSCAPE.md` §4 |
 | **Cross-org learning consent** | TRD 15 §4.3 currently forbids it; pattern extraction requires it | TRD 15 §4.3 |
 | **Account linking / domain restriction** for SSO | Defaulted rather than decided | `devpilot-website/docs/SSO.md` |
 
@@ -109,6 +110,10 @@ Compiles, tests pass, nobody has watched it work.
 
 Newest first. One line each — the detail belongs in the docs this points at.
 
+- **2026-08-12** — Memory landscape evaluated (`MEMORY-LANDSCAPE.md`): four
+  constructs org-wide, the Template Knowledge Engine is the better precedent than
+  Synaptic Wiki, code-structure memory is now a commodity worth buying. V1.2
+  re-scoped, V1.4 added.
 - **2026-08-12** — Vision turn documented (`VISION.md`, `POSITIONING.md`); SSO
   for GitHub + Google; both branches pushed as PRs; this ledger created.
   **V1.1 wave 1 shipped**: `SCORE_MODEL` as single source of truth, six

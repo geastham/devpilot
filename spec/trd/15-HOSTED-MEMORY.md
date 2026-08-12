@@ -333,7 +333,17 @@ From Spec 12/18, all built and in production:
 | RLS + safe views, with a **negative test required** | Stronger than §4.3's assertion |
 | Result envelope: coverage, freshness, caveats | A planner should know memory is thin, not silently trust it |
 
-### 8.5 Revised plan
+### 8.5 Superseded by the landscape evaluation
+
+> **`docs/MEMORY-LANDSCAPE.md` (Aug 2026) revises this section.** Three findings:
+> the Template Knowledge Engine — not Synaptic Wiki — is the closer precedent,
+> because DevPilot's memory is outcome-carrying records rather than prose;
+> **mining may remove the need for Wave 3a's `evolve` step entirely**; and
+> code-structure memory is now a commodity with published benchmarks that we
+> should adopt rather than build. Read that document before implementing the plan
+> below.
+
+### 8.6 Revised plan
 
 Supersedes §7:
 
