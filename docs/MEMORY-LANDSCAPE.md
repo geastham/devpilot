@@ -141,13 +141,66 @@ it is the difference between recall that helps and recall that misleads.
 
 ---
 
+## 3.4 Graphify — the structural half, evaluated Aug 2026
+
+**Graphify is not a competitor to Graphiti. It is the other half of §3.1**, and an
+issue on its own tracker proposes exactly the split this document argues for:
+*"graphify's structural knowledge (`auth.ts` imports `jwt.ts`) with agent memory's
+temporal knowledge (you refactored `auth.ts` 3 days ago)."*
+
+What it is: turns a codebase — plus docs, SQL schemas, configs, PDFs — into a
+queryable graph via **local deterministic AST parsing, no vector store**, shipped
+as a `/graphify` skill for Claude Code, Cursor, Codex and Gemini CLI.
+
+Three properties match our principles better than anything else surveyed:
+deterministic rather than LLM-extracted, no vector store, no API key. It is the
+"mine, don't extract" conclusion applied to code.
+
+**The maturity picture is genuinely mixed, and stars are the least of it.**
+
+| Signal | Reading |
+|---|---|
+| 105,638 stars in ~4 months (created 2026-04-03) | Explosive. Also the noisiest signal here |
+| Apache 2.0 | Clean |
+| **Still `v0.9.41` — never shipped 1.0** | Pre-stable, by its own versioning |
+| Releases **daily** (v0.9.37 → v0.9.41 in five days) | Very high churn; pinning is mandatory |
+| **970 of ~1,050 commits from one person** | Bus factor of one |
+| 911 open / 874 closed issues | Triaging hard, backlog still growing |
+| Weekly commits 101 → 83 → 35 → 34 | Decelerating |
+
+Compare `codebase-memory-mcp`, which ships as a **native executable needing no
+language runtime** — a real advantage for an npm-distributed CLI, where Graphify
+and Graphiti both drag in Python — and carries published numbers (83% vs 92%
+answer quality, ~10× fewer tokens, 31 repos).
+
+**Verdict: adopt Graphify for V1.4 behind the port, pinned, and do not build
+anything load-bearing on it until it reaches 1.0 with a second maintainer.** Its
+being a Claude Code *skill* is a bonus we are unusually placed to use — dispatched
+sessions are already Claude Code.
+
+## 3.5 Are we missing anything else?
+
+[Awesome-GraphMemory](https://github.com/DEEP-PolyU/Awesome-GraphMemory) (DEEP-PolyU)
+is a maintained survey of graph-based agent memory — papers, benchmarks and
+open-source projects. **Use it as the watchlist instead of ad-hoc searching**, and
+re-read it when V3 starts.
+
+The honest position on further evaluation: **the architecture is what makes this
+question cheap.** Every substrate sits behind `MemPalaceClient`. The Graphiti
+adapter is ~350 lines and its tests run against a stub. Swapping or adding a
+backend is a day's work, not a migration — so the cost of being wrong is low and
+the cost of continued evaluation is not obviously repaid.
+
 ## 4. Recommendation
 
 **Stop building memory infrastructure. Build the corpus and the mining.**
 
-1. **Adopt an off-the-shelf code-structure MCP** (`codebase-memory-mcp` first —
-   native binary, no runtime, published numbers) and feed it to the planner as
-   context. Fastest measurable win, zero maintained infrastructure.
+1. **Adopt an off-the-shelf code-structure graph** and feed it to the planner as
+   context. Two candidates, and the choice turns on distribution rather than
+   capability: `codebase-memory-mcp` (native binary, **no language runtime**,
+   published benchmarks) versus **Graphify** (deterministic AST, no vector store,
+   multi-modal, a Claude Code skill — but `0.9.x`, daily releases, one
+   maintainer; see §3.4). Trial Graphify, ship whichever survives a week.
 2. **Mine run records rather than accreting drawers**, following the Template KE
    — deterministic build, rebuildable from local artifacts, outcome-weighted.
    This likely **deletes V1.2's `evolve` work** instead of implementing it.

@@ -18,7 +18,7 @@ this wins.
 |---|---|---|---|
 | **V1.1** | Conductor Score definition | 🟡 Wave 1 done — TRD 16 | **Confirm the weighting** (§3); then waves 2–5 |
 | **V1.2** | Close the memory loop | 🟢 **Built via Graphiti** — TRD 18 | Live-server verification |
-| **V1.4** | Adopt a code-structure MCP for planner context | 🔴 New — not started | Licence check |
+| **V1.4** | Code-structure graph for planner context | 🔴 Not started | Pick: Graphify vs codebase-memory-mcp (`MEMORY-LANDSCAPE.md` §3.4) |
 | **V1.3** | Benchmarks into CI | 🔴 Not started | Needs an API key in CI |
 | V2 | Open the arena | ⚪ Blocked | All of V1 |
 | V3 | Pattern extraction → planner + content | ⚪ Blocked | V1.2, V2 consent model |
@@ -111,6 +111,10 @@ Compiles, tests pass, nobody has watched it work.
 
 Newest first. One line each — the detail belongs in the docs this points at.
 
+- **2026-08-12** — Graphify evaluated (`MEMORY-LANDSCAPE.md` §3.4): it is the
+  structural half, not a Graphiti competitor. 105k stars in 4 months but still
+  0.9.x with daily releases and one maintainer — adopt behind the port, pinned,
+  nothing load-bearing until 1.0. Awesome-GraphMemory adopted as the watchlist.
 - **2026-08-12** — **Graphiti adopted as the memory substrate** (TRD 18):
   Apache 2.0, MCP 1.0, temporal facts, embedded FalkorDB Lite. Implements
   `MemPalaceClient` directly; deterministic triplet writes need no LLM key;
