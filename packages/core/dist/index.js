@@ -7753,6 +7753,7 @@ var mempalace_exports = {};
 __export(mempalace_exports, {
   DisabledClient: () => DisabledClient,
   DualFeedSessionHook: () => DualFeedSessionHook,
+  GraphitiClient: () => GraphitiClient,
   LocalShimClient: () => LocalShimClient,
   McpAdapterClient: () => McpAdapterClient,
   MemPalaceService: () => MemPalaceService,
@@ -7766,6 +7767,270 @@ __export(mempalace_exports, {
 // src/mempalace/client.ts
 var import_crypto3 = require("crypto");
 var import_drizzle_orm17 = require("drizzle-orm");
+
+// src/mempalace/graphiti-client.ts
+var GraphitiClient = class {
+  constructor(config) {
+    this.config = config;
+    // Declared as 'mcp' because that is the mode consumers already branch on;
+    // Graphiti is an implementation of that mode, not a new kind of client.
+    this.mode = "mcp";
+    this.nextId = 1;
+  }
+  log(line) {
+    this.config.onLog?.(`[graphiti] ${line}`);
+  }
+  /**
+   * Call one MCP tool. Never throws — every failure degrades to `null`.
+   *
+   * Memory improves a plan; it does not gate one. A Graphiti server that is
+   * down, slow, or speaking a version we do not understand must cost the
+   * conductor nothing but the absence of recall.
+   */
+  async call(name, args) {
+    const body = {
+      jsonrpc: "2.0",
+      id: this.nextId++,
+      method: "tools/call",
+      params: { name, arguments: args }
+    };
+    const headers = {
+      "Content-Type": "application/json",
+      // Graphiti's HTTP transport negotiates both; asking for either keeps us
+      // compatible with servers that stream and servers that do not.
+      Accept: "application/json, text/event-stream"
+    };
+    if (this.config.apiKey) headers.Authorization = `Bearer ${this.config.apiKey}`;
+    try {
+      const res = await fetch(this.config.endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(this.config.timeoutMs ?? 1e4)
+      });
+      if (!res.ok) {
+        this.log(`${name} -> HTTP ${res.status}`);
+        return null;
+      }
+      const json = await res.json();
+      if (json.error) {
+        this.log(`${name} -> ${json.error.message}`);
+        return null;
+      }
+      const text8 = json.result?.content?.find((c) => c.type === "text")?.text;
+      if (!text8) return json.result ?? null;
+      try {
+        return JSON.parse(text8);
+      } catch {
+        return text8;
+      }
+    } catch (error) {
+      this.log(`${name} -> ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+  /**
+   * A wing is a Graphiti `group_id`.
+   *
+   * Namespaces are implicit — writing to a group creates it — so there is
+   * nothing to provision. This returns a synthetic Wing rather than making a
+   * round trip for a no-op.
+   */
+  async ensureWing(slug, name, repo) {
+    return {
+      id: slug,
+      slug,
+      name: name ?? slug,
+      wingType: "project",
+      repo
+    };
+  }
+  async addDrawer(input) {
+    const groupId = input.wingSlug;
+    if (this.config.extraction === "llm") {
+      const res2 = await this.call("add_memory", {
+        name: input.label,
+        episode_body: input.content,
+        group_id: groupId,
+        source: "text",
+        source_description: input.roomSlug,
+        reference_time: (/* @__PURE__ */ new Date()).toISOString()
+      });
+      return {
+        drawerId: res2?.uuid ?? input.label,
+        created: res2 !== null,
+        roomId: input.roomSlug,
+        wingId: groupId
+      };
+    }
+    const res = await this.call("add_triplet", {
+      group_id: groupId,
+      source_node_name: input.roomSlug,
+      edge_name: input.memoryType.toUpperCase(),
+      target_node_name: input.label,
+      fact: input.content,
+      valid_at: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    return {
+      drawerId: res?.uuid ?? input.label,
+      created: res !== null,
+      roomId: input.roomSlug,
+      wingId: groupId
+    };
+  }
+  async search(input) {
+    const res = await this.call("search_memory_facts", {
+      query: input.query,
+      group_ids: input.wingSlug ? [input.wingSlug] : void 0,
+      max_facts: input.limit ?? 10
+    });
+    const facts = extractFacts(res);
+    return {
+      hits: facts.map((f, i) => ({
+        drawerId: f.uuid ?? `fact-${i}`,
+        roomSlug: f.source_node_name ?? "main",
+        wingSlug: input.wingSlug ?? "main",
+        label: f.name ?? "fact",
+        snippet: f.fact ?? "",
+        // Graphiti returns facts already ranked; preserve that order rather
+        // than inventing a score it did not give us.
+        score: 1 - i * 0.01,
+        memoryType: "fact"
+      })),
+      totalScanned: facts.length
+    };
+  }
+  /** L0/L1 — the entities that matter most in this namespace. */
+  async wakeUp(input) {
+    const res = await this.call("search_nodes", {
+      query: input.wingSlug,
+      group_ids: [input.wingSlug],
+      max_nodes: 5
+    });
+    const nodes = extractNodes(res);
+    const criticalFacts = nodes.map((n) => n.summary ?? n.name ?? "").filter(Boolean);
+    return {
+      identity: `Memory for ${input.wingSlug}`,
+      criticalFacts,
+      tokenEstimate: Math.ceil(criticalFacts.join(" ").length / 4)
+    };
+  }
+  /**
+   * L2 topical recall.
+   *
+   * This is the method the local shim could not answer: it read closets, and
+   * nothing ever produced one. Here it is a fact search, so it returns what was
+   * written.
+   */
+  async recall(input) {
+    const res = await this.call("search_memory_facts", {
+      query: input.topic,
+      group_ids: input.wingSlug ? [input.wingSlug] : void 0,
+      max_facts: input.limit ?? 3
+    });
+    const facts = extractFacts(res);
+    if (facts.length === 0) {
+      return { topic: input.topic, closets: [], tokenEstimate: 0 };
+    }
+    const summary = facts.map((f) => f.fact).filter(Boolean).join("\n");
+    const tokenCost = Math.ceil(summary.length / 4);
+    return {
+      topic: input.topic,
+      closets: [
+        {
+          id: `graphiti:${input.topic}`,
+          roomId: input.wingSlug ?? "main",
+          summary,
+          drawerIds: facts.map((f) => f.uuid ?? "").filter(Boolean),
+          // Tier 2 — topical recall, loaded on topic match.
+          tier: 2,
+          tokenCost
+        }
+      ],
+      tokenEstimate: tokenCost
+    };
+  }
+  async kgAdd(input) {
+    const res = await this.call("add_triplet", {
+      group_id: input.wingSlug,
+      source_node_name: input.subject,
+      edge_name: input.predicate,
+      target_node_name: input.object,
+      fact: `${input.subject} ${input.predicate} ${input.object}`,
+      valid_at: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    return { tripleId: res?.uuid ?? "", contradictions: [] };
+  }
+  async kgQuery(input) {
+    const res = await this.call("search_memory_facts", {
+      query: [input.subject, input.predicate, input.object].filter(Boolean).join(" ") || "*",
+      group_ids: input.wingSlug ? [input.wingSlug] : void 0,
+      max_facts: 20
+    });
+    return extractFacts(res).map(
+      (f) => ({
+        id: f.uuid ?? "",
+        wingId: input.wingSlug ?? "main",
+        subject: f.source_node_name ?? "",
+        predicate: f.name ?? "",
+        object: f.target_node_name ?? "",
+        confidence: 1,
+        // The temporal pair is the whole reason for adopting Graphiti:
+        // `invalid_at` is how a fact stops being true without being deleted.
+        validFrom: f.valid_at ? new Date(f.valid_at) : /* @__PURE__ */ new Date(),
+        validUntil: f.invalid_at ? new Date(f.invalid_at) : null
+      })
+    );
+  }
+  /**
+   * Temporal invalidation — the capability the port declared and no backend
+   * implemented. Graphiti expires an edge rather than deleting it, so the
+   * history of what we used to believe survives.
+   */
+  async kgInvalidate(input) {
+    const existing = await this.kgQuery({
+      wingSlug: input.wingSlug,
+      subject: input.subject,
+      predicate: input.predicate
+    });
+    let invalidatedCount = 0;
+    for (const triple of existing) {
+      if (!triple.id) continue;
+      const res = await this.call("delete_entity_edge", { uuid: triple.id });
+      if (res !== null) invalidatedCount++;
+    }
+    return { invalidatedCount };
+  }
+  /**
+   * Graphiti exposes no namespace listing — `group_id`s are implicit, so there
+   * is nothing to enumerate. Returning empty is honest; the alternative would be
+   * inventing a registry we do not maintain.
+   */
+  async listWings() {
+    return [];
+  }
+  async listRooms(_wingSlug) {
+    return [];
+  }
+  /** Is the server reachable? Used to decide whether to fall back to local. */
+  async healthy() {
+    return await this.call("get_status", {}) !== null;
+  }
+};
+function extractFacts(res) {
+  if (!res) return [];
+  if (Array.isArray(res)) return res;
+  const r = res;
+  return r.facts ?? r.edges ?? [];
+}
+function extractNodes(res) {
+  if (!res) return [];
+  if (Array.isArray(res)) return res;
+  const r = res;
+  return r.nodes ?? [];
+}
+
+// src/mempalace/client.ts
 var LocalShimClient = class {
   constructor() {
     this.mode = "local";
@@ -8156,6 +8421,17 @@ function createMemPalaceClient(config, mcpTransport) {
   switch (config.mode) {
     case "local":
       return new LocalShimClient();
+    case "graphiti":
+      if (!config.mcpEndpoint) {
+        throw new Error(
+          "MemPalace mode=graphiti requires mcpEndpoint (the Graphiti MCP server URL)."
+        );
+      }
+      return new GraphitiClient({
+        endpoint: config.mcpEndpoint,
+        apiKey: config.mcpApiKey,
+        extraction: config.graphitiExtraction ?? "deterministic"
+      });
     case "mcp":
       if (!mcpTransport) {
         throw new Error(

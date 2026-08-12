@@ -10,6 +10,7 @@ import {
   palaceTunnels,
   palaceWings,
 } from '../db/schema/mempalace';
+import { GraphitiClient } from './graphiti-client';
 import type {
   AddDrawerInput,
   AddDrawerResult,
@@ -752,6 +753,20 @@ export function createMemPalaceClient(
   switch (config.mode) {
     case 'local':
       return new LocalShimClient();
+    case 'graphiti':
+      // Graphiti speaks its own vocabulary, so it implements MemPalaceClient
+      // directly rather than sitting behind McpAdapterClient — which expects a
+      // MemPalace-shaped server that does not exist (TRD 18 §3).
+      if (!config.mcpEndpoint) {
+        throw new Error(
+          'MemPalace mode=graphiti requires mcpEndpoint (the Graphiti MCP server URL).'
+        );
+      }
+      return new GraphitiClient({
+        endpoint: config.mcpEndpoint,
+        apiKey: config.mcpApiKey,
+        extraction: config.graphitiExtraction ?? 'deterministic',
+      });
     case 'mcp':
       if (!mcpTransport) {
         throw new Error(

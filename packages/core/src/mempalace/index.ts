@@ -31,3 +31,5 @@ export { WikiPalaceBridge, createWikiPalaceBridge } from './wiki-bridge';
 export type { WikiBridgeConfig } from './wiki-bridge';
 export { DualFeedSessionHook } from './session-hook';
 export type { DualFeedHookConfig } from './session-hook';
+
+export { GraphitiClient, type GraphitiConfig } from './graphiti-client';

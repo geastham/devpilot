@@ -237,7 +237,7 @@ export interface RecallResult {
 // ============================================================================
 
 /** MemPalace client mode. */
-export type MemPalaceMode = 'local' | 'mcp' | 'disabled';
+export type MemPalaceMode = 'local' | 'mcp' | 'graphiti' | 'disabled';
 
 export interface MemPalaceConfig {
   /** Active mode. "local" uses the SQLite shim, "mcp" uses an external MemPalace MCP server, "disabled" is a no-op. */
@@ -248,6 +248,14 @@ export interface MemPalaceConfig {
   defaultWingName?: string;
   /** Optional MCP endpoint (e.g. local Unix socket or HTTP) when mode=mcp */
   mcpEndpoint?: string;
+  /** Bearer token for a Graphiti server behind auth (hosted tier). */
+  mcpApiKey?: string;
+  /**
+   * Graphiti write path. `deterministic` uses add_triplet and needs no LLM key
+   * on the server; `llm` uses add_memory and does. Defaults to deterministic —
+   * memory must not fail closed when no key is configured (TRD 18 §4).
+   */
+  graphitiExtraction?: 'deterministic' | 'llm';
   /** Repository this palace is bound to */
   repo?: string;
 }

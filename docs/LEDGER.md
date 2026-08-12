@@ -17,7 +17,7 @@ this wins.
 | # | Workstream | State | Blocked by |
 |---|---|---|---|
 | **V1.1** | Conductor Score definition | 🟡 Wave 1 done — TRD 16 | **Confirm the weighting** (§3); then waves 2–5 |
-| **V1.2** | Close the memory loop | 🟠 **Re-scoped** — see `MEMORY-LANDSCAPE.md` | Decide mine-vs-evolve; may delete the work |
+| **V1.2** | Close the memory loop | 🟢 **Built via Graphiti** — TRD 18 | Live-server verification |
 | **V1.4** | Adopt a code-structure MCP for planner context | 🔴 New — not started | Licence check |
 | **V1.3** | Benchmarks into CI | 🔴 Not started | Needs an API key in CI |
 | V2 | Open the arena | ⚪ Blocked | All of V1 |
@@ -56,9 +56,10 @@ Compiles, tests pass, nobody has watched it work.
 
 ## Known broken
 
-- **Memory is write-only.** `addDrawer` writes drawers,
-  `assemblePromptContext` reads closets, nothing evolves one into the other.
-  Verified live: write a record, recall it, get zero. → **V1.2**
+- ~~**Memory is write-only.**~~ **Fixed by adopting Graphiti** (TRD 18) — one
+  store, so `search` reads what `add` wrote. Round trip verified against a stub;
+  the `evolve` step was deleted rather than built. **Still unverified against a
+  real Graphiti server** — a tool-name mismatch would show up as empty recall.
 - ~~**The Conductor Score has no single definition.**~~ **Fixed** — `SCORE_MODEL`
   in `@devpilot.sh/core/score` is now the only place maxima are declared, with a
   sum-to-1000 invariant test. **The weighting still needs your sign-off**
@@ -87,7 +88,7 @@ Compiles, tests pass, nobody has watched it work.
 | Decision | Why it is blocking | Where |
 |---|---|---|
 | **Score weighting** — spec's 250/250/200/200/100 or the implemented flat 5×200 | You cannot rank people on an ambiguous number. Blocks the whole arena | TRD 16 §3 |
-| **Which memory construct survives** | **Four** exist across the org, two inside `packages/core`, one of which does not work. Mining (Template KE) may delete V1.2 rather than implement it | `docs/MEMORY-LANDSCAPE.md` §4 |
+| **Retire MemPalace's local shim?** | Graphiti now backs the same port. Keeping both means maintaining two, and the shim is the one that was broken | TRD 18 §2 |
 | **Cross-org learning consent** | TRD 15 §4.3 currently forbids it; pattern extraction requires it | TRD 15 §4.3 |
 | **Account linking / domain restriction** for SSO | Defaulted rather than decided | `devpilot-website/docs/SSO.md` |
 
@@ -110,6 +111,10 @@ Compiles, tests pass, nobody has watched it work.
 
 Newest first. One line each — the detail belongs in the docs this points at.
 
+- **2026-08-12** — **Graphiti adopted as the memory substrate** (TRD 18):
+  Apache 2.0, MCP 1.0, temporal facts, embedded FalkorDB Lite. Implements
+  `MemPalaceClient` directly; deterministic triplet writes need no LLM key;
+  every failure degrades to empty. Write→recall round trip closes.
 - **2026-08-12** — Memory landscape evaluated (`MEMORY-LANDSCAPE.md`): four
   constructs org-wide, the Template Knowledge Engine is the better precedent than
   Synaptic Wiki, code-structure memory is now a commodity worth buying. V1.2

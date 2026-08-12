@@ -45,12 +45,23 @@ export function wingSlugForRepo(repo: string): string {
  * loop off. This one value is the open-core seam — see TRD-15.
  */
 export function memoryConfigFromEnv(): MemPalaceConfig {
-  const mode = (process.env.DEVPILOT_MEMORY_MODE ?? 'local') as MemPalaceConfig['mode'];
+  // `graphiti` when an endpoint is configured, otherwise `local`. Defaulting on
+  // the presence of the endpoint means a conductor who starts a Graphiti server
+  // gets working recall without also having to know a mode name — and one who
+  // does not still gets a memory that writes.
+  const explicit = process.env.DEVPILOT_MEMORY_MODE as MemPalaceConfig['mode'] | undefined;
+  const endpoint = process.env.DEVPILOT_MEMORY_ENDPOINT;
+  const mode = explicit ?? (endpoint ? 'graphiti' : 'local');
+
   return {
     mode,
     // Per-repo wings are set per call; this is only the fallback.
     defaultWingSlug: process.env.DEVPILOT_MEMORY_WING ?? 'devpilot',
-    mcpEndpoint: process.env.DEVPILOT_MEMORY_ENDPOINT,
+    mcpEndpoint: endpoint,
+    mcpApiKey: process.env.DEVPILOT_MEMORY_API_KEY,
+    // Deterministic writes need no LLM key on the Graphiti server (TRD 18 §4).
+    graphitiExtraction:
+      process.env.DEVPILOT_MEMORY_EXTRACTION === 'llm' ? 'llm' : 'deterministic',
   };
 }
 
