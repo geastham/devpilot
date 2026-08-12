@@ -475,7 +475,35 @@ export class OrchestratorService {
 }
 
 // Singleton instance management
-let serviceInstance: OrchestratorService | null = null;
+//
+// Held on `globalThis`, NOT in a module-level `let`.
+//
+// `packages/core` ships five tsup entries with `splitting: false`, so
+// `dist/orchestrator/index.*` and `dist/wave-planner/index.*` each inline their
+// OWN copy of this module. With a module-level variable, a service initialised
+// through `@devpilot.sh/core/orchestrator` was invisible to
+// `WaveDispatchCoordinator` living in `@devpilot.sh/core/wave-planner`: every
+// task came back ORCHESTRATOR_UNAVAILABLE and was silently QUEUED, so wave
+// dispatch reported success, changed no task status, and started no agent.
+//
+// That made wave dispatch unable to work through the Next app at all. It went
+// unnoticed because `/api/fleet/dispatch` calls `service.dispatch()` directly
+// and never crosses the bundle boundary — only the coordinator path does.
+//
+// globalThis is bundler-proof, which matters more than elegance here: `tsup
+// splitting: true` would fix the ESM build and leave CJS duplicated, and this
+// package ships both.
+const globalForOrchestrator = globalThis as unknown as {
+  __devpilotOrchestratorService?: OrchestratorService | null;
+};
+
+function getInstance(): OrchestratorService | null {
+  return globalForOrchestrator.__devpilotOrchestratorService ?? null;
+}
+
+function setInstance(service: OrchestratorService | null): void {
+  globalForOrchestrator.__devpilotOrchestratorService = service;
+}
 
 /**
  * Initialize the orchestrator service with configuration
@@ -484,12 +512,14 @@ export function initOrchestratorService(
   config: OrchestratorAdapterConfig,
   sessionTransport?: SessionTransport
 ): OrchestratorService {
-  if (serviceInstance) {
+  const existing = getInstance();
+  if (existing) {
     // Shutdown existing instance before creating new one
-    serviceInstance.shutdown();
+    existing.shutdown();
   }
-  serviceInstance = new OrchestratorService(config, sessionTransport);
-  return serviceInstance;
+  const service = new OrchestratorService(config, sessionTransport);
+  setInstance(service);
+  return service;
 }
 
 /**
@@ -497,22 +527,23 @@ export function initOrchestratorService(
  * Throws if not initialized
  */
 export function getOrchestratorService(): OrchestratorService {
-  if (!serviceInstance) {
+  const service = getInstance();
+  if (!service) {
     throw new Error('Orchestrator service not initialized. Call initOrchestratorService first.');
   }
-  return serviceInstance;
+  return service;
 }
 
 /**
  * Check if orchestrator service is initialized
  */
 export function isOrchestratorServiceInitialized(): boolean {
-  return serviceInstance !== null;
+  return getInstance() !== null;
 }
 
 /**
  * Get orchestrator service if initialized, otherwise return null
  */
 export function getOrchestratorServiceOrNull(): OrchestratorService | null {
-  return serviceInstance;
+  return getInstance();
 }
