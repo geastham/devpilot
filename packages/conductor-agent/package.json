@@ -1,0 +1,46 @@
+{
+  "name": "@devpilot.sh/conductor-agent",
+  "version": "0.1.0",
+  "description": "The DevPilot conductor as a LangGraph agent — plan, review, dispatch and advance a wave plan as one resumable graph",
+  "license": "MIT",
+  "author": "DevPilot Team",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/geastham/devpilot.git",
+    "directory": "packages/conductor-agent"
+  },
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "prepublishOnly": "pnpm run build"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "engines": { "node": ">=18.0.0" },
+  "keywords": ["devpilot", "langgraph", "agent", "conductor", "wave-planner"],
+  "dependencies": {
+    "@langchain/langgraph": "^1.4.9",
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
+  }
+}

@@ -262,7 +262,12 @@ export class WavePlanGenerator {
   /**
    * Persist a wave plan to the database.
    */
-  private async persistWavePlan(
+  /**
+   * Public so the conductor graph can persist an approved plan as its own node.
+   * The graph decides *when* a plan is approved (after a human interrupt); the
+   * write itself is unchanged and still versions against prior plans.
+   */
+  async persistWavePlan(
     horizonItemId: string,
     planId: string,
     wavePlan: ParsedWavePlan,

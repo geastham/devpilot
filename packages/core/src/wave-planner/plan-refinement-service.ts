@@ -63,7 +63,12 @@ export interface RefinementResult {
  * - Fall back to flat plan on complete failure
  */
 export class PlanRefinementService {
-  private promptConstructor: PromptConstructor;
+  /**
+   * Public so a host can attach a MemPalace service after construction —
+   * `setMemPalaceService` is how recall reaches the planning prompt. Without an
+   * accessor the service was unreachable and every memory written was write-only.
+   */
+  readonly promptConstructor: PromptConstructor;
   private aiClient: WavePlannerAIClient;
   private config: PlanRefinementConfig;
 
@@ -193,7 +198,13 @@ export class PlanRefinementService {
   /**
    * Generate initial plan without refinement.
    */
-  private async generateInitialPlan(
+  /**
+   * Public because the conductor graph (`@devpilot.sh/conductor-agent`) drives
+   * generation and refinement as separate nodes with its own scoring gate
+   * between them. `generateAndRefine` remains the batteries-included entry point
+   * for callers that just want a plan.
+   */
+  async generateInitialPlan(
     specContent: string,
     itemTitle: string,
     itemId: string,
@@ -237,7 +248,8 @@ export class PlanRefinementService {
   /**
    * Refine an existing plan to improve parallelization.
    */
-  private async refineplan(
+  /** Public for the same reason as `generateInitialPlan`. */
+  async refineplan(
     specContent: string,
     itemTitle: string,
     itemId: string,
@@ -285,8 +297,13 @@ export class PlanRefinementService {
 
   /**
    * Score a parsed wave plan.
+   *
+   * Public alongside `generateInitialPlan` / `refineplan`: the conductor graph
+   * branches on this score between its generate and refine nodes, and the
+   * standalone `scorePlan()` export needs the wave assignment and critical path
+   * computed first — which is exactly what this composes.
    */
-  private scorePlan(plan: ParsedWavePlan): PlanScore {
+  scorePlan(plan: ParsedWavePlan): PlanScore {
     const allTasks = plan.waves.flatMap(w => w.tasks);
 
     // Compute critical path

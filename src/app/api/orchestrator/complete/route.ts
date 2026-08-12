@@ -12,6 +12,7 @@ import {
 import { linear } from '@devpilot.sh/core';
 import type { CompletionReport } from '@devpilot.sh/core/orchestrator';
 import { getServerOrchestrator } from '@/lib/orchestrator';
+import { resumeConductorForTask, waveForSession } from '@/lib/conductor-resume';
 
 // POST /api/orchestrator/complete - Receive completion reports from orchestrator
 export async function POST(request: Request) {
@@ -164,11 +165,25 @@ export async function POST(request: Request) {
       console.error('Failed to forward completion to orchestrator:', ingestError);
     }
 
+    // Wake a suspended conductor run if this completion settled its wave.
+    // Best-effort by construction: `resumeConductorForTask` swallows its own
+    // errors, because a completion report must still return 200 even when no
+    // graph is listening — most sessions are dispatched outside a conductor run.
+    let conductor: Awaited<ReturnType<typeof resumeConductorForTask>> = {
+      resumed: false,
+      reason: 'no wave task for session',
+    };
+    const wave = await waveForSession(report.sessionId).catch(() => null);
+    if (wave) {
+      conductor = await resumeConductorForTask(wave.wavePlanId, wave.waveIndex);
+    }
+
     return NextResponse.json({
       success: true,
       sessionId: report.sessionId,
       status: report.success ? 'COMPLETE' : 'ERROR',
       filesReleased: releasedFiles.length,
+      conductor,
     });
   } catch (error) {
     console.error('Orchestrator completion error:', error);
