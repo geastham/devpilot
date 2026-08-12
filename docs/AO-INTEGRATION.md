@@ -89,3 +89,12 @@ Two caveats to settle before building it:
 `--mode http` against **any** orchestrator implementing our contract, and
 `--mode claude-session`. The http path is verified end to end by
 `packages/cli/tests/harness/run-local-dispatch.mjs`.
+
+## You do not need `ao` to run agents
+
+`claude-session` mode is the supported local path and no longer depends on any
+of this. `devpilot session-runner` (August 2026) implements the §7.1 dispatcher
+API and runs Claude Code directly — see `docs/SESSION-RUNNER.md`.
+
+Two real sessions have been run through it end to end on a local Claude Code
+account. Prefer it over waiting for an `ao-daemon` adapter.
