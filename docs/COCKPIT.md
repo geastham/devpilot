@@ -40,6 +40,24 @@ The weights are not decoration — they are `spec/DESIGN.md` §2.1, and they exi
 so a conductor can tell dispatchable work from a scratchpad thought without
 reading a word.
 
+### Saying it on the screen
+
+The model above used to live only in this file. On the screen it was four
+columns of internal vocabulary, side by side, with nothing to suggest they were
+one pipeline rather than four unrelated lists — and the queue runs **right to
+left**, which is the opposite of what most people assume. Three additions state
+it:
+
+- **A flow rail** above the zones: `← dispatched to the fleet · work moves left
+  as it gets more specced · new ideas enter here`. It is a sentence, not an
+  animation, so the direction survives a screenshot.
+- **One line of plain English per zone header** — "Specced and staged — one
+  click dispatches" under `READY`, and so on. The jargon stays, because it is
+  the vocabulary of the CLI and the API. It just no longer arrives unexplained.
+- **The Fleet Status panel says what it is**: "Running what READY dispatched".
+  It sits at the left end of the horizon — the end work flows toward — and
+  nothing had connected the two.
+
 **The core claim:** the bottleneck is planning throughput, not agent capacity.
 Agents consume specs faster than a human writes them, so the cockpit's job is to
 make the conductor faster than the fleet.
@@ -57,6 +75,29 @@ make the conductor faster than the fleet.
 
 An idle agent is the one cost that is entirely avoidable, which is why two of
 the four instruments are about seeing it coming.
+
+Both headline numbers used to be bare values. `Runway: 3h 12m` named no unit and
+implied no direction; `Score: 742` was out of nothing, and its "click to view
+breakdown" tooltip pointed at a button with no handler. Now:
+
+- **Runway** reads over two lines — the value, then `before the fleet idles`.
+  Hovering or tab-focusing it gives the thresholds. The caption is the fix; the
+  tooltip is the footnote. A tooltip nobody hovers explains nothing.
+- **Score** opens the per-dimension breakdown `spec/DESIGN.md` §8.2 always
+  called for, each dimension captioned with what it measures.
+
+Rendering that breakdown immediately turned up a spec divergence that a bare
+total had hidden: **the five dimensions are capped at 200 each in the
+implementation, not the 250/250/200/200/100 in §8.1.** The seeded
+`velocityTrend: 138` would be an impossible 138 / 100. The flat caps are the
+behaviour everywhere — schema defaults, `/api/score`, and the clamps in the
+dispatch and orchestrator-complete routes — so that is what the UI draws. §8.1
+is annotated; which weighting is *correct* is still an open product question.
+
+The `REFINING` cards lost a number for the same reason. Each carried a 32px
+progress ring fed by `plan ? 100 : 0` — a permanent, prominent **100%** that
+measured nothing and read as a confidence score. §6.1.1 asks for the words
+"Plan Ready" on the summary line, so that is what is there.
 
 ---
 
@@ -162,10 +203,15 @@ script hard-fails instead.
 
 - **Wave hand-off is not animated.** When wave N completes and N+1 stages, the
   product's most satisfying moment happens invisibly.
-- **Comprehension.** The zone names are jargon, the flow direction is never
-  stated, and `Runway` / `Score` are unlabelled numbers. The screen is dense
-  before it is legible.
 - **`three-panel` and `timeline` layouts** are declared in the switcher and fall
   back to the default.
 - **The DAG is visually flat** compared to the marketing hero image it echoes —
   no layered depth, haze, or bloom.
+- **Narrow viewports are unverified.** The top bar hides its button labels and
+  the flow rail drops its middle caption below `lg` / `xl`, but none of that has
+  been seen. Chrome's `resize_window` reports success and `window.innerWidth`
+  does not move — the same tooling failure that left the marketing site's mobile
+  layout unverified. Needs a real narrow window.
+- **Score sparklines.** §8.2 asks for a sparkline per dimension in the expanded
+  card. No score history is plumbed into the fleet store, and a fabricated trend
+  line is worse than none, so the breakdown ships without them.

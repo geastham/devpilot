@@ -34,10 +34,60 @@ signals that were specified and never built — runway urgency, idle pulses, liv
 agents. Rule: motion is diegetic, and everything is guarded by
 `prefers-reduced-motion`.
 
-**Still true from §2 below:** dispatch is the broken link. `dispatchToOrchestrator()`
-remains a no-op, and plan generation for the plan-review flow is still
-`generateMockWorkstreams()`. Tier 1 is unchanged and is still the most valuable
-work available.
+**~~Still true from §2 below: dispatch is the broken link.~~ FALSE — corrected
+August 2026.** This claim survived several rewrites of this document without
+anyone rechecking the code. It was wrong on three counts:
+
+- `dispatchToOrchestrator()` is **not** a no-op. It has been fully implemented
+  since `e2f9839` (2026-07-19, *"TRD-01 W2-T1: real dispatch + retry
+  re-dispatch (close the loop)"*) — it creates the session row, composes the
+  prompt, calls `OrchestratorService.dispatch`, and rolls the row back if
+  dispatch is refused.
+- The Next app **does** initialize the orchestrator, via
+  `src/lib/orchestrator.ts:getServerOrchestrator()`, which also wires the status
+  poller and the `ExecutionBridge`. Four routes call it.
+- The `pause` / `resume` routes **exist** — §3 Tier 1 item 5 below says they 404.
+
+**The real gap was one layer further out, and is now closed.** `claude-session`
+mode had no runner behind `DEVPILOT_SESSION_API_URL`: the adapter, the transport
+and the callback routes were all built, with nothing implementing the service in
+between. `devpilot session-runner` now does, and **two real Claude Code sessions
+have been dispatched end to end through it** — capture → plan → dispatch → agent
+edits files → callbacks → DB → score → UI. See `docs/SESSION-RUNNER.md`.
+
+~~Still true: plan generation for the plan-review flow is
+`generateMockWorkstreams()` keyword templates.~~ **Also false.** Deleted in
+`9e1106e` (2026-07-20, *"TRD-01 W2-T6: Next plan-generate route uses real wave
+planner"*). The route calls `generatePlanForItem` + `projectWavePlanToPlan` and
+returns `503 PLAN_AI_UNAVAILABLE` without an API key. TRD-01's own acceptance
+check — "grep: `generateMockWorkstreams` absent from repo" — passes; the name
+survives only in spec prose describing the state it replaced.
+
+**Tier 1 is therefore complete.** Every item in §3 below is done. The lesson is
+the one this document keeps re-teaching: these claims were re-asserted through
+several rewrites without anyone re-reading the code, and each one made the
+product look further from working than it was.
+
+**A dispatch bug that predates all of this was found and fixed.** Core's
+orchestrator singleton lived in a module-level `let`, and `tsup` builds five
+entries with `splitting: false` — so `dist/orchestrator/*` and
+`dist/wave-planner/*` each carried their own copy. A service initialised through
+one was invisible to `WaveDispatchCoordinator` in the other, and every wave task
+was **silently queued**: dispatch reported success, changed no status, started no
+agent. **Wave dispatch could never have worked through the Next app.** It hid
+because `/api/fleet/dispatch` bypasses the coordinator. Now on `globalThis`, with
+regression tests. This is the *real* "dispatch is broken" — not the cause §2
+claimed for a year.
+
+**The conductor is a LangGraph agent, verified live.** `packages/conductor-agent`
+(`@devpilot.sh/conductor-agent`, MIT) expresses plan → score → refine → human
+review → dispatch → advance as one resumable graph, with human review as a real
+`interrupt()` rather than a database flow bolted on beside the planner. The graph
+owns control flow; effects stay with the existing tested code. A two-wave plan has run end to end through the graph against **real Claude Code
+sessions**: dispatch → suspend on `interrupt()` → resumed by the orchestrator
+completion callback → auto-advance → finish. The planning half still has not run
+live (no API key here). See `docs/CONDUCTOR-AGENT.md` for exactly what is and is
+not verified.
 
 ---
 
@@ -59,8 +109,8 @@ work available.
 |---|---|---|
 | 1 — Data Model & Core Engine | ✅ Done | Schema, parser, DAG validator, critical path, wave assigner, plan scorer all real |
 | 2 — Prompt Construction & AI | ✅ Done | Real Anthropic SDK calls with retry, refinement loop, flat-plan fallback |
-| 3 — Wave Execution Controller | 🔴 **Half-built — the critical gap** | State machine exists, but `dispatchToOrchestrator()` is a `console.log` placeholder (`dispatch-coordinator.ts:236`); CompletionListener exported but never wired; controller retry is a TODO |
-| 4 — Re-Optimization & Editing | 🟡 Partial | Reoptimize route is real AI. **Pause/resume routes don't exist** but `PlanReviewCard.tsx:52,61` calls them → 404 |
+| 3 — Wave Execution Controller | ✅ Done *(row corrected Aug 2026)* | `dispatchToOrchestrator()` is real (`e2f9839`), `ExecutionBridge` correlates `job:*` events to wave tasks, controller retry re-dispatch implemented. The "`console.log` placeholder" claim was stale |
+| 4 — Re-Optimization & Editing | ✅ Mostly done *(row corrected Aug 2026)* | Reoptimize route is real AI. Pause/resume routes **do** exist under `/api/wave-plans/[planId]/` |
 | 5 — UI Integration | 🟡 Partial | Wave progress + Planning Horizon View (design/08) shipped. DAG visualization not built |
 | 6 — Metrics & Benchmark Integration | 🟡 Partial | Metrics route exists; `parallelizationQuality` not yet in Conductor Score |
 
@@ -70,17 +120,46 @@ work available.
 
 ### Post-spec additions (no spec docs)
 
-Recent PRs added: Wiki system (#4), Caveman plugin in setup (#5), MemPalace memory layer (#6), session-native orchestrator adapter scaffold + Mission Control (#7), RTK integration (#2). The claude-session adapter is a self-described scaffold with placeholder endpoints.
+Recent PRs added: Wiki system (#4), Caveman plugin in setup (#5), MemPalace memory layer (#6), session-native orchestrator adapter scaffold + Mission Control (#7), RTK integration (#2). ~~The claude-session adapter is a self-described scaffold with placeholder endpoints.~~ **No longer true** — the placeholders were replaced by the TRD-01 §7 contract, and `devpilot session-runner` implements the other side.
 
 ---
 
 ## 2. The headline finding
 
+> **⚠ This section is HISTORICAL. The loop is closed as of August 2026** — see
+> §0. Two real Claude Code sessions have run through it end to end. The
+> numbered claims below are preserved because the reasoning is still worth
+> reading, but **all three are now false**.
+
 **The full loop — capture → plan → dispatch → agents execute → progress flows back — is broken at "dispatch."** Everything upstream (UI, DB, AI wave planning) and downstream (orchestrator callback ingestion, Linear sync, score updates) is real, but the middle never fires:
 
 1. `dispatchToOrchestrator()` in `packages/core/src/wave-planner/execution/dispatch-coordinator.ts` is a no-op placeholder — wave dispatch only mutates DB status.
 2. The Next app never calls `initOrchestratorClient`, so `POST /api/fleet/dispatch/[itemId]` always takes the unconfigured branch — it creates a session row at 0% that nothing advances. ~~Only the CLI's `devpilot serve` Fastify server wires an orchestrator end-to-end.~~ **(Aug 2026: that server has been deleted — `serve` now runs the Next app, so the orchestrator wiring it had is gone with it. This makes the gap WORSE, not better: there is now no path that wires an orchestrator end-to-end, and Tier 1 has to supply one. The env plumbing survives — `serve` forwards `DEVPILOT_ORCHESTRATOR_*` into the Next server — so the config surface is in place and only the call site is missing.)**
-3. Plan generation for the plan-review flow is still `generateMockWorkstreams()` keyword templates (`src/app/api/items/[id]/plan/generate/route.ts:192`) even though the *wave* planner right next to it is real AI.
+3. ~~Plan generation for the plan-review flow is still `generateMockWorkstreams()` keyword templates~~ — **false since `9e1106e` (2026-07-20)**; the route uses the real wave planner.
+
+---
+
+## 2.5 The vision turn (August 2026) — read this before §3
+
+`docs/VISION.md` reframes the product: **programming has moved from building to
+conducting**, the Conductor Score becomes a competitive arena, and patterns
+extracted from the best conductors feed both the memory graph and the content
+engine.
+
+That changes the priority order below. §3's tiers were written to close the
+execution loop, which is now done. **The vision's V1 is a different list**, and
+its first item is not in §3 at all:
+
+1. Resolve the Conductor Score weighting — the implementation (flat 5×200) and
+   `spec/DESIGN.md` §8.1 (250/250/200/200/100) disagree, and *you cannot rank
+   people on an ambiguous number*. Blocks the arena entirely.
+2. Close the memory loop (TRD 15 §8.3) — memory is currently write-only.
+3. Benchmarks into CI — `packages/benchmarks` is the arena's neutral substrate,
+   is essentially complete, and needs no users, which is how the arena
+   bootstraps past cold start.
+
+Tier 2 item 8 below (`parallelizationQuality` + leaderboard) is promoted into
+V1/V2 by this. Tiers 3 and 4 are unchanged and still accurate.
 
 ---
 
@@ -88,11 +167,11 @@ Recent PRs added: Wiki system (#4), Caveman plugin in setup (#5), MemPalace memo
 
 ### Tier 1 — Close the loop (make dispatch real)
 
-1. **Implement `dispatchToOrchestrator()`** — bridge WaveDispatchCoordinator to `OrchestratorService.dispatch`, wire `CompletionListener` into the orchestrator status/complete callbacks, implement controller retry re-dispatch.
-2. **Initialize the orchestrator in the Next app** (or formally consolidate serving on the CLI Fastify server and have the Next app proxy to it — pick one; today they're two half-servers).
-3. **Finish the claude-session adapter** — define the real session dispatch contract, replace the placeholder endpoints. This makes Claude Code sessions the native execution engine instead of requiring `ao-cli`.
-4. **Unify plan generation on the real AI pipeline** — delete `generateMockWorkstreams()` (Next app) and the canned plan in `packages/cli/src/server/api/items.ts`; derive workstream plans from the wave planner.
-5. **Add the missing `pause`/`resume` routes** under `/api/wave-plans/[planId]/` — the UI already calls them and currently 404s.
+1. ~~**Implement `dispatchToOrchestrator()`**~~ — **DONE** (`e2f9839`, 2026-07-19). Real dispatch plus retry re-dispatch.
+2. ~~**Initialize the orchestrator in the Next app**~~ — **DONE**. `src/lib/orchestrator.ts:getServerOrchestrator()`, which also wires the status poller and `ExecutionBridge`. The "two half-servers" alternative is moot: the CLI's Fastify server was deleted (§0).
+3. ~~**Finish the claude-session adapter**~~ — **DONE**. The contract is TRD-01 §7; the adapter and `HttpSessionTransport` implement it, and `devpilot session-runner` implements the other side, so Claude Code sessions *are* the native execution engine. `ao-cli` is deprecated and throws (see `docs/AO-INTEGRATION.md`). Verified with two real sessions — `docs/SESSION-RUNNER.md`.
+4. ~~**Unify plan generation on the real AI pipeline**~~ — **DONE** (`9e1106e`). The Next route derives plans from the wave planner; the CLI's canned plan went with the Fastify server (§0).
+5. ~~**Add the missing `pause`/`resume` routes**~~ — **DONE**. Both exist under `/api/wave-plans/[planId]/` and appear in the build output. This entry was stale.
 
 ### Tier 2 — Finish specced roadmap items
 

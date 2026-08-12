@@ -636,6 +636,20 @@ ConductorScore (0–1000)
 └── Velocity Trend        (0–100)  — velocity ratio trending up/down
 ```
 
+> **⚠ The implementation does not use this weighting — it uses a flat 200 per
+> dimension (5 × 200 = 1000).** That is consistent everywhere it appears:
+> `packages/core/src/db/schema/score.ts` defaults, the `max: 200` breakdown in
+> `src/app/api/score/route.ts`, and the `Math.min(200, …)` clamps in the dispatch
+> and orchestrator-complete routes. The seed sets `velocityTrend: 138`, which the
+> table above would make an impossible 138 / 100.
+>
+> Surfaced August 2026 when the score breakdown was first rendered — the
+> divergence had been invisible for as long as the only display was a bare total.
+> The UI draws the flat caps because that is the behaviour. **Which weighting is
+> correct is still open**: the spec's version deliberately makes runway and
+> utilization worth more than cost, and that is a defensible product claim
+> nobody has ruled on. Changing it means re-weighting the DB clamps too.
+
 ### 8.2 Score Display Contexts
 
 | Context | Format |
@@ -644,6 +658,11 @@ ConductorScore (0–1000)
 | Expanded card | Full breakdown with sparklines per dimension |
 | Velocity Dashboard | Score card with trend arrow |
 | Leaderboard | Rank badge (opt-in) |
+
+The top-bar pill opens the expanded card as a dropdown (`ConductorScorePill`).
+It carries the per-dimension values and what each one measures, but **not the
+sparklines** — no score history is plumbed into the fleet store, and a fabricated
+trend line is worse than none.
 
 ---
 
