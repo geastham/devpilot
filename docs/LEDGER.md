@@ -102,6 +102,11 @@ Compiles, tests pass, nobody has watched it work.
 | [#19](https://github.com/geastham/devpilot/pull/19) | devpilot | Open — session runner, conductor agent, memory capture, vision |
 | [#15](https://github.com/geastham/devpilot-website/pull/15) | devpilot-website | Open — SSO |
 
+**Research out:** `docs/research/MEMORY-SUBSTRATE-BRIEF.md` — an independent
+agent is sweeping the long tail for code-graph and memory substrates. Findings
+will be synthesised into `MEMORY-LANDSCAPE.md`; **do not start V1.4's pick until
+it lands.**
+
 **Parallel work:** another agent is working the SEO/content side of
 `devpilot-website`. Positioning language it should use is in
 `docs/POSITIONING.md`; the vision it derives from is `docs/VISION.md`.
