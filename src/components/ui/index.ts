@@ -32,3 +32,5 @@ export {
   ModelSelector,
   ComplexitySelector,
 } from './dropdown';
+
+export { Tooltip } from './tooltip';

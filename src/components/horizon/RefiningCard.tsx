@@ -5,7 +5,6 @@ import { useHorizonStore, useUIStore } from '@/stores';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { RepoBadge } from '@/components/ui/badge';
-import { ProgressRing } from '@/components/ui/progress';
 import type { HorizonItem } from '@/types';
 
 interface RefiningCardProps {
@@ -25,9 +24,6 @@ export function RefiningCard({ item }: RefiningCardProps) {
     (plan?.sequentialTasks.length ?? 0);
   const estimatedCost = plan?.estimatedCostUsd ?? 0;
 
-  // Simulate spec completion progress (in real app, would track plan generation progress)
-  const specCompletion = plan ? 100 : 0;
-
   const handleReviewPlan = () => {
     setSelectedItem(item.id);
     openConfidencePanel(item.id);
@@ -45,24 +41,18 @@ export function RefiningCard({ item }: RefiningCardProps) {
     >
       <CardContent className="p-4">
         {/* Header Row */}
-        {/* min-w-0 + shrink-0 is load-bearing: without it the flex children
-            refuse to shrink and the 32px ring lands ON TOP of the ticket id in
-            a narrow zone. Text truncates, the ring never moves. */}
-        <div className="flex items-center justify-between gap-2 mb-2">
-          <div className="flex min-w-0 items-center gap-2">
-            <RepoBadge repo={item.repo} />
-            {item.linearTicketId && (
-              <span className="truncate text-xs text-text-muted">{item.linearTicketId}</span>
-            )}
-          </div>
-          <div className="shrink-0">
-            <ProgressRing
-              value={specCompletion}
-              size={32}
-              strokeWidth={3}
-              variant={specCompletion === 100 ? 'success' : 'default'}
-            />
-          </div>
+        {/* This row used to end in a 32px progress ring fed by `plan ? 100 : 0`
+            — a permanent, prominent "100%" that measured nothing. An unlabelled
+            number that is always the same number is worse than no number:
+            readers took it for a confidence score. DESIGN.md §6.1.1 puts the
+            words "Plan Ready" on the summary line instead, which is both honest
+            and where there is room for them — as a header chip it squeezed
+            `NG-1032` down to `N.`. */}
+        <div className="flex min-w-0 items-center gap-2 mb-2">
+          <RepoBadge repo={item.repo} />
+          {item.linearTicketId && (
+            <span className="truncate text-xs text-text-muted">{item.linearTicketId}</span>
+          )}
         </div>
 
         {/* Title */}
@@ -71,13 +61,21 @@ export function RefiningCard({ item }: RefiningCardProps) {
         </h3>
 
         {/* Plan Summary */}
-        {plan && (
-          <p className="text-xs text-text-secondary mb-3">
-            {workstreamCount} parallel workstream{workstreamCount !== 1 ? 's' : ''} ·{' '}
-            {taskCount} task{taskCount !== 1 ? 's' : ''} ·{' '}
-            ~{formatCurrency(estimatedCost)}
-          </p>
-        )}
+        <p className="text-xs text-text-secondary mb-3">
+          {plan ? (
+            <>
+              <span className="font-medium text-accent-green">Plan ready</span>
+              {' — '}
+              {workstreamCount} parallel workstream{workstreamCount !== 1 ? 's' : ''} ·{' '}
+              {taskCount} task{taskCount !== 1 ? 's' : ''} ·{' '}
+              ~{formatCurrency(estimatedCost)}
+            </>
+          ) : (
+            <span className="text-text-muted">
+              Planning agent is still working on this
+            </span>
+          )}
+        </p>
 
         {/* Actions */}
         <div className="flex justify-end gap-2">

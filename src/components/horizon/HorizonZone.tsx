@@ -24,11 +24,20 @@ interface HorizonZoneProps {
  * `weight` drives header prominence and content opacity. READY is the only
  * zone that means anything to an idle agent, so it is the only one at full
  * strength.
+ *
+ * `meaning` is the second half of that job. The four zone names are internal
+ * vocabulary — nothing about the word "SHAPING" tells a reader what is in the
+ * column or what happens to it next — so each header now states, in one line of
+ * plain English, what its contents are and what moves them along. The jargon
+ * stays because it is the vocabulary of the CLI and the API; it just no longer
+ * arrives unexplained.
  */
 const zoneConfig: Record<
   Zone,
   {
     label: string;
+    /** One line of plain English under the zone name. */
+    meaning: string;
     bgClass: string;
     headerClass: string;
     /** Applied to the zone's content — quiets the far end of the horizon. */
@@ -38,6 +47,7 @@ const zoneConfig: Record<
 > = {
   READY: {
     label: 'READY',
+    meaning: 'Specced and staged — one click dispatches',
     bgClass: 'bg-bg-base',
     headerClass: 'text-zone-ready border-zone-ready/40',
     weightClass: 'opacity-100',
@@ -45,6 +55,7 @@ const zoneConfig: Record<
   },
   REFINING: {
     label: 'REFINING',
+    meaning: 'A plan exists and you are reviewing it',
     bgClass: 'bg-bg-base/95',
     headerClass: 'text-zone-refining border-zone-refining/30',
     weightClass: 'opacity-100',
@@ -52,6 +63,7 @@ const zoneConfig: Record<
   },
   SHAPING: {
     label: 'SHAPING',
+    meaning: 'Intent the planning agent can pick up',
     bgClass: 'bg-bg-base/90',
     headerClass: 'text-zone-shaping border-zone-shaping/20',
     weightClass: 'opacity-90',
@@ -59,6 +71,7 @@ const zoneConfig: Record<
   },
   DIRECTIONAL: {
     label: 'DIRECTIONAL',
+    meaning: 'A rough thought, captured',
     bgClass: 'bg-bg-base/85',
     headerClass: 'text-zone-directional border-zone-directional/15',
     weightClass: 'opacity-75',
@@ -93,7 +106,7 @@ export function HorizonZone({ zone, items, className }: HorizonZoneProps) {
       {/* Zone Header */}
       <div
         className={cn(
-          'sticky top-0 z-10 flex items-center justify-between border-b px-4 py-3',
+          'sticky top-0 z-10 border-b px-4 py-2.5',
           config.headerClass,
           config.bgClass
         )}
@@ -104,6 +117,9 @@ export function HorizonZone({ zone, items, className }: HorizonZoneProps) {
             {items.length}
           </span>
         </div>
+        <p className="mt-0.5 truncate text-xs text-text-muted">
+          {config.meaning}
+        </p>
       </div>
 
       {/* Zone Content */}

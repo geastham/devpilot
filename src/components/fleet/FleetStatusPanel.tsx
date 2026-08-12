@@ -1,5 +1,6 @@
 'use client';
 
+import { Rocket } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useFleetStore } from '@/stores';
 import { RufloSessionCard } from './RufloSessionCard';
@@ -24,18 +25,33 @@ export function FleetStatusPanel({ className }: FleetStatusPanelProps) {
       )}
     >
       {/* Header */}
-      <div className="sticky top-0 z-10 flex items-center justify-between border-b border-border-default bg-bg-panel px-4 py-3">
-        <span className="text-sm font-semibold text-text-primary">Fleet Status</span>
-        <span className="text-xs text-text-muted">
-          {sessions.length} session{sessions.length !== 1 ? 's' : ''}
-        </span>
+      {/* The panel sits at the left end of the horizon — the end work flows
+          toward — but nothing connected the two. The subtitle is the link: what
+          you are looking at is READY items that were dispatched. */}
+      <div className="sticky top-0 z-10 border-b border-border-default bg-bg-panel px-4 py-2.5">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-semibold text-text-primary">
+            Fleet Status
+          </span>
+          <span className="text-xs text-text-muted">
+            {sessions.length} session{sessions.length !== 1 ? 's' : ''}
+          </span>
+        </div>
+        <p className="mt-0.5 truncate text-xs text-text-muted">
+          Running what READY dispatched
+        </p>
       </div>
 
       {/* Sessions List */}
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
         {sessions.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-12 text-center">
-            <div className="mb-3 text-3xl opacity-50">🚀</div>
+            {/* Line icon, not an emoji — same reason as the horizon's empty
+                states: emoji render at a different weight per platform. */}
+            <Rocket
+              className="mb-3 h-5 w-5 text-text-muted/60"
+              strokeWidth={1.5}
+            />
             <p className="text-sm font-medium text-text-secondary">No active sessions</p>
             <p className="mt-1 text-xs text-text-muted">
               Dispatch an item to start a Ruflo hive

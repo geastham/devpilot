@@ -2,6 +2,7 @@
 
 import { useHorizonStore } from '@/stores';
 import { HorizonZone } from './HorizonZone';
+import { HorizonFlowRail } from './HorizonFlowRail';
 import type { Zone } from '@/types';
 
 const zones: { zone: Zone; width: string }[] = [
@@ -15,19 +16,23 @@ export function WorkHorizonSurface() {
   const items = useHorizonStore((state) => state.items);
 
   return (
-    <div className="flex h-full">
-      {zones.map(({ zone, width }) => {
-        const zoneItems = items.filter((item) => item.zone === zone);
+    <div className="flex h-full flex-col">
+      <HorizonFlowRail />
 
-        return (
-          <HorizonZone
-            key={zone}
-            zone={zone}
-            items={zoneItems}
-            className={width}
-          />
-        );
-      })}
+      <div className="flex min-h-0 flex-1">
+        {zones.map(({ zone, width }) => {
+          const zoneItems = items.filter((item) => item.zone === zone);
+
+          return (
+            <HorizonZone
+              key={zone}
+              zone={zone}
+              items={zoneItems}
+              className={width}
+            />
+          );
+        })}
+      </div>
     </div>
   );
 }
