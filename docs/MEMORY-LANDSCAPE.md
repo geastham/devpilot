@@ -8,6 +8,72 @@ Supersedes the build assumption in TRD 15 §8.5 Wave 4.
 
 ---
 
+## 0. The plan, in one table
+
+Two different problems, two different tools, and they are not interchangeable.
+
+| Layer | Problem it solves | Tool | Verdict |
+|---|---|---|---|
+| **Code structure** — what the code *is* | **Token reduction.** Agents burn context re-discovering the repo | Graphify **or** `codebase-memory-mcp` | **BUY** — commodity, measurable, not our moat |
+| **Experience + temporal** — what happened when we *tried* | **Core agent quality.** The planner recalls which decompositions actually worked | **Graphiti** (adopted, TRD 18) | **BUY the substrate** |
+| **Run records** — the corpus itself | The moat. Nobody else has dispatch outcomes | Ours (`conductor-memory.ts`) | **BUILD** — the only part we should |
+| `MemPalaceClient` — the port | Keeps substrates swappable | Ours | **KEEP** — it is why any of this is cheap |
+| MemPalace **local shim** | — | — | **REPLACE.** It is the broken one (drawers vs closets) |
+| DevPilot **Wiki** | Human-readable docs | Ours | **KEEP**, untouched — different job |
+| Synaptic Wiki | Versioned-asset distribution | Org | **BORROW the pattern**, do not import |
+| Template Knowledge Engine | Mine-don't-extract; retrieval diversity | Org | **BORROW the pattern**, do not import |
+
+### 0.1 Why token reduction is the near-term win
+
+It is not theoretical for us — it is in our own telemetry. The two verified
+conductor runs cost **603,676 and 318,834 tokens** to add a `CONTRIBUTING.md` and
+a `LICENSE`. An earlier session spent **2,112,126**. Those tasks are trivial; the
+tokens went on the agent working out what the repo contains.
+
+The creative-session harness reached the same conclusion independently: *"render
+cost is INPUT-context-dominated (~1.9M cached read tokens) not output."*
+
+A code-structure graph attacks that directly — `codebase-memory-mcp` reports ~10×
+fewer tokens and 2.1× fewer tool calls at 83% answer quality against 92% for
+file exploration. **It is the only item here with a measurable cost effect on day
+one**, and it pays in two places:
+
+1. **Dispatched agents** stop grepping the repo → fewer input tokens per session.
+2. **The planner** gets real dependency structure instead of inferring it from a
+   spec → better waves, less file contention, fewer wasted sessions.
+
+### 0.2 Why experience memory is the durable win
+
+It changes plan *quality*, not cost, and it compounds — every run makes the next
+plan better. It is also the part no vendor sells, because no vendor has dispatch
+outcomes. Slower to show value, and the reason anyone pays later.
+
+### 0.3 What we are explicitly NOT doing
+
+- **Not building a graph engine.** Graphiti is Apache 2.0 and maintained by a
+  company that runs its product on it.
+- **Not building code parsing.** 158 languages is somebody else's problem.
+- **Not importing Synaptic Wiki or the Template KE.** Take the patterns —
+  versioned-asset distribution, deterministic mining, retrieval diversity — not
+  the code. They are tuned to other domains.
+- **Not replacing the Wiki.** It writes documentation for humans; the graph
+  answers questions for agents. Different jobs, no overlap.
+
+### 0.4 The one decision that gates V1.4
+
+Both code-structure candidates carry a runtime cost we have not accepted yet:
+Graphify is Python, Graphiti is Python, `codebase-memory-mcp` ships a **native
+binary with no language runtime**. For an npm-distributed CLI that difference
+matters more than any capability gap.
+
+**Either** the OSS cockpit tolerates a Python dependency (docker compose is the
+documented path), **or** local stays on a lighter substrate and Python-backed
+graphs are hosted-tier only. Until that is answered, V1.4 should trial
+`codebase-memory-mcp` first — it is the one that costs the user nothing to
+install.
+
+---
+
 ## 1. We have four memory constructs, not two
 
 This is the finding that reframes the question.

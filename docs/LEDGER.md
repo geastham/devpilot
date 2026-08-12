@@ -91,6 +91,7 @@ Compiles, tests pass, nobody has watched it work.
 | **Retire MemPalace's local shim?** | Graphiti now backs the same port. Keeping both means maintaining two, and the shim is the one that was broken | TRD 18 §2 |
 | **Cross-org learning consent** | TRD 15 §4.3 currently forbids it; pattern extraction requires it | TRD 15 §4.3 |
 | **Account linking / domain restriction** for SSO | Defaulted rather than decided | `devpilot-website/docs/SSO.md` |
+| **Does the OSS cockpit tolerate a Python runtime?** | Gates the V1.4 pick — `codebase-memory-mcp` ships a native binary, Graphify and Graphiti need Python | `MEMORY-LANDSCAPE.md` §0.4 |
 
 ---
 
