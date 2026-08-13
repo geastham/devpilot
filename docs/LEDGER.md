@@ -20,6 +20,7 @@ this wins.
 | **V1.2** | Close the memory loop | 🟢 **Built via Graphiti** — TRD 18 | Live-server verification |
 | **V1.4** | Code-structure graph for planner context | 🔴 Not started — **pick made: `codebase-memory-mcp`** | Nothing; ready to build |
 | V1.5 | Token-reduction stack (output compression + anti-grep hooks) | 🔴 New — not started | Locate the tools; one was unverifiable |
+| V1.6 | `falkordblite` TS store adapter — Python-free default memory | 🔴 New — TRD 19 | Nothing |
 | **V1.3** | Benchmarks into CI | 🔴 Not started | Needs an API key in CI |
 | V2 | Open the arena | ⚪ Blocked | All of V1 |
 | V3 | Pattern extraction → planner + content | ⚪ Blocked | V1.2, V2 consent model |
@@ -92,7 +93,8 @@ Compiles, tests pass, nobody has watched it work.
 | **Retire MemPalace's local shim?** | Graphiti now backs the same port. Keeping both means maintaining two, and the shim is the one that was broken | TRD 18 §2 |
 | **Cross-org learning consent** | TRD 15 §4.3 currently forbids it; pattern extraction requires it | TRD 15 §4.3 |
 | **Account linking / domain restriction** for SSO | Defaulted rather than decided | `devpilot-website/docs/SSO.md` |
-| **Does the OSS cockpit tolerate a Python runtime?** | Gates the V1.4 pick — `codebase-memory-mcp` ships a native binary, Graphify and Graphiti need Python | `MEMORY-LANDSCAPE.md` §0.4 |
+| ~~**Does the OSS cockpit tolerate a Python runtime?**~~ | **Resolved** — V1.4's pick is a native binary, and TRD 19 makes the memory store an embedded TS binding. Python is now opt-in for Graphiti only | TRD 19 §2 |
+| **Retention policy for hosted memory assets** | Blobs grow; nothing decides what ages out | TRD 19 §4 |
 
 ---
 
