@@ -87,5 +87,8 @@
     "database",
     "drizzle",
     "linear"
-  ]
+  ],
+  "optionalDependencies": {
+    "falkordblite": "^0.3.0"
+  }
 }

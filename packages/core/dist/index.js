@@ -7753,6 +7753,7 @@ var mempalace_exports = {};
 __export(mempalace_exports, {
   DisabledClient: () => DisabledClient,
   DualFeedSessionHook: () => DualFeedSessionHook,
+  FalkorLiteClient: () => FalkorLiteClient,
   GraphitiClient: () => GraphitiClient,
   LocalShimClient: () => LocalShimClient,
   McpAdapterClient: () => McpAdapterClient,
@@ -7761,7 +7762,9 @@ __export(mempalace_exports, {
   createMemPalaceClient: () => createMemPalaceClient,
   createMemPalaceService: () => createMemPalaceService,
   createWikiPalaceBridge: () => createWikiPalaceBridge,
-  estimateTokens: () => estimateTokens
+  estimateTokens: () => estimateTokens,
+  falkorLitePlatformSupported: () => falkorLitePlatformSupported,
+  falkorLitePreflight: () => falkorLitePreflight
 });
 
 // src/mempalace/client.ts
@@ -8028,6 +8031,274 @@ function extractNodes(res) {
   if (Array.isArray(res)) return res;
   const r = res;
   return r.nodes ?? [];
+}
+
+// src/mempalace/falkordblite-client.ts
+var SUPPORTED = /* @__PURE__ */ new Set(["linux-x64", "darwin-arm64"]);
+function falkorLitePlatformSupported(platform = process.platform, arch = process.arch) {
+  const key = `${platform === "win32" ? "win32" : platform}-${arch}`;
+  return SUPPORTED.has(key);
+}
+async function falkorLitePreflight() {
+  if (!falkorLitePlatformSupported()) {
+    return {
+      ok: false,
+      reason: `falkordblite publishes no binary for ${process.platform}-${process.arch}`,
+      remedy: "Use DEVPILOT_MEMORY_MODE=disabled, or run the hosted memory tier. Windows requires WSL2."
+    };
+  }
+  try {
+    const mod = await import("falkordblite");
+    const found = mod.BinaryManager?.findInSystemPath?.("redis-server");
+    if (!found) {
+      return {
+        ok: false,
+        reason: "redis-server was not found on PATH; falkordblite does not ship one",
+        remedy: "Install it \u2014 `brew install redis` or `apt install redis-server`."
+      };
+    }
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `falkordblite is not installed: ${error instanceof Error ? error.message : String(error)}`,
+      remedy: "It is an optional dependency; reinstall on a supported platform."
+    };
+  }
+}
+var FalkorLiteClient = class {
+  constructor(config = {}) {
+    this.config = config;
+    this.mode = "local";
+    this.db = null;
+    this.opening = null;
+  }
+  log(line) {
+    this.config.onLog?.(`[falkor-lite] ${line}`);
+  }
+  /**
+   * Open lazily and once.
+   *
+   * `falkordblite` is an OPTIONAL dependency, so the import is dynamic — a
+   * platform without a published binary must not break `npm i -g`, and must not
+   * break a conductor who never turns memory on.
+   */
+  async handle() {
+    if (this.db) return this.db;
+    if (this.opening) return this.opening;
+    this.opening = (async () => {
+      const pre = await falkorLitePreflight();
+      if (!pre.ok) {
+        this.log(`unavailable \u2014 ${pre.reason}. ${pre.remedy}`);
+        return null;
+      }
+      try {
+        const mod = await import("falkordblite");
+        this.db = await mod.FalkorDB.open({ path: this.config.path });
+        return this.db;
+      } catch (error) {
+        this.log(`open failed: ${error instanceof Error ? error.message : String(error)}`);
+        return null;
+      }
+    })();
+    return this.opening;
+  }
+  /**
+   * Run one Cypher statement. Never throws — memory improves a plan, it must
+   * never gate one, so a failure degrades to `null` exactly as the Graphiti
+   * client does.
+   */
+  async run(wingSlug, cypher, params = {}) {
+    const db2 = await this.handle();
+    if (!db2) return null;
+    try {
+      const graph = db2.selectGraph(`wing_${wingSlug.replace(/[^a-zA-Z0-9_]/g, "_")}`);
+      const res = await graph.query(cypher, { params });
+      return res?.data ?? [];
+    } catch (error) {
+      this.log(`query failed: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+  async close() {
+    if (this.db) {
+      await this.db.close().catch(() => void 0);
+      this.db = null;
+      this.opening = null;
+    }
+  }
+  async ensureWing(slug, name, repo) {
+    return { id: slug, slug, name: name ?? slug, wingType: "project", repo };
+  }
+  async addDrawer(input) {
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const rows = await this.run(
+      input.wingSlug,
+      `MERGE (r:Room {slug: $room})
+       CREATE (r)-[f:FACT {
+         label: $label, content: $content, memoryType: $type,
+         salience: $salience, validFrom: $now, validUntil: null
+       }]->(d:Record {label: $label})
+       RETURN id(f) AS fid`,
+      {
+        room: input.roomSlug,
+        label: input.label,
+        content: input.content,
+        type: input.memoryType,
+        salience: input.salience ?? 0.5,
+        now
+      }
+    );
+    return {
+      drawerId: rows && rows.length > 0 ? String(readCell(rows[0], 0) ?? input.label) : input.label,
+      created: rows !== null,
+      roomId: input.roomSlug,
+      wingId: input.wingSlug
+    };
+  }
+  async search(input) {
+    const wing = input.wingSlug ?? "devpilot";
+    const rows = await this.run(
+      wing,
+      // Superseded facts are excluded from recall but remain on disk — that is
+      // the point of setting validUntil rather than deleting.
+      `MATCH (r:Room)-[f:FACT]->(d:Record)
+       WHERE f.validUntil IS NULL
+         AND (toLower(f.content) CONTAINS toLower($q) OR toLower(f.label) CONTAINS toLower($q))
+       RETURN f.label, f.content, r.slug, f.memoryType, f.salience
+       ORDER BY f.salience DESC
+       LIMIT $limit`,
+      { q: input.query, limit: input.limit ?? 10 }
+    );
+    if (!rows) return { hits: [], totalScanned: 0 };
+    return {
+      hits: rows.map((row, i) => ({
+        drawerId: `${wing}:${i}`,
+        roomSlug: String(readCell(row, 2) ?? "main"),
+        wingSlug: wing,
+        label: String(readCell(row, 0) ?? ""),
+        snippet: String(readCell(row, 1) ?? ""),
+        score: 1 - i * 0.01,
+        memoryType: readCell(row, 3) ?? "fact"
+      })),
+      totalScanned: rows.length
+    };
+  }
+  async wakeUp(input) {
+    const rows = await this.run(
+      input.wingSlug,
+      `MATCH ()-[f:FACT]->()
+       WHERE f.validUntil IS NULL
+       RETURN f.content ORDER BY f.salience DESC LIMIT 5`
+    );
+    const criticalFacts = (rows ?? []).map((r) => String(readCell(r, 0) ?? "")).filter(Boolean);
+    return {
+      identity: `Memory for ${input.wingSlug}`,
+      criticalFacts,
+      tokenEstimate: Math.ceil(criticalFacts.join(" ").length / 4)
+    };
+  }
+  /** L2 recall. One synthesised closet, same contract as the Graphiti client. */
+  async recall(input) {
+    const found = await this.search({
+      query: input.topic,
+      wingSlug: input.wingSlug,
+      limit: input.limit ?? 3
+    });
+    if (found.hits.length === 0) {
+      return { topic: input.topic, closets: [], tokenEstimate: 0 };
+    }
+    const summary = found.hits.map((h) => h.snippet).join("\n");
+    const tokenCost = Math.ceil(summary.length / 4);
+    return {
+      topic: input.topic,
+      closets: [
+        {
+          id: `falkor:${input.topic}`,
+          roomId: input.wingSlug ?? "main",
+          summary,
+          drawerIds: found.hits.map((h) => h.drawerId),
+          tier: 2,
+          tokenCost
+        }
+      ],
+      tokenEstimate: tokenCost
+    };
+  }
+  async kgAdd(input) {
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const rows = await this.run(
+      input.wingSlug,
+      `MERGE (s:Entity {name: $subject})
+       MERGE (o:Entity {name: $object})
+       CREATE (s)-[t:TRIPLE {predicate: $predicate, validFrom: $now, validUntil: null}]->(o)
+       RETURN id(t)`,
+      { subject: input.subject, object: input.object, predicate: input.predicate, now }
+    );
+    return {
+      tripleId: rows && rows.length > 0 ? String(readCell(rows[0], 0) ?? "") : "",
+      contradictions: []
+    };
+  }
+  async kgQuery(input) {
+    const rows = await this.run(
+      input.wingSlug,
+      `MATCH (s:Entity)-[t:TRIPLE]->(o:Entity)
+       WHERE ($subject IS NULL OR s.name = $subject)
+         AND ($predicate IS NULL OR t.predicate = $predicate)
+         AND ($currentOnly = false OR t.validUntil IS NULL)
+       RETURN s.name, t.predicate, o.name, t.validFrom, t.validUntil`,
+      {
+        subject: input.subject ?? null,
+        predicate: input.predicate ?? null,
+        currentOnly: input.currentOnly ?? false
+      }
+    );
+    return (rows ?? []).map(
+      (r) => ({
+        id: "",
+        wingId: input.wingSlug,
+        subject: String(readCell(r, 0) ?? ""),
+        predicate: String(readCell(r, 1) ?? ""),
+        object: String(readCell(r, 2) ?? ""),
+        confidence: 1,
+        validFrom: readCell(r, 3) ? new Date(String(readCell(r, 3))) : /* @__PURE__ */ new Date(),
+        validUntil: readCell(r, 4) ? new Date(String(readCell(r, 4))) : null
+      })
+    );
+  }
+  /**
+   * Supersede rather than delete — the capability the port declared and the
+   * SQLite shim never provided. A fact that stopped being true is still a fact
+   * about what we used to believe.
+   */
+  async kgInvalidate(input) {
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const rows = await this.run(
+      input.wingSlug,
+      `MATCH (s:Entity)-[t:TRIPLE]->()
+       WHERE s.name = $subject AND t.predicate = $predicate AND t.validUntil IS NULL
+       SET t.validUntil = $now
+       RETURN count(t)`,
+      { subject: input.subject, predicate: input.predicate, now }
+    );
+    const count = rows && rows.length > 0 ? Number(readCell(rows[0], 0) ?? 0) : 0;
+    return { invalidatedCount: count };
+  }
+  async listWings() {
+    return [];
+  }
+  async listRooms(_wingSlug) {
+    return [];
+  }
+};
+function readCell(row, index2) {
+  if (Array.isArray(row)) return row[index2];
+  if (row && typeof row === "object") {
+    const values = Object.values(row);
+    return values[index2];
+  }
+  return void 0;
 }
 
 // src/mempalace/client.ts
@@ -8421,6 +8692,11 @@ function createMemPalaceClient(config, mcpTransport) {
   switch (config.mode) {
     case "local":
       return new LocalShimClient();
+    case "falkor-lite":
+      if (!falkorLitePlatformSupported()) {
+        return new DisabledClient();
+      }
+      return new FalkorLiteClient({ path: config.dataDir });
     case "graphiti":
       if (!config.mcpEndpoint) {
         throw new Error(

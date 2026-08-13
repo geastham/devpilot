@@ -20,7 +20,7 @@ this wins.
 | **V1.2** | Close the memory loop | 🟢 **Built via Graphiti** — TRD 18 | Live-server verification |
 | **V1.4** | Code-structure graph for planner context | 🔴 Not started — **pick made: `codebase-memory-mcp`** | Nothing; ready to build |
 | V1.5 | Token-reduction stack (output compression + anti-grep hooks) | 🔴 New — not started | Locate the tools; one was unverifiable |
-| V1.6 | `falkordblite` TS store adapter — Python-free default memory | 🔴 New — TRD 19 | Nothing |
+| V1.6 | `falkordblite` TS store adapter | 🟡 **Built, NOT validated** — TRD 19 | A machine with an arch-matching `redis-server` |
 | **V1.3** | Benchmarks into CI | 🔴 Not started | Needs an API key in CI |
 | V2 | Open the arena | ⚪ Blocked | All of V1 |
 | V3 | Pattern extraction → planner + content | ⚪ Blocked | V1.2, V2 consent model |
@@ -55,6 +55,12 @@ Compiles, tests pass, nobody has watched it work.
   `lg`/`xl` and have never been seen. Chrome's `resize_window` reports success
   while `window.innerWidth` never moves.
 - **SSO against live providers.** Nothing has signed in with GitHub or Google.
+- **The `falkordblite` embedded engine.** Adapter built, typechecked, wired, and
+  its gate/degradation paths tested — but **the engine has never started here**.
+  This machine's only `redis-server` is x86_64 while the FalkorDB module is
+  arm64, so `dlopen` refuses it. Write→recall through the real engine is
+  **unproven**; installing an arm64 redis-server would modify the dev machine and
+  was not done unprompted.
 
 ## Known broken
 
@@ -120,6 +126,11 @@ stands. Kuzu confirmed archived. GrafeoDB added to the watchlist.
 
 Newest first. One line each — the detail belongs in the docs this points at.
 
+- **2026-08-12** — V1.6 built: `falkordblite` TS adapter, preflight diagnostics,
+  platform gate. **Found that `falkordblite` does not ship `redis-server`** —
+  TRD 19's "zero install" premise was false and is corrected. Engine unvalidated
+  on this machine (arch mismatch). Also fixed a tsup bug: bundling the CJS
+  package broke its internal `require`.
 - **2026-08-12** — External substrate research returned and **verified against
   the GitHub API**: `codebase-memory-mcp` confirmed for V1.4, Kuzu confirmed
   archived, GrafeoDB found. Its Problem B recommendation (`graphzep`) was false —

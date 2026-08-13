@@ -1,8 +1,8 @@
 export { ActivityEvent, CompletedTask, ConductorScore, ConflictingFile, Database, DatabaseConfig, HorizonItem, InFlightFile, NewActivityEvent, NewCompletedTask, NewConductorScore, NewConflictingFile, NewHorizonItem, NewInFlightFile, NewPlan, NewRufloSession, NewScoreHistory, NewTask, NewTouchedFile, NewWorkstream, Plan, PostgresDatabase, RufloSession, SQLiteDatabase, ScoreHistory, Task, TouchedFile, Workstream, activityEvents, closeDatabase, completedTasks, completedTasksRelations, conductorScores, conductorScoresRelations, conflictingFiles, conflictingFilesRelations, createDatabase, databaseConfigSchema, getDatabase, getDatabaseConfig, horizonItems, horizonItemsRelations, inFlightFiles, inFlightFilesRelations, initDatabase, palaceClosets, palaceClosetsRelations, palaceDiary, palaceDrawers, palaceDrawersRelations, palaceHalls, palaceKgTriples, palaceRooms, palaceRoomsRelations, palaceTunnels, palaceWings, palaceWingsRelations, plans, plansRelations, resetDatabase, rufloSessions, rufloSessionsRelations, scoreHistory, scoreHistoryRelations, tasks, tasksRelations, touchedFiles, touchedFilesRelations, wikiArticles, wikiArticlesRelations, wikiLog, wikiLogRelations, wikiSources, wikiSourcesRelations, workstreams, workstreamsRelations } from './db/index.mjs';
 export { C as Complexity, D as DependencyEdgeType, E as EventType, F as FileStatus, M as Model, O as OrchestratorMode, S as SessionStatus, b as WavePlanStatus, c as WaveStatus, d as WaveTaskStatus, W as WikiArticleStatus, e as WikiLogAction, a as WikiSourceType, Z as Zone, f as complexityValues, g as dependencyEdgeTypeValues, h as eventTypeValues, i as fileStatusValues, m as modelValues, o as orchestratorModeValues, s as sessionStatusValues, w as wavePlanStatusValues, j as waveStatusValues, k as waveTaskStatusValues, l as wikiArticleStatusValues, n as wikiLogActionValues, p as wikiSourceTypeValues, z as zoneValues } from './enums-CbVZMWqb.mjs';
 export { D as DependencyEdge, N as NewDependencyEdge, a as NewWave, b as NewWavePlan, c as NewWavePlanMetric, d as NewWaveTask, W as Wave, e as WavePlan, f as WavePlanMetric, g as WaveTask, h as dependencyEdges, i as dependencyEdgesRelations, w as wavePlanMetrics, j as wavePlanMetricsRelations, k as wavePlans, l as wavePlansRelations, m as waveTasks, n as waveTasksRelations, o as waves, p as wavesRelations } from './wave-planner-BYl3JIm1.mjs';
-import { M as MemPalaceService, a as MemPalaceConfig, b as MemPalaceClient, W as Wing, A as AddDrawerInput, c as AddDrawerResult, S as SearchInput, d as SearchResult, e as WakeUpInput, f as WakeUpResult, R as RecallInput, g as RecallResult, K as KgAddInput, h as KgContradiction, i as KgQueryInput, j as KgTriple, k as KgInvalidateInput, l as Room, C as Closet, D as DisabledClient, m as Drawer, n as DrawerSource, H as Hall, o as HallRelation, L as LocalShimClient, p as McpAdapterClient, q as McpTransport, r as MemPalaceMode, s as MemoryTier, t as MemoryType, P as PalaceContextBlock, u as SearchHit, T as Tunnel, v as WingType, w as createMemPalaceClient, x as createMemPalaceService, y as estimateTokens } from './index-CNkZvN_8.mjs';
-export { z as wavePlanner } from './index-CNkZvN_8.mjs';
+import { M as MemPalaceService, a as MemPalaceConfig, b as MemPalaceClient, W as Wing, A as AddDrawerInput, c as AddDrawerResult, S as SearchInput, d as SearchResult, e as WakeUpInput, f as WakeUpResult, R as RecallInput, g as RecallResult, K as KgAddInput, h as KgContradiction, i as KgQueryInput, j as KgTriple, k as KgInvalidateInput, l as Room, C as Closet, D as DisabledClient, m as Drawer, n as DrawerSource, H as Hall, o as HallRelation, L as LocalShimClient, p as McpAdapterClient, q as McpTransport, r as MemPalaceMode, s as MemoryTier, t as MemoryType, P as PalaceContextBlock, u as SearchHit, T as Tunnel, v as WingType, w as createMemPalaceClient, x as createMemPalaceService, y as estimateTokens } from './index-BTj1XiKU.mjs';
+export { z as wavePlanner } from './index-BTj1XiKU.mjs';
 import { LinearClient } from '@linear/sdk';
 export { i as orchestrator } from './index-Bu4o08xG.mjs';
 import { W as WikiCompiler, I as IngestResult, a as WikiCompilerConfig, b as WikiSessionHook } from './index-DHfO17Iq.mjs';
@@ -448,6 +448,113 @@ declare class GraphitiClient implements MemPalaceClient {
     healthy(): Promise<boolean>;
 }
 
+/**
+ * Embedded FalkorDB Lite memory — TRD 19.
+ *
+ * The Python-free path. `falkordblite` launches the FalkorDB engine in-process
+ * from Node, so there is no database server to operate and no Python.
+ *
+ * IT IS NOT ZERO-INSTALL, and TRD 19 v0.1 was wrong to imply it. `falkordblite`
+ * downloads the FalkorDB *module* (a `.so`) but explicitly does NOT ship or
+ * download `redis-server` — its own API documents "verifies redis-server is
+ * reachable (user path → bin/ → system PATH)" and "resolve redis-server path
+ * (no download)". The user must already have one, **matching their
+ * architecture**: an arm64 module cannot load into an x86_64 redis-server, which
+ * is exactly what an Intel-Homebrew install on Apple Silicon produces.
+ *
+ * So this trades a Python runtime for a redis-server binary. That is a better
+ * trade — one ubiquitous binary rather than an interpreter and a virtualenv —
+ * but it is a trade, not an elimination, and `preflight()` exists so a user
+ * learns which piece is missing instead of watching memory silently do nothing.
+ *
+ * WHY THIS EXISTS ALONGSIDE THE GRAPHITI CLIENT. TRD 18 adopted Graphiti and
+ * that stands — it is the better framework, and it stays the recommended tier
+ * for entity resolution, LLM extraction and hybrid search. What it cannot be is
+ * the *floor*: Graphiti is Python, and a Python install as the price of any
+ * memory at all is too high for an npm-distributed CLI. Both clients speak the
+ * same port and write the same shape, so moving between them is configuration.
+ *
+ * The fact model is deliberately small, because our records are already
+ * structured (TRD 18 §4): a subject, a predicate, an object, and a validity
+ * interval. Bi-temporality is a data-modelling choice, not something only a
+ * framework can provide — `validUntil` is set rather than the edge deleted, so
+ * "this stopped being true" survives as history.
+ */
+
+/**
+ * Can this machine run the embedded engine?
+ *
+ * Called before construction so an unsupported platform degrades to `disabled`
+ * with a message rather than throwing during install or first write. Windows
+ * needs WSL2; Intel Macs and Linux arm64 have no published binary.
+ */
+declare function falkorLitePlatformSupported(platform?: string, arch?: string): boolean;
+type PreflightResult = {
+    ok: true;
+} | {
+    ok: false;
+    reason: string;
+    remedy: string;
+};
+/**
+ * Why can this machine not run the embedded engine?
+ *
+ * Separate from `falkorLitePlatformSupported` because the two failures need
+ * different advice: an unsupported platform cannot be fixed, a missing
+ * redis-server is one `brew install redis` away, and an architecture mismatch
+ * looks like neither until you read a `dlopen` error.
+ */
+declare function falkorLitePreflight(): Promise<PreflightResult>;
+interface FalkorLiteConfig {
+    /** Directory for the persisted snapshot. Omit for ephemeral (tests). */
+    path?: string;
+    onLog?: (line: string) => void;
+}
+declare class FalkorLiteClient implements MemPalaceClient {
+    private readonly config;
+    readonly mode: "local";
+    private db;
+    private opening;
+    constructor(config?: FalkorLiteConfig);
+    private log;
+    /**
+     * Open lazily and once.
+     *
+     * `falkordblite` is an OPTIONAL dependency, so the import is dynamic — a
+     * platform without a published binary must not break `npm i -g`, and must not
+     * break a conductor who never turns memory on.
+     */
+    private handle;
+    /**
+     * Run one Cypher statement. Never throws — memory improves a plan, it must
+     * never gate one, so a failure degrades to `null` exactly as the Graphiti
+     * client does.
+     */
+    private run;
+    close(): Promise<void>;
+    ensureWing(slug: string, name?: string, repo?: string): Promise<Wing>;
+    addDrawer(input: AddDrawerInput): Promise<AddDrawerResult>;
+    search(input: SearchInput): Promise<SearchResult>;
+    wakeUp(input: WakeUpInput): Promise<WakeUpResult>;
+    /** L2 recall. One synthesised closet, same contract as the Graphiti client. */
+    recall(input: RecallInput): Promise<RecallResult>;
+    kgAdd(input: KgAddInput): Promise<{
+        tripleId: string;
+        contradictions: KgContradiction[];
+    }>;
+    kgQuery(input: KgQueryInput): Promise<KgTriple[]>;
+    /**
+     * Supersede rather than delete — the capability the port declared and the
+     * SQLite shim never provided. A fact that stopped being true is still a fact
+     * about what we used to believe.
+     */
+    kgInvalidate(input: KgInvalidateInput): Promise<{
+        invalidatedCount: number;
+    }>;
+    listWings(): Promise<Wing[]>;
+    listRooms(_wingSlug: string): Promise<Room[]>;
+}
+
 declare const index_AddDrawerInput: typeof AddDrawerInput;
 declare const index_AddDrawerResult: typeof AddDrawerResult;
 declare const index_Closet: typeof Closet;
@@ -457,6 +564,9 @@ declare const index_DrawerSource: typeof DrawerSource;
 type index_DualFeedHookConfig = DualFeedHookConfig;
 type index_DualFeedSessionHook = DualFeedSessionHook;
 declare const index_DualFeedSessionHook: typeof DualFeedSessionHook;
+type index_FalkorLiteClient = FalkorLiteClient;
+declare const index_FalkorLiteClient: typeof FalkorLiteClient;
+type index_FalkorLiteConfig = FalkorLiteConfig;
 type index_GraphitiClient = GraphitiClient;
 declare const index_GraphitiClient: typeof GraphitiClient;
 type index_GraphitiConfig = GraphitiConfig;
@@ -477,6 +587,7 @@ declare const index_MemPalaceService: typeof MemPalaceService;
 declare const index_MemoryTier: typeof MemoryTier;
 declare const index_MemoryType: typeof MemoryType;
 declare const index_PalaceContextBlock: typeof PalaceContextBlock;
+type index_PreflightResult = PreflightResult;
 declare const index_RecallInput: typeof RecallInput;
 declare const index_RecallResult: typeof RecallResult;
 declare const index_Room: typeof Room;
@@ -495,8 +606,10 @@ declare const index_createMemPalaceClient: typeof createMemPalaceClient;
 declare const index_createMemPalaceService: typeof createMemPalaceService;
 declare const index_createWikiPalaceBridge: typeof createWikiPalaceBridge;
 declare const index_estimateTokens: typeof estimateTokens;
+declare const index_falkorLitePlatformSupported: typeof falkorLitePlatformSupported;
+declare const index_falkorLitePreflight: typeof falkorLitePreflight;
 declare namespace index {
-  export { index_AddDrawerInput as AddDrawerInput, index_AddDrawerResult as AddDrawerResult, index_Closet as Closet, index_DisabledClient as DisabledClient, index_Drawer as Drawer, index_DrawerSource as DrawerSource, type index_DualFeedHookConfig as DualFeedHookConfig, index_DualFeedSessionHook as DualFeedSessionHook, index_GraphitiClient as GraphitiClient, type index_GraphitiConfig as GraphitiConfig, index_Hall as Hall, index_HallRelation as HallRelation, index_KgAddInput as KgAddInput, index_KgContradiction as KgContradiction, index_KgInvalidateInput as KgInvalidateInput, index_KgQueryInput as KgQueryInput, index_KgTriple as KgTriple, index_LocalShimClient as LocalShimClient, index_McpAdapterClient as McpAdapterClient, index_McpTransport as McpTransport, index_MemPalaceClient as MemPalaceClient, index_MemPalaceConfig as MemPalaceConfig, index_MemPalaceMode as MemPalaceMode, index_MemPalaceService as MemPalaceService, index_MemoryTier as MemoryTier, index_MemoryType as MemoryType, index_PalaceContextBlock as PalaceContextBlock, index_RecallInput as RecallInput, index_RecallResult as RecallResult, index_Room as Room, index_SearchHit as SearchHit, index_SearchInput as SearchInput, index_SearchResult as SearchResult, index_Tunnel as Tunnel, index_WakeUpInput as WakeUpInput, index_WakeUpResult as WakeUpResult, type index_WikiBridgeConfig as WikiBridgeConfig, index_WikiPalaceBridge as WikiPalaceBridge, index_Wing as Wing, index_WingType as WingType, index_createMemPalaceClient as createMemPalaceClient, index_createMemPalaceService as createMemPalaceService, index_createWikiPalaceBridge as createWikiPalaceBridge, index_estimateTokens as estimateTokens };
+  export { index_AddDrawerInput as AddDrawerInput, index_AddDrawerResult as AddDrawerResult, index_Closet as Closet, index_DisabledClient as DisabledClient, index_Drawer as Drawer, index_DrawerSource as DrawerSource, type index_DualFeedHookConfig as DualFeedHookConfig, index_DualFeedSessionHook as DualFeedSessionHook, index_FalkorLiteClient as FalkorLiteClient, type index_FalkorLiteConfig as FalkorLiteConfig, index_GraphitiClient as GraphitiClient, type index_GraphitiConfig as GraphitiConfig, index_Hall as Hall, index_HallRelation as HallRelation, index_KgAddInput as KgAddInput, index_KgContradiction as KgContradiction, index_KgInvalidateInput as KgInvalidateInput, index_KgQueryInput as KgQueryInput, index_KgTriple as KgTriple, index_LocalShimClient as LocalShimClient, index_McpAdapterClient as McpAdapterClient, index_McpTransport as McpTransport, index_MemPalaceClient as MemPalaceClient, index_MemPalaceConfig as MemPalaceConfig, index_MemPalaceMode as MemPalaceMode, index_MemPalaceService as MemPalaceService, index_MemoryTier as MemoryTier, index_MemoryType as MemoryType, index_PalaceContextBlock as PalaceContextBlock, type index_PreflightResult as PreflightResult, index_RecallInput as RecallInput, index_RecallResult as RecallResult, index_Room as Room, index_SearchHit as SearchHit, index_SearchInput as SearchInput, index_SearchResult as SearchResult, index_Tunnel as Tunnel, index_WakeUpInput as WakeUpInput, index_WakeUpResult as WakeUpResult, type index_WikiBridgeConfig as WikiBridgeConfig, index_WikiPalaceBridge as WikiPalaceBridge, index_Wing as Wing, index_WingType as WingType, index_createMemPalaceClient as createMemPalaceClient, index_createMemPalaceService as createMemPalaceService, index_createWikiPalaceBridge as createWikiPalaceBridge, index_estimateTokens as estimateTokens, index_falkorLitePlatformSupported as falkorLitePlatformSupported, index_falkorLitePreflight as falkorLitePreflight };
 }
 
 declare const VERSION = "0.1.0";

@@ -1,6 +1,6 @@
-import { E as EventType } from './enums-CbVZMWqb.mjs';
-import { g as WaveTask } from './wave-planner-BYl3JIm1.mjs';
-import { e as OrchestratorService } from './service-CmLM9G-i.mjs';
+import { E as EventType } from './enums-CbVZMWqb.js';
+import { g as WaveTask } from './wave-planner-BYl3JIm1.js';
+import { e as OrchestratorService } from './service-CmLM9G-i.js';
 
 interface ParsedWavePlan {
     waves: ParsedWave[];
@@ -783,7 +783,7 @@ interface RecallResult {
     tokenEstimate: number;
 }
 /** MemPalace client mode. */
-type MemPalaceMode = 'local' | 'mcp' | 'graphiti' | 'disabled';
+type MemPalaceMode = 'local' | 'falkor-lite' | 'mcp' | 'graphiti' | 'disabled';
 interface MemPalaceConfig {
     /** Active mode. "local" uses the SQLite shim, "mcp" uses an external MemPalace MCP server, "disabled" is a no-op. */
     mode: MemPalaceMode;
@@ -795,6 +795,8 @@ interface MemPalaceConfig {
     mcpEndpoint?: string;
     /** Bearer token for a Graphiti server behind auth (hosted tier). */
     mcpApiKey?: string;
+    /** Snapshot directory for mode=falkor-lite. Omit for ephemeral. */
+    dataDir?: string;
     /**
      * Graphiti write path. `deterministic` uses add_triplet and needs no LLM key
      * on the server; `llm` uses add_memory and does. Defaults to deterministic —

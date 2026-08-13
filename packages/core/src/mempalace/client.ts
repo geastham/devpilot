@@ -11,6 +11,7 @@ import {
   palaceWings,
 } from '../db/schema/mempalace';
 import { GraphitiClient } from './graphiti-client';
+import { FalkorLiteClient, falkorLitePlatformSupported } from './falkordblite-client';
 import type {
   AddDrawerInput,
   AddDrawerResult,
@@ -753,6 +754,14 @@ export function createMemPalaceClient(
   switch (config.mode) {
     case 'local':
       return new LocalShimClient();
+    case 'falkor-lite':
+      // Embedded engine, no server, no Python (TRD 19 §2). Degrades to a no-op
+      // on a platform with no published binary rather than throwing — an
+      // unsupported machine must still be able to run DevPilot.
+      if (!falkorLitePlatformSupported()) {
+        return new DisabledClient();
+      }
+      return new FalkorLiteClient({ path: config.dataDir });
     case 'graphiti':
       // Graphiti speaks its own vocabulary, so it implements MemPalaceClient
       // directly rather than sitting behind McpAdapterClient — which expects a

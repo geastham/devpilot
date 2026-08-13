@@ -33,3 +33,11 @@ export { DualFeedSessionHook } from './session-hook';
 export type { DualFeedHookConfig } from './session-hook';
 
 export { GraphitiClient, type GraphitiConfig } from './graphiti-client';
+
+export {
+  FalkorLiteClient,
+  falkorLitePlatformSupported,
+  falkorLitePreflight,
+  type PreflightResult,
+  type FalkorLiteConfig,
+} from './falkordblite-client';

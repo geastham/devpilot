@@ -1,5 +1,11 @@
 # TRD 19 — Memory deployment: embedded everywhere, versioned blob for hosted
-### v0.1 · August 2026 · Status: DESIGN — one decision recorded, one deferred
+### v0.2 · August 2026 · Status: BUILT — with a corrected premise
+
+> **v0.2 correction.** v0.1 claimed the embedded path was "Python-free by
+> default" with "no extra install". **The second half is false.** `falkordblite`
+> downloads the FalkorDB module but does NOT ship or download `redis-server` —
+> its own API documents *"verifies redis-server is reachable (user path → bin/ →
+> system PATH)"* and *"resolve redis-server path (no download)"*. See §2.2.
 
 ---
 
@@ -31,7 +37,9 @@ devpilot CLI (Node)
   optional: Graphiti MCP server (Python) ──▶ the SAME FalkorDB Lite store
 ```
 
-**Default path needs no Python and no server.** We already decided writes are
+**Default path needs no Python and no database server to operate — but it does
+need a `redis-server` binary present.** See §2.2 before quoting this section.
+We already decided writes are
 deterministic triplets rather than LLM extraction (TRD 18 §4) — our run records
 are structured, the plan *is* the record. A subject/predicate/object fact with
 `valid_at` / `invalid_at` is a data-model choice, not something only Graphiti can
@@ -45,6 +53,31 @@ conductor who wants those installs it; nobody is blocked without it.
 > its tests and the port are unchanged, and Graphiti remains the framework we
 > recommend. What changes is that it is no longer the *floor* — because a Python
 > install as the price of any memory at all is too high for an npm CLI.
+
+### 2.2 What it actually costs to install — corrected
+
+`falkordblite` embeds the *engine*, not the *runtime it needs*:
+
+| Piece | Who provides it |
+|---|---|
+| FalkorDB module (`.so`) | Downloaded automatically on first use (~30 MB) |
+| **`redis-server` binary** | **The user must already have it.** Never downloaded |
+
+And it must match the machine's architecture. An arm64 module cannot load into
+an x86_64 `redis-server` — which is precisely what an Intel-Homebrew install on
+Apple Silicon leaves behind, and the failure surfaces as a `dlopen`
+"incompatible architecture" error inside a server log, not as anything a user
+would connect to memory.
+
+**So this trades a Python runtime for a redis-server binary.** Still the better
+trade — one ubiquitous binary rather than an interpreter plus a virtualenv, and
+`brew install redis` / `apt install redis-server` is a smaller ask than managing
+Python for a Node CLI. But it is a trade, not an elimination, and any messaging
+that says "zero install" is wrong.
+
+`falkorLitePreflight()` exists for this: it distinguishes *unsupported platform*
+(unfixable), *missing redis-server* (one command), and *falkordblite absent*
+(reinstall), because a bare "memory unavailable" costs someone an afternoon.
 
 ### 2.1 Platform reality — name it
 

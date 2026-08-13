@@ -18,5 +18,9 @@ export default defineConfig({
   splitting: false,
   sourcemap: true,
   clean: true,
-  external: ['better-sqlite3'],
+  // Native/optional deps must NOT be bundled. tsup inlines CJS into the ESM
+  // output and rewrites its internal require() calls, which breaks falkordblite
+  // with "Dynamic require of fs/promises is not supported" at open() time —
+  // silently, because the client degrades rather than throwing.
+  external: ['better-sqlite3', 'falkordblite'],
 });

@@ -237,7 +237,7 @@ export interface RecallResult {
 // ============================================================================
 
 /** MemPalace client mode. */
-export type MemPalaceMode = 'local' | 'mcp' | 'graphiti' | 'disabled';
+export type MemPalaceMode = 'local' | 'falkor-lite' | 'mcp' | 'graphiti' | 'disabled';
 
 export interface MemPalaceConfig {
   /** Active mode. "local" uses the SQLite shim, "mcp" uses an external MemPalace MCP server, "disabled" is a no-op. */
@@ -250,6 +250,8 @@ export interface MemPalaceConfig {
   mcpEndpoint?: string;
   /** Bearer token for a Graphiti server behind auth (hosted tier). */
   mcpApiKey?: string;
+  /** Snapshot directory for mode=falkor-lite. Omit for ephemeral. */
+  dataDir?: string;
   /**
    * Graphiti write path. `deterministic` uses add_triplet and needs no LLM key
    * on the server; `llm` uses add_memory and does. Defaults to deterministic —
