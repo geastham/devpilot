@@ -18,7 +18,8 @@ this wins.
 |---|---|---|---|
 | **V1.1** | Conductor Score definition | 🟡 Wave 1 done — TRD 16 | **Confirm the weighting** (§3); then waves 2–5 |
 | **V1.2** | Close the memory loop | 🟢 **Built via Graphiti** — TRD 18 | Live-server verification |
-| **V1.4** | Code-structure graph for planner context | 🔴 Not started | Pick: Graphify vs codebase-memory-mcp (`MEMORY-LANDSCAPE.md` §3.4) |
+| **V1.4** | Code-structure graph for planner context | 🔴 Not started — **pick made: `codebase-memory-mcp`** | Nothing; ready to build |
+| V1.5 | Token-reduction stack (output compression + anti-grep hooks) | 🔴 New — not started | Locate the tools; one was unverifiable |
 | **V1.3** | Benchmarks into CI | 🔴 Not started | Needs an API key in CI |
 | V2 | Open the arena | ⚪ Blocked | All of V1 |
 | V3 | Pattern extraction → planner + content | ⚪ Blocked | V1.2, V2 consent model |
@@ -102,10 +103,10 @@ Compiles, tests pass, nobody has watched it work.
 | [#19](https://github.com/geastham/devpilot/pull/19) | devpilot | Open — session runner, conductor agent, memory capture, vision |
 | [#15](https://github.com/geastham/devpilot-website/pull/15) | devpilot-website | Open — SSO |
 
-**Research out:** `docs/research/MEMORY-SUBSTRATE-BRIEF.md` — an independent
-agent is sweeping the long tail for code-graph and memory substrates. Findings
-will be synthesised into `MEMORY-LANDSCAPE.md`; **do not start V1.4's pick until
-it lands.**
+**Research returned and verified** — `docs/research/SUBSTRATE-SYNTHESIS.md`.
+Problem A confirmed (`codebase-memory-mcp`); Problem B recommendation
+(`graphzep`) **failed verification — 22 stars, abandoned Aug 2025**, so Graphiti
+stands. Kuzu confirmed archived. GrafeoDB added to the watchlist.
 
 **Parallel work:** another agent is working the SEO/content side of
 `devpilot-website`. Positioning language it should use is in
@@ -117,6 +118,10 @@ it lands.**
 
 Newest first. One line each — the detail belongs in the docs this points at.
 
+- **2026-08-12** — External substrate research returned and **verified against
+  the GitHub API**: `codebase-memory-mcp` confirmed for V1.4, Kuzu confirmed
+  archived, GrafeoDB found. Its Problem B recommendation (`graphzep`) was false —
+  22 stars, abandoned a year ago — so Graphiti stands unchanged.
 - **2026-08-12** — Graphify evaluated (`MEMORY-LANDSCAPE.md` §3.4): it is the
   structural half, not a Graphiti competitor. 105k stars in 4 months but still
   0.9.x with daily releases and one maintainer — adopt behind the port, pinned,
