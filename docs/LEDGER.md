@@ -22,7 +22,9 @@ this wins.
 | V1.5 | Token-reduction stack (output compression + anti-grep hooks) | 🔴 New — not started | Locate the tools; one was unverifiable |
 | V1.6 | `falkordblite` TS store adapter | 🟡 **Built, NOT validated** — TRD 19 | A machine with an arch-matching `redis-server` |
 | **V1.3** | Benchmarks into CI | 🔴 Not started | Needs an API key in CI |
+| V1.4b | Plan-time join: code graph into the planner | 🔴 New — TRD 20 §5.1 | V1.4 |
 | V2 | Open the arena | ⚪ Blocked | All of V1 |
+| V2b | Write-time structural enrichment of run records | 🔴 New — TRD 20 §5.2 | **Do before records accumulate — cannot be retrofitted** |
 | V3 | Pattern extraction → planner + content | ⚪ Blocked | V1.2, V2 consent model |
 
 See `docs/VISION.md` §5 for why this order.
