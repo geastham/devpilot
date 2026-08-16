@@ -14,8 +14,18 @@ interface RufloSessionCardProps {
 export function RufloSessionCard({ session }: RufloSessionCardProps) {
   const [isExpanded, setIsExpanded] = useState(false);
 
-  const statusVariant =
-    session.progressPercent >= 90
+  // Idle warnings are about work ABOUT TO run out, so they apply only to a
+  // session that is still running. Deriving them from progress alone made every
+  // finished session — necessarily at 100% — shout "IDLE IMMINENT", which is the
+  // opposite of true: it is not about to go idle, it is done.
+  //
+  // Latent until now, because the API filtered terminal sessions out entirely.
+  // Surfacing them exposed it.
+  const isTerminal = session.status === 'complete' || session.status === 'error';
+
+  const statusVariant = isTerminal
+    ? session.status
+    : session.progressPercent >= 90
       ? 'idle-imminent'
       : session.progressPercent >= 70
       ? 'needs-spec'

@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { score as scoreModel } from '@devpilot.sh/core';
 import {
   db,
   rufloSessions,
@@ -8,6 +9,8 @@ import {
   conductorScores,
   eq,
   or,
+  and,
+  gte,
   desc,
   sql,
 } from '@/lib/db';
@@ -15,11 +18,33 @@ import {
 // GET /api/fleet/state - Get full fleet state including runway calculations
 export async function GET() {
   try {
-    // Get active sessions (ACTIVE or NEEDS_SPEC)
+    // Active sessions, PLUS anything that finished recently.
+    //
+    // This route used to return only ACTIVE and NEEDS_SPEC, so a session
+    // vanished from Fleet Status the instant it succeeded — the conductor never
+    // saw the thing they dispatched actually finish. It also made the
+    // `allComplete` ✓ branch in FleetSummaryPills and the `complete` sort key in
+    // FleetStatusPanel unreachable: the UI was built for a state the API never
+    // sent.
+    //
+    // Terminal sessions linger for a window and then clear, so the panel shows
+    // completion without becoming an ever-growing history list — that is what
+    // the activity feed is for.
+    const terminalWindowMs =
+      Number(process.env.DEVPILOT_TERMINAL_SESSION_WINDOW_MIN ?? 60) * 60_000;
+    const terminalCutoff = new Date(Date.now() - terminalWindowMs);
+
     const sessions = await db.query.rufloSessions.findMany({
       where: or(
         eq(rufloSessions.status, 'ACTIVE'),
-        eq(rufloSessions.status, 'NEEDS_SPEC')
+        eq(rufloSessions.status, 'NEEDS_SPEC'),
+        and(
+          or(
+            eq(rufloSessions.status, 'COMPLETE'),
+            eq(rufloSessions.status, 'ERROR')
+          ),
+          gte(rufloSessions.updatedAt, terminalCutoff)
+        )
       ),
       with: {
         completedTasks: true,
@@ -31,7 +56,14 @@ export async function GET() {
     const allInFlightFiles = await db.query.inFlightFiles.findMany();
 
     // Calculate runway metrics
-    const totalEstimatedMinutes = sessions.reduce(
+    // Runway is about work still to come, so terminal sessions are excluded —
+    // a finished session's `estimatedRemainingMinutes` is stale and would
+    // inflate runway with time nobody is going to spend.
+    const liveSessions = sessions.filter(
+      (s) => s.status === 'ACTIVE' || s.status === 'NEEDS_SPEC'
+    );
+
+    const totalEstimatedMinutes = liveSessions.reduce(
       (sum, s) => sum + s.estimatedRemainingMinutes,
       0
     );
@@ -100,7 +132,15 @@ export async function GET() {
       recentEvents,
       conductorScore: score
         ? {
-            total: score.total,
+            // Recomputed from the clamped dimensions, matching /api/score.
+            // Serving the stored total here while /api/score serves a
+            // recomputed one made the top-bar pill and its own breakdown
+            // disagree — 822 against 716 — which is the same incoherence
+            // TRD 16 §4.4 fixed one route at a time.
+            total: scoreModel.totalFrom(
+              score as unknown as Record<scoreModel.ScoreDimensionKey, number>
+            ),
+            storedTotal: score.total,
             breakdown: {
               fleetUtilization: score.fleetUtilization,
               runwayHealth: score.runwayHealth,

@@ -36,12 +36,16 @@ export function FleetSummaryPills({ sessions }: FleetSummaryPillsProps) {
     const avgProgress =
       repoSessions.reduce((sum, s) => sum + s.progressPercent, 0) /
       repoSessions.length;
+    // Already correctly scoped to 'active' — kept as-is, and noted so the next
+    // person does not "simplify" it to match the card's old progress-only rule.
     const hasIdleImminent = repoSessions.some(
       (s) => s.status === 'active' && s.progressPercent >= 90
     );
     const hasNeedsSpec = repoSessions.some(
       (s) => s.status === 'active' && s.progressPercent >= 70
     );
+    // Reachable at last: the API used to filter terminal sessions out, so this
+    // branch — and the ✓ it renders — could never be true.
     const allComplete = repoSessions.every((s) => s.status === 'complete');
 
     return {

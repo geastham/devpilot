@@ -3,6 +3,7 @@
 import { TopBar } from '@/components/topbar/TopBar';
 import { QuickCaptureInput } from '@/components/capture/QuickCaptureInput';
 import { AgenticAssistPanel } from '@/components/assist';
+import { ConductorReviewPanel } from '@/components/plan/ConductorReviewPanel';
 import { CockpitBackdrop, BootSequence } from '@/components/visual';
 
 export default function MainLayout({
@@ -26,6 +27,10 @@ export default function MainLayout({
 
       {/* Agentic Assist - right slide-in overlay, toggled from TopBar */}
       <AgenticAssistPanel variant="overlay" />
+
+      {/* Plan review — the conductor's human-in-the-loop interrupt. Mounted
+          here so it overlays every layout variant, not just the default. */}
+      <ConductorReviewPanel />
 
       {/* Quick Capture - Fixed at bottom */}
       <QuickCaptureInput />

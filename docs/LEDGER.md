@@ -32,10 +32,13 @@ resolved or falsified.
 
 Three smaller gaps on the demo path:
 
-- **Human review is unreachable from the UI.** The conductor agent's headline
-  feature is a real `interrupt()`; REFINING's *Review Plan* / *Re-plan* buttons
-  still call the old flow.
-- **Completed sessions vanish** from Fleet Status rather than showing as done.
+- ~~**Human review is unreachable from the UI.**~~ **Fixed.** `Review Plan` was
+  worse than mis-wired — it set `isConfidencePanelOpen` and *nothing rendered
+  it*, so the button was dead. `ConductorReviewPanel` now drives the real
+  `interrupt()`: approve / refine-with-constraints / reject.
+- ~~**Completed sessions vanish** from Fleet Status.~~ **Fixed** — terminal
+  sessions linger for a window (`DEVPILOT_TERMINAL_SESSION_WINDOW_MIN`, 60m) then
+  clear. Runway excludes them.
 - **Nothing is merged**, and SSO providers are not enabled in the dashboard.
 
 **Not MVP-blocking**, despite recent effort: memory (V1.2/V1.6), code graph
@@ -81,8 +84,9 @@ Compiles, tests pass, nobody has watched it work.
   every test substitutes the planner. The live run *adopted* an approved plan.
 - **Restart resumption.** Checkpoints persist to `<db>.checkpoints.db`; no run
   has been interrupted by an actual process restart and resumed.
-- **The review interrupt through the UI.** The route accepts decisions; REFINING's
-  buttons still point at the old flow.
+- **The review interrupt END TO END.** The panel is wired and its no-key error
+  path is verified in a browser, but approve/refine/reject have never driven a
+  real plan — that needs the API key (see MVP status).
 - **Narrow viewports.** Top bar labels and the flow rail caption drop below
   `lg`/`xl` and have never been seen. Chrome's `resize_window` reports success
   while `window.innerWidth` never moves.
@@ -158,6 +162,11 @@ stands. Kuzu confirmed archived. GrafeoDB added to the watchlist.
 
 Newest first. One line each — the detail belongs in the docs this points at.
 
+- **2026-08-16** — Demo-path fixes: built `ConductorReviewPanel` (the Review Plan
+  button was dead — a flag nothing rendered), and terminal sessions now show in
+  Fleet Status. Surfacing them exposed two more: completed sessions rendered
+  "IDLE IMMINENT" at 100%, and the score pill disagreed with its own breakdown
+  (822 vs 716). Both fixed.
 - **2026-08-12** — V1.6 built: `falkordblite` TS adapter, preflight diagnostics,
   platform gate. **Found that `falkordblite` does not ship `redis-server`** —
   TRD 19's "zero install" premise was false and is corrected. Engine unvalidated

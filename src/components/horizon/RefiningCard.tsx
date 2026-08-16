@@ -84,7 +84,9 @@ export function RefiningCard({ item }: RefiningCardProps) {
             size="sm"
             onClick={(e) => {
               e.stopPropagation();
-              // TODO: Open replan input
+              // Same surface as Review Plan — re-planning IS a review decision
+              // (`{ action: 'refine', constraints }`), not a separate flow.
+              handleReviewPlan();
             }}
           >
             Re-plan ↺
