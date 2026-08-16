@@ -12,6 +12,36 @@ this wins.
 
 ---
 
+## MVP status
+
+**The loop works. One half of it has never run live.**
+
+The product claim is: capture → plan → dispatch a fleet → see results.
+
+| Stage | State |
+|---|---|
+| Capture → horizon | ✅ Working |
+| **Plan** (generate → score → refine → review) | ⚠️ **Built, never run live.** No API key here; every test substitutes the planner, and the live conductor run *adopted* a pre-seeded plan and entered at dispatch |
+| Dispatch → real Claude Code sessions | ✅ Verified — two sessions, real cost/token telemetry |
+| Callbacks → DB → score → UI | ✅ Verified |
+| Wave advance (interrupt → resume → next wave) | ✅ Verified live, two-wave plan |
+
+**Planning throughput is the product's core claim, and it is the half we have not
+watched work.** That is the top MVP risk, and it is one API key away from being
+resolved or falsified.
+
+Three smaller gaps on the demo path:
+
+- **Human review is unreachable from the UI.** The conductor agent's headline
+  feature is a real `interrupt()`; REFINING's *Review Plan* / *Re-plan* buttons
+  still call the old flow.
+- **Completed sessions vanish** from Fleet Status rather than showing as done.
+- **Nothing is merged**, and SSO providers are not enabled in the dashboard.
+
+**Not MVP-blocking**, despite recent effort: memory (V1.2/V1.6), code graph
+(V1.4), arena (V2), benchmarks (V1.3). Those are the moat and the differentiators
+— a conductor can conduct without any of them.
+
 ## Open workstreams
 
 | # | Workstream | State | Blocked by |
