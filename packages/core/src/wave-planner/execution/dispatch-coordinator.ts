@@ -106,9 +106,24 @@ export class WaveDispatchCoordinator {
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-        // An unconfigured/disabled orchestrator queues the task rather than
-        // failing it — the work is retried once dispatch is enabled.
-        if (errorMessage === 'ORCHESTRATOR_UNAVAILABLE') {
+        // Back-pressure is not failure. Two cases leave the task `pending` so a
+        // later dispatch pass picks it up:
+        //
+        //  - ORCHESTRATOR_UNAVAILABLE — dispatch is disabled/unconfigured; the
+        //    work is retried once it is enabled.
+        //  - CAPACITY — the runner answered 429 because its own concurrency cap
+        //    was saturated. §7 of the session-runner contract is explicit that
+        //    DevPilot *queues* here. It instead marked the task permanently
+        //    `failed` with `retryCount` still 0, so a wave silently lost tasks
+        //    whenever the fleet was busy — precisely the steady state when
+        //    running 5–10 concurrent sessions, and observed live: two tasks of
+        //    an eight-task wave died as `CAPACITY` while the wave itself stayed
+        //    `active`, because this path bypasses the failure policy entirely.
+        if (
+          errorMessage === 'ORCHESTRATOR_UNAVAILABLE' ||
+          errorMessage === 'CAPACITY' ||
+          /\b429\b/.test(errorMessage)
+        ) {
           result.queued++;
           continue;
         }

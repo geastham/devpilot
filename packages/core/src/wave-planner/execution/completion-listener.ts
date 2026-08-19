@@ -6,6 +6,23 @@ import { toActivityEventType, type WaveSSEEvent } from './types';
 export interface CompletionListenerOptions {
   /** Max retries per task before terminal failure. Default 1. */
   retryLimit?: number;
+
+  /**
+   * Called when a task reaches a terminal state but its wave has not finished —
+   * i.e. a concurrency slot just freed and pending tasks may now be dispatchable.
+   *
+   * Without this the executor was a **deadlock for any wave larger than
+   * `maxConcurrentSubagents`**. `dispatchWave` dispatches up to the cap and
+   * leaves the remainder `pending`; nothing ever dispatched them, and
+   * `checkWaveCompletion` requires *every* task to be terminal — so the wave
+   * could never complete and the run hung forever with the fleet idle.
+   *
+   * It stayed hidden because the only wave plan ever executed end to end had
+   * fewer tasks per wave than the cap. Real plans do not: the first live plan
+   * generated after this was found had waves of 8, 9 and 9 against a default cap
+   * of 4, so every wave of it would have hung.
+   */
+  onCapacityFreed?: (wavePlanId: string, waveIndex: number) => Promise<void>;
 }
 
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'skipped']);
@@ -17,6 +34,7 @@ const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'skipped']);
 export class CompletionListener {
   private db: Database;
   private retryLimit: number;
+  private onCapacityFreed?: (wavePlanId: string, waveIndex: number) => Promise<void>;
 
   constructor(
     private onWaveComplete: (wavePlanId: string, waveIndex: number) => Promise<void>,
@@ -24,6 +42,32 @@ export class CompletionListener {
   ) {
     this.db = getDatabase();
     this.retryLimit = options?.retryLimit ?? 1;
+    this.onCapacityFreed = options?.onCapacityFreed;
+  }
+
+  /**
+   * A task reached a terminal state: either the wave is done, or a slot just
+   * freed and the remaining pending tasks deserve a dispatch attempt.
+   *
+   * Centralised so completion and failure share it — a wave whose tasks *fail*
+   * frees capacity exactly as one whose tasks succeed, and handling only the
+   * success path would leave the same deadlock behind a different door.
+   */
+  private async settleWave(wavePlanId: string, waveIndex: number): Promise<void> {
+    if (await this.checkWaveCompletion(wavePlanId, waveIndex)) {
+      await this.onWaveComplete(wavePlanId, waveIndex);
+      return;
+    }
+
+    if (this.onCapacityFreed) {
+      // Backfill must never resurface as a task-completion failure: the
+      // completion itself is already committed.
+      try {
+        await this.onCapacityFreed(wavePlanId, waveIndex);
+      } catch {
+        // Swallowed deliberately; the next terminal task retries the backfill.
+      }
+    }
   }
 
   /**
@@ -117,12 +161,7 @@ export class CompletionListener {
       waveIndex: task.waveIndex,
     });
 
-    // Check if the entire wave is complete
-    const isWaveComplete = await this.checkWaveCompletion(wavePlanId, task.waveIndex);
-
-    if (isWaveComplete) {
-      await this.onWaveComplete(wavePlanId, task.waveIndex);
-    }
+    await this.settleWave(wavePlanId, task.waveIndex);
   }
 
   /**
@@ -158,6 +197,20 @@ export class CompletionListener {
       taskCode,
       error,
     });
+
+    // A failed task frees its slot exactly as a completed one does, and a
+    // `retrying` task is itself re-dispatch-eligible — so settle here too.
+    // Previously this path checked nothing at all: a wave whose last outstanding
+    // task failed would never be recognised as finished.
+    const failed = await this.db.query.waveTasks.findFirst({
+      where: and(
+        eq(waveTasks.wavePlanId, wavePlanId),
+        eq(waveTasks.taskCode, taskCode)
+      ),
+    });
+    if (failed) {
+      await this.settleWave(wavePlanId, failed.waveIndex);
+    }
   }
 
   /**

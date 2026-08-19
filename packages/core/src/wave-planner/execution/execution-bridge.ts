@@ -43,7 +43,14 @@ export class ExecutionBridge {
     this.controller = new WaveExecutionController(options.execution, this.coordinator);
     this.listener = new CompletionListener(
       (wavePlanId, waveIndex) => this.controller.handleWaveComplete(wavePlanId, waveIndex),
-      { retryLimit: options.execution.retryLimit }
+      {
+        retryLimit: options.execution.retryLimit,
+        // Re-run the wave's dispatcher whenever a slot frees. `dispatchWave`
+        // re-selects pending/retrying tasks and respects the concurrency cap, so
+        // calling it again is safe and is what drains a wave larger than the cap.
+        onCapacityFreed: (wavePlanId, waveIndex) =>
+          this.controller.dispatchWave(wavePlanId, waveIndex).then(() => undefined),
+      }
     );
   }
 

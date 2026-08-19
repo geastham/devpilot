@@ -25,6 +25,13 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   try {
     const { planId } = await params;
 
+    // Body is optional: the default flow takes none. Tolerate an absent or
+    // malformed body rather than 400-ing the no-argument call that every
+    // existing caller makes.
+    const body = await request
+      .json()
+      .catch(() => ({}) as { waveIndex?: number });
+
     // Fetch the wave plan
     const wavePlan = await db.query.wavePlans.findFirst({
       where: eq(wavePlans.id, planId),
@@ -66,6 +73,47 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
         },
         { status: 400 }
       );
+    }
+
+    // Execution controller + coordinator, built from the shared execution config
+    // (limits + callbackUrl from env). Constructed here because the explicit
+    // re-dispatch branch below needs it too.
+    const config = getWaveExecutionConfig();
+    const dispatchCoordinator = new WaveDispatchCoordinator(config);
+    const controller = new WaveExecutionController(config, dispatchCoordinator);
+
+    // An explicit `waveIndex` re-dispatches that wave even when it is already
+    // `active`. The default selection below only ever finds a *pending* wave, so
+    // it cannot touch a wave that is mid-flight — and a wave that stalled with
+    // tasks still `pending` (capacity exhausted, a dropped callback) is exactly
+    // that case. Without this there is no way to resume one short of editing
+    // the database by hand.
+    const requestedWaveIndex =
+      typeof body?.waveIndex === 'number' ? body.waveIndex : undefined;
+
+    if (requestedWaveIndex !== undefined) {
+      const target = wavePlan.waves.find(
+        (w: WaveWithTasks) => w.waveIndex === requestedWaveIndex
+      );
+      if (!target) {
+        return NextResponse.json(
+          {
+            error: 'Unknown wave',
+            detail: `Wave plan ${planId} has no wave at index ${requestedWaveIndex}.`,
+          },
+          { status: 404 }
+        );
+      }
+
+      const result = await controller.dispatchWave(planId, requestedWaveIndex);
+      return NextResponse.json({
+        success: true,
+        redispatched: true,
+        waveIndex: requestedWaveIndex,
+        dispatched: result.dispatched,
+        queued: result.queued,
+        errors: result.errors,
+      });
     }
 
     // Get the next pending wave
@@ -136,11 +184,6 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       }
     }
 
-    // Initialize execution controller and dispatch coordinator with the shared
-    // execution config (limits + callbackUrl from env).
-    const config = getWaveExecutionConfig();
-    const dispatchCoordinator = new WaveDispatchCoordinator(config);
-    const controller = new WaveExecutionController(config, dispatchCoordinator);
 
     // Dispatch the wave
     const dispatchResult = await controller.dispatchWave(

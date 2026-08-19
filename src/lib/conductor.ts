@@ -25,6 +25,7 @@ import {
   type ParsedWavePlan,
   type PlanScore,
   type PromptConstructorConfig,
+  resolvePlannerModel,
 } from '@devpilot.sh/core/wave-planner';
 import type {
   ConductorPorts,
@@ -70,7 +71,7 @@ export function createDevPilotPorts(options: DevPilotPortsOptions): ConductorPor
   const refinementService = new PlanRefinementService(
     {
       apiKey: options.apiKey,
-      model: options.model ?? 'claude-sonnet-4-20250514',
+      model: resolvePlannerModel(options.model),
       maxTokens: 8192,
     },
     {}

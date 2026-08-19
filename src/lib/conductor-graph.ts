@@ -20,8 +20,10 @@ import {
   assignWaves,
   type ParsedWavePlan,
   type PlanScore,
+  resolvePlannerModel,
 } from '@devpilot.sh/core/wave-planner';
-import { db, activityEvents } from '@/lib/db';
+import { db, activityEvents, plans } from '@/lib/db';
+import { eq } from 'drizzle-orm';
 import type { EventType } from '@devpilot.sh/core/db';
 import { createDevPilotPorts } from './conductor';
 
@@ -54,7 +56,7 @@ async function persistPlan(
   const generator = new WavePlanGenerator({
     aiClient: {
       apiKey: process.env.ANTHROPIC_API_KEY ?? '',
-      model: 'claude-sonnet-4-20250514',
+      model: resolvePlannerModel(),
       maxTokens: 8192,
     },
   });
@@ -63,10 +65,31 @@ async function persistPlan(
   const criticalPath = computeCriticalPath(allTasks, plan.dependencyEdges);
   const assignment = assignWaves(allTasks, plan.dependencyEdges);
 
-  // planId is the horizon item's plan row; the wave plan hangs off the item.
+  // `wave_plans.plan_id` is a NOT NULL foreign key into `plans(id)` — a
+  // *different* id from the horizon item's. Both arguments used to be
+  // `input.itemId`, which satisfied the signature's types and then failed at
+  // insert time with a bare "FOREIGN KEY constraint failed", naming neither the
+  // column nor the value. The comment here already claimed to be passing "the
+  // horizon item's plan row"; now it actually is.
+  const planRow = await db
+    .select({ id: plans.id })
+    .from(plans)
+    .where(eq(plans.horizonItemId, input.itemId))
+    .limit(1);
+
+  if (planRow.length === 0) {
+    // Fail with the diagnosis rather than letting sqlite report an anonymous
+    // constraint violation three frames away.
+    throw new Error(
+      `Cannot persist a wave plan for ${input.itemId}: no plans row exists for ` +
+        `this horizon item, and wave_plans.plan_id requires one. Generate the ` +
+        `item's plan before approving a wave plan.`
+    );
+  }
+
   const wavePlanId = await generator.persistWavePlan(
     input.itemId,
-    input.itemId,
+    planRow[0].id,
     plan,
     criticalPath,
     assignment,
