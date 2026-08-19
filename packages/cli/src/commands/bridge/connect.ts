@@ -3,6 +3,7 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import { BridgeClient, DispatchLoop, HeartbeatService } from '@devpilot.sh/bridge-client';
 import { createBridgeDispatchHandler } from './dispatch-handler';
+import { createConductorDispatchHandler } from './conductor-handler';
 
 interface ConnectOptions {
   url?: string;
@@ -11,6 +12,8 @@ interface ConnectOptions {
   repos?: string;
   mode: 'ao-cli' | 'http' | 'claude-session';
   transport: 'realtime' | 'poll';
+  plan?: boolean;
+  cockpitUrl?: string;
   maxJobs: string;
   httpUrl?: string;
   aoProject?: string;
@@ -35,6 +38,19 @@ export const connectCommand = new Command('connect')
   .option('--http-url <url>', 'Orchestrator URL (required for --mode http)')
   .option('--ao-project <name>', 'ao project name (for --mode ao-cli)')
   .option('--ao-path <path>', 'Path to the ao binary (default: ao on PATH)')
+  // Off by default: planning a ticket costs a model call and stops at a human
+  // review gate, which is a different contract from "run this ticket now".
+  // Opt in per machine until the planned path is the one you want by default.
+  .option(
+    '--plan',
+    'Route dispatches through the conductor (plan → waves) instead of one session',
+    process.env.DEVPILOT_BRIDGE_PLAN === 'true',
+  )
+  .option(
+    '--cockpit-url <url>',
+    'Local cockpit base URL for --plan',
+    process.env.DEVPILOT_COCKPIT_URL || 'http://127.0.0.1:3000',
+  )
   .action(async (options: ConnectOptions) => {
     if (!options.url) {
       console.error(chalk.red('✗ Bridge URL required (--url or DEVPILOT_BRIDGE_URL)'));
@@ -105,14 +121,20 @@ export const connectCommand = new Command('connect')
           }
         : null,
       maxConcurrent: maxConcurrentJobs,
-      handler: createBridgeDispatchHandler({
-        client,
-        orchestratorMode: options.mode,
-        httpUrl: options.httpUrl,
-        aoProjectName: options.aoProject,
-        aoPath: options.aoPath,
-        onLog: (line) => console.log(chalk.blue(`   ${line}`)),
-      }),
+      handler: options.plan
+        ? createConductorDispatchHandler({
+            client,
+            cockpitUrl: options.cockpitUrl!,
+            onLog: (line) => console.log(chalk.blue(`   ${line}`)),
+          })
+        : createBridgeDispatchHandler({
+            client,
+            orchestratorMode: options.mode,
+            httpUrl: options.httpUrl,
+            aoProjectName: options.aoProject,
+            aoPath: options.aoPath,
+            onLog: (line) => console.log(chalk.blue(`   ${line}`)),
+          }),
       onLog: (line) => console.log(chalk.gray(`   ${line}`)),
       onError: (e) => console.log(chalk.yellow(`   ${e.message}`)),
     });

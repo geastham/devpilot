@@ -8,11 +8,16 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const zone = searchParams.get('zone') as Zone | null;
     const repo = searchParams.get('repo');
+    // The Linear bridge needs to ask "is this ticket already on the board?"
+    // before creating an item, or a redelivered/re-claimed dispatch produces a
+    // duplicate item and a duplicate conductor run.
+    const linearTicketId = searchParams.get('linearTicketId');
 
     // Build where conditions
     const conditions = [];
     if (zone) conditions.push(eq(horizonItems.zone, zone));
     if (repo) conditions.push(eq(horizonItems.repo, repo));
+    if (linearTicketId) conditions.push(eq(horizonItems.linearTicketId, linearTicketId));
 
     const items = await db.query.horizonItems.findMany({
       where: conditions.length > 0 ? and(...conditions) : undefined,
