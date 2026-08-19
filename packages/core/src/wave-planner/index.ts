@@ -22,6 +22,9 @@ export * from './wave-assigner';
 // Plan scoring
 export * from './plan-scorer';
 
+// Model IDs (single source of truth — see models.ts on why)
+export * from './models';
+
 // AI client
 export * from './ai-client';
 

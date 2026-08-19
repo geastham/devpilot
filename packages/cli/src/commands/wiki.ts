@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import chalk from 'chalk';
+import { resolveWikiModel } from '@devpilot.sh/core/wave-planner';
 
 // ============================================================================
 // Wiki CLI Command
@@ -506,7 +507,7 @@ function getWikiConfig() {
   const cwd = process.cwd();
   return {
     apiKey: process.env.ANTHROPIC_API_KEY || '',
-    model: process.env.WIKI_MODEL || 'claude-sonnet-4-20250514',
+    model: resolveWikiModel(),
     maxTokens: parseInt(process.env.WIKI_MAX_TOKENS || '8192', 10),
     repo: getRepoName(cwd),
     wikiDir: join(cwd, '.devpilot', 'wiki'),

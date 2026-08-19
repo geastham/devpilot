@@ -17,6 +17,7 @@ import type {
 import { PlanRefinementService, PlanRefinementConfig } from './plan-refinement-service';
 import { PromptConstructorConfig } from './prompt-constructor';
 import { AIClientConfig } from './ai-client';
+import { resolvePlannerModel } from './models';
 import { computeCriticalPath } from './critical-path';
 import { assignWaves, WaveAssignerConfig } from './wave-assigner';
 import { scorePlan } from './plan-scorer';
@@ -504,7 +505,7 @@ export async function generateWavePlan(
   const generator = createWavePlanGenerator({
     aiClient: {
       apiKey,
-      model: process.env.WAVE_PLANNER_MODEL || 'claude-sonnet-4-20250514',
+      model: resolvePlannerModel(),
       maxTokens: parseInt(process.env.WAVE_PLANNER_MAX_TOKENS || '8192', 10),
     },
     refinement: {

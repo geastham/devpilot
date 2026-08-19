@@ -156,11 +156,46 @@ function parseTaskTable(tableContent: string): ParsedTask[] {
 
 /**
  * Parse a single table row into cells.
+ *
+ * Splits on unescaped `|` only. GFM requires a literal pipe inside a cell to be
+ * written `\|`, and the planning model does emit it correctly — e.g.
+ *
+ *     | 1.1 | Define `ExportFormat` (`'png'\|'svg'`) | `src/types/export.ts` | ...
+ *
+ * A naive `line.split('|')` treats that escaped pipe as a column break, which
+ * shifts every subsequent cell one position left. The visible damage lands in
+ * `filePaths`: the row above yielded a description truncated at `'png'` and file
+ * paths of `["'svg'`)", "`ExportScale` (`1"]`.
+ *
+ * That is not cosmetic. `filePaths` is what conflict detection uses to decide
+ * which tasks may occupy the same wave, so corrupted paths mean two tasks that
+ * really do touch the same file are no longer seen to collide — and the
+ * conductor dispatches them in parallel to clobber each other. A union type in
+ * a description is enough to trigger it, which makes it common in exactly the
+ * TypeScript repos this planner targets.
  */
 function parseTableRow(line: string): string[] {
-  return line
-    .split('|')
-    .slice(1, -1) // Remove leading/trailing empty strings from split
+  const cells: string[] = [];
+  let current = '';
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char === '\\' && line[i + 1] === '|') {
+      current += '|'; // escaped pipe → literal, and unescape it for the value
+      i++;
+      continue;
+    }
+    if (char === '|') {
+      cells.push(current);
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  cells.push(current);
+
+  return cells
+    .slice(1, -1) // Drop the empty strings either side of the leading/trailing pipes
     .map(cell => cell.trim());
 }
 

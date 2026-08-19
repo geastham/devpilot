@@ -9,7 +9,7 @@ import {
   eq,
   type WaveTask,
 } from '@/lib/db';
-import { WavePlanGenerator } from '@devpilot.sh/core/wave-planner';
+import { WavePlanGenerator, resolvePlannerModel } from '@devpilot.sh/core/wave-planner';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -128,7 +128,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     const generator = new WavePlanGenerator({
       aiClient: {
         apiKey,
-        model: process.env.WAVE_PLANNER_MODEL || 'claude-sonnet-4-20250514',
+        model: resolvePlannerModel(),
         maxTokens: parseInt(process.env.WAVE_PLANNER_MAX_TOKENS || '8192', 10),
       },
       refinement: {

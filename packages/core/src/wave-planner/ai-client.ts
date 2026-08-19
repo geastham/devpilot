@@ -7,9 +7,56 @@ import type { GenerationResult } from './types';
 
 export interface AIClientConfig {
   apiKey: string;
-  model: string; // e.g., 'claude-sonnet-4-20250514'
+  /** Model ID. Prefer `resolvePlannerModel()` over a literal — see models.ts. */
+  model: string;
   maxTokens: number; // e.g., 8192
   timeout?: number; // ms
+}
+
+/**
+ * Status codes where retrying cannot possibly help.
+ *
+ * A retired model ID (404), a bad key (401), a revoked key (403), and a
+ * malformed request (400) are all permanent for the lifetime of the process.
+ * Retrying them costs the caller the full backoff ladder — 1s + 2s + 4s — and
+ * then reports the failure as "after 4 attempts", which reads like a flaky
+ * network rather than the configuration error it is.
+ *
+ * 408 and 429 are excluded deliberately: they are transient by definition.
+ */
+const NON_RETRYABLE_STATUS = new Set([400, 401, 403, 404, 405, 422]);
+
+/**
+ * Persist a raw model response when DEVPILOT_PLANNER_DUMP_DIR is set.
+ *
+ * Deliberately best-effort and never throwing: a diagnostic that can fail a
+ * planning run is worse than no diagnostic. Off unless the env var is set, so
+ * it costs nothing in normal operation and never writes plan text to disk
+ * behind the user's back.
+ */
+function dumpRawResponse(text: string, model: string): void {
+  const dir = process.env.DEVPILOT_PLANNER_DUMP_DIR;
+  if (!dir) return;
+  try {
+    // Required lazily so the bundler does not pull node:fs into any consumer
+    // that never enables dumping.
+    const fs = require('node:fs') as typeof import('node:fs');
+    fs.mkdirSync(dir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    fs.writeFileSync(
+      `${dir}/planner-${stamp}.md`,
+      `<!-- model: ${model} -->\n${text}`,
+      { mode: 0o600 }
+    );
+  } catch {
+    // Diagnostics must never break a run.
+  }
+}
+
+function isRetryable(error: unknown): boolean {
+  const status = (error as { status?: number } | null)?.status;
+  if (typeof status !== 'number') return true; // network/unknown — worth a retry
+  return !NON_RETRYABLE_STATUS.has(status);
 }
 
 // ============================================================================
@@ -56,6 +103,12 @@ export class WavePlannerAIClient {
         .map((block) => ('text' in block ? block.text : ''))
         .join('\n');
 
+      // The parser consumes markdown tables, so a format drift between what the
+      // model emits and what the parser expects shows up only as "contains no
+      // tasks" — with the actual response nowhere to be seen. Set
+      // DEVPILOT_PLANNER_DUMP_DIR to keep the raw text for diagnosis.
+      dumpRawResponse(textContent, response.model);
+
       return {
         content: textContent,
         tokensInput: response.usage.input_tokens,
@@ -67,9 +120,17 @@ export class WavePlannerAIClient {
       };
     } catch (error) {
       const durationMs = Date.now() - startTime;
-      throw new Error(
+      const wrapped = new Error(
         `Claude API call failed after ${durationMs}ms: ${error instanceof Error ? error.message : String(error)}`
       );
+      // Carry the HTTP status across the wrap. Without this the retry loop
+      // cannot tell a retired model ID from a transient 529 and backs off
+      // through the full ladder on both.
+      const status = (error as { status?: number } | null)?.status;
+      if (typeof status === 'number') {
+        (wrapped as Error & { status?: number }).status = status;
+      }
+      throw wrapped;
     }
   }
 
@@ -90,6 +151,13 @@ export class WavePlannerAIClient {
         return await this.generatePlan(prompt);
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
+
+        // Fail fast on permanent errors. A retired model ID or a bad key will
+        // fail identically on every attempt, so backing off just delays the
+        // report and disguises a config problem as an outage.
+        if (!isRetryable(error)) {
+          throw lastError;
+        }
 
         // Don't retry on the last attempt
         if (attempt === maxRetries) {

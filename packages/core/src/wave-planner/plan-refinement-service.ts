@@ -72,6 +72,15 @@ export class PlanRefinementService {
   private aiClient: WavePlannerAIClient;
   private config: PlanRefinementConfig;
 
+  /**
+   * Why the most recent refinement pass was discarded, if it was.
+   *
+   * A discarded refinement is no longer fatal, which means it is no longer
+   * loud either — without this the conductor would silently burn a model call
+   * per iteration and report an unchanged score with no reason given.
+   */
+  lastRefinementError?: string;
+
   constructor(
     aiClientConfig: AIClientConfig,
     refinementConfig?: Partial<PlanRefinementConfig>
@@ -283,10 +292,23 @@ export class PlanRefinementService {
     );
 
     if (!validation.valid) {
-      // If refinement produces invalid plan, return original
-      throw new Error(
-        `Refined plan has validation errors: ${validation.errors.map(e => e.message).join('; ')}`
-      );
+      // Refinement is an *optimisation pass*, not a correctness gate: we already
+      // hold a validated plan. Throwing here discarded that good plan and failed
+      // the entire conductor run — the caller never got the chance to keep what
+      // it already had. (The comment on this branch has always said "return
+      // original"; the code threw instead.)
+      //
+      // Returning the original is safe by construction: every caller adopts a
+      // refinement only when its score strictly improves, and an unchanged plan
+      // scores identically, so it is declined and the loop moves on.
+      this.lastRefinementError = `Refinement discarded — ${validation.errors
+        .map(e => e.message)
+        .join('; ')}`;
+      return {
+        plan: currentPlan,
+        score: this.scorePlan(currentPlan),
+        tokensUsed,
+      };
     }
 
     // Compute score
