@@ -14,21 +14,23 @@ this wins.
 
 ## MVP status
 
-**The loop works. One half of it has never run live.**
+**The loop works end to end. Every stage has now been watched running live.**
 
 The product claim is: capture → plan → dispatch a fleet → see results.
 
 | Stage | State |
 |---|---|
 | Capture → horizon | ✅ Working |
-| **Plan** (generate → score → refine → review) | ⚠️ **Built, never run live.** No API key here; every test substitutes the planner, and the live conductor run *adopted* a pre-seeded plan and entered at dispatch |
+| **Plan** (generate → score → refine → review) | ✅ **Verified 2026-08-16** — live model call, 3 waves / 25 tasks, parallelization 0.88, interrupt raised for review. Took four fixes to get there (see 2026-08-16 entry) |
 | Dispatch → real Claude Code sessions | ✅ Verified — two sessions, real cost/token telemetry |
 | Callbacks → DB → score → UI | ✅ Verified |
 | Wave advance (interrupt → resume → next wave) | ✅ Verified live, two-wave plan |
 
-**Planning throughput is the product's core claim, and it is the half we have not
-watched work.** That is the top MVP risk, and it is one API key away from being
-resolved or falsified.
+Planning throughput is the product's core claim, and it has now been watched
+working. The remaining unproven edge is **approve → dispatch from
+`ConductorReviewPanel`**: the panel renders and the graph accepts the decision,
+but no one has clicked Approve and watched 25 tasks fan out to real sessions.
+That is the next thing to verify, and it spends real tokens on a real repo.
 
 Three smaller gaps on the demo path:
 
@@ -172,6 +174,144 @@ Newest first. One line each — the detail belongs in the docs this points at.
   TRD 19's "zero install" premise was false and is corrected. Engine unvalidated
   on this machine (arch mismatch). Also fixed a tsup bug: bundling the CJS
   package broke its internal `require`.
+- **2026-08-19** — **The join is built and verified live: a Linear ticket now
+  becomes a wave plan.** The gap was not missing plumbing — it was that
+  `createBridgeDispatchHandler` turns a ticket into **one** Claude Code session,
+  so the paid path routed around the entire product thesis: never planned, never
+  decomposed, never parallelised.
+  Added `createConductorDispatchHandler` (`--plan`, `DEVPILOT_BRIDGE_PLAN`,
+  `--cockpit-url`). It talks HTTP to the local cockpit rather than importing the
+  conductor, because the langchain dependency is deliberately kept out of core;
+  the CLI cannot import the graph, and duplicating it or dragging langchain into
+  every install would both be worse. Claimed message → `POST /api/items`
+  (zone REFINING — the API default DIRECTIONAL would park it as an idea) →
+  `POST /api/items/{id}/conductor` → report the review gate to the bridge.
+  **It deliberately does not wait for approval.** The review interrupt is the
+  point of the conductor, and a handler that awaited a human would hold its queue
+  claim for hours; a held claim is invisible work that the stale sweep reclaims
+  and re-runs.
+  Two supporting changes: `GET /api/items` gained a `linearTicketId` filter (the
+  bridge needs "is this ticket already on the board?"), and status is reported as
+  `running` with a descriptive message rather than a new `awaiting_review` value —
+  `SESSION_STATUSES` is mirrored by a CHECK constraint whose own comment requires
+  a matching migration for any addition.
+  **Verified live against a running cockpit**, not a stub: ticket → item →
+  conductor run → parked at review with a real plan (**4 waves, 28 tasks**),
+  status back to the bridge, and the plan surviving a cockpit restart via the
+  checkpoint.
+  The live run then found what the stub could not: redelivery reused the item but
+  still POSTed `/conductor`, **re-planning from scratch — 236s and a full model
+  call for a ticket already waiting on a human.** Item-level dedupe does not
+  prevent the spend. The handler now checks the run state first and returns if
+  one is live: **471ms instead of 236,000ms**, measured. Two regression tests pin
+  it (live run must not restart; an item with no run still gets one).
+  Suites: core 36/36, CLI 29 passed + 1 skipped (the live test is opt-in via
+  `DEVPILOT_LIVE_COCKPIT_URL`).
+  **Still single-session by default.** `--plan` is opt-in because planning costs
+  a model call and stops at a human gate — a different contract from "run this
+  ticket now". Flip the default once you want planning to be the paid path's
+  normal behaviour.
+
+- **2026-08-19** — **Hosted Linear bridge verified end to end, as shipped code.**
+  Correcting the 2026-08-17 entry's framing: that assessment was of the **OSS
+  local** implementation in `devpilot/`, which is vestigial. The **hosted**
+  bridge in `devpilot-website/` is a different, far more mature implementation
+  and already had the security properties the local one lacked — mandatory
+  signature (a missing header and a missing stored secret are each a 401), raw-
+  body verification, a 60s replay guard, 401-not-404 so workspace existence is
+  not probeable, repo→orchestrator routing, and session+event+queue committed in
+  one transaction.
+  **What was missing was proof.** `tests/integration/round-trip.test.ts` walks
+  the pipeline but re-implements the route's logic in SQL and asserts on the
+  re-implementation — it compares an HMAC it computed against an HMAC it
+  computed the same way, and its unsigned-webhook case asserts on a local
+  variable beside the comment "route returns 401". It never imports the route.
+  Same for `queue.test.ts` and the dispatch routes. The schema, crypto and
+  concurrency semantics were covered; the shipped modules were not.
+  Added `tests/integration/linear-webhook-route.test.ts`, which **imports and
+  invokes the actual handlers** against the live database: 12 tests covering
+  unsigned / forged / tampered-after-signing / unknown-org / stale-timestamp /
+  non-bot-assignee rejections, the dispatch commit (session + event + queue row,
+  with the queue row asserted because a session without one is a dispatch that
+  silently never happens), Linear redelivery as a duplicate, then the machine
+  side: unauthenticated poll refused, poll returns the dispatch, claim stamps
+  the row, a second claim 409s, and a later poll no longer offers it. Seeds are
+  committed (the route uses its own connection) and removed in `afterAll`, which
+  asserts the database is clean — verified separately as well.
+  Full website suite: **329 tests / 18 files green**, typecheck clean.
+  **Verdict: the paid path works.** Linear issue assigned to the bot → hosted
+  webhook → durable queue → the user's machine claims it. The remaining gap is
+  not the bridge but the join: the claimed `TaskDispatchMessage` is not yet fed
+  into the local conductor's planning loop.
+
+- **2026-08-17** — **Approve → dispatch verified live; found a deadlock that would
+  have hit every realistic plan.** Wave 1 of the live plan fanned out to real
+  Claude Code sessions in an isolated scratch repo. Four defects fixed:
+  1. **`wave_plans.plan_id` was given the horizon item's id.** `persistPlan`
+     passed `input.itemId` for *both* `horizonItemId` and `planId`; the FK
+     points at `plans(id)`, a different id. Approve died with a bare
+     "FOREIGN KEY constraint failed" naming neither column nor value. Now
+     resolves the real plans row and fails with a diagnosis if absent.
+  2. **Waves larger than `maxConcurrentSubagents` deadlocked permanently.**
+     `dispatchWave` dispatches up to the cap and leaves the rest `pending`;
+     nothing backfilled when a slot freed, and `checkWaveCompletion` requires
+     *every* task to be terminal. So the wave never completed and the run hung
+     with the fleet idle. Hidden because the only previously-executed plan had
+     fewer tasks per wave than the cap — the first real plan had waves of 8/9/9
+     against a default cap of 4. Fixed with `onCapacityFreed`, wired to
+     `controller.dispatchWave`. **Verified live:** a completion is immediately
+     followed by an unprompted dispatch, and the drain continues *past a failed
+     task* — the failure path settles too, which it previously did not do at all.
+  3. **`handleTaskFailed` never checked wave completion.** A wave whose last
+     outstanding task failed was never recognised as finished.
+  4. The dispatch route could not re-dispatch an already-`active` wave, so a
+     stalled wave had no recovery short of editing the database. It now accepts
+     an explicit `waveIndex`.
+  Also observed, **not yet fixed**: the conductor's dispatch port drives the
+  controller directly and never moves `wave_plans.status` off `draft`, so every
+  status-gated route (pause/resume/metrics) is inoperative on conductor-driven
+  runs.
+- **2026-08-17** — **Linear bridge assessed; it does not work, and it was
+  unauthenticated.** The webhook route read `linear-signature` and discarded it
+  behind a `TODO`. `handleLinearWebhook` verifies only when handed secret +
+  signature + raw body, and the route passed none — so the guard was
+  structurally unreachable and the endpoint accepted forged payloads that mutate
+  state. It also never passed `botUserId`, the sole trigger for the
+  `bot_assigned` branch, so the dispatch the bridge exists to produce could
+  never fire — and the route discarded `result.dispatch` regardless. `connect`
+  verifies credentials against Linear and then persists **nothing**
+  (`initLinearClient` sets a module-level variable; no table exists). Route now
+  **fails closed** (503 with no secret, 401 on missing/invalid signature),
+  verifies against the raw body, and passes `botUserId`. Verified: a forged
+  payload that previously would have been processed is now refused.
+
+- **2026-08-16** — **Planning agent verified end to end on a live model call.**
+  Fixed four defects, three of them latent behind the first:
+  1. `claude-sonnet-4-20250514` had been retired — every planning run 404'd. The
+     ID was hardcoded at **six** call sites; now one constant
+     (`wave-planner/models.ts`, `resolvePlannerModel()`), default
+     `claude-opus-5`, `WAVE_PLANNER_MODEL` still overrides.
+  2. `generateWithRetry` retried that 404 four times through the full backoff
+     ladder. Permanent statuses (400/401/403/404/405/422) now fail fast; the
+     wrapper preserves `.status` so the loop can tell them from a 529.
+  3. `refineplan` **threw** on an invalid refinement — discarding an already-valid
+     plan and failing the whole conductor run. Its own comment had always said
+     "return original"; the code now does, and records
+     `lastRefinementError` so a discarded pass is not silent.
+  4. **Markdown table parser split on escaped pipes.** The model emitted correct
+     GFM (`` `'png'\|'svg'` ``); `line.split('|')` treated the escape as a column
+     break and shifted every later cell left. Damage landed in `filePaths` —
+     which is what conflict detection uses to decide what may share a wave, so
+     colliding tasks would not be seen to collide and would be **dispatched in
+     parallel onto the same file**. Regression test pins the exact captured row.
+  Verified run: HTTP 200, `awaiting: review`, 3 waves / 25 tasks,
+  parallelization **0.88**, 3 refinement iterations, 0 corrupted file paths.
+  Added `DEVPILOT_PLANNER_DUMP_DIR` (opt-in, 0600, never throws) — the raw
+  response capture is what made defect 4 findable at all.
+  **Not yet proven:** approve → dispatch through `ConductorReviewPanel` has not
+  been exercised since the model fix; it dispatches real sessions, so it needs a
+  deliberate call rather than a drive-by test.
+
 - **2026-08-12** — External substrate research returned and **verified against
   the GitHub API**: `codebase-memory-mcp` confirmed for V1.4, Kuzu confirmed
   archived, GrafeoDB found. Its Problem B recommendation (`graphzep`) was false —

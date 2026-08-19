@@ -1,6 +1,6 @@
-import { E as EventType } from './enums-CbVZMWqb.js';
-import { g as WaveTask } from './wave-planner-BYl3JIm1.js';
-import { e as OrchestratorService } from './service-CmLM9G-i.js';
+import { E as EventType } from './enums-CbVZMWqb.mjs';
+import { g as WaveTask } from './wave-planner-BYl3JIm1.mjs';
+import { e as OrchestratorService } from './service-CmLM9G-i.mjs';
 
 interface ParsedWavePlan {
     waves: ParsedWave[];
@@ -462,8 +462,53 @@ declare function assignWaves(tasks: ParsedTask[], edges: ParsedEdge[], config?: 
  */
 declare function scorePlan(assignment: WaveAssignmentResult, criticalPathLength: number, edges: ParsedEdge[], tasks: ParsedTask[]): PlanScore;
 
+/**
+ * Model IDs for the planning agents.
+ *
+ * These live in one place because they had been hardcoded at six call sites
+ * (`conductor.ts`, `conductor-graph.ts`, `generator.ts`, the reoptimize route,
+ * the wiki command, and a doc comment). When `claude-sonnet-4-20250514` was
+ * retired, every planning run failed with
+ *
+ *     404 not_found_error: model: claude-sonnet-4-20250514
+ *
+ * and the fix had to be applied six times. A retired model ID is a *when*, not
+ * an *if* — so the ID belongs in one constant that every caller reads.
+ *
+ * Resolution order at every call site: an explicit `options.model`, then the
+ * environment variable, then the constant. The env override is what lets a
+ * conductor drop the planner to a cheaper tier for a cost-sensitive run
+ * without a rebuild.
+ */
+/**
+ * The wave planner's default.
+ *
+ * Opus rather than a cheaper tier is a deliberate product call, not a reflex:
+ * DESIGN.md §1 argues the bottleneck is *planning throughput and quality*, not
+ * agent capacity. A plan is one call of at most `maxTokens` output that then
+ * governs an entire fleet of dispatched sessions — the cheapest place in the
+ * system to spend model quality, and the most expensive place to skimp. A bad
+ * decomposition wastes far more in dispatched-agent tokens than the planning
+ * call itself ever costs.
+ */
+declare const DEFAULT_PLANNER_MODEL = "claude-opus-5";
+/**
+ * Wiki/asset generation. Summarisation over already-retrieved content is not
+ * the same problem as decomposition, so it does not need the same tier.
+ */
+declare const DEFAULT_WIKI_MODEL = "claude-sonnet-5";
+/**
+ * Resolve the planner model: explicit argument → env override → default.
+ */
+declare function resolvePlannerModel(explicit?: string): string;
+/**
+ * Resolve the wiki model: explicit argument → env override → default.
+ */
+declare function resolveWikiModel(explicit?: string): string;
+
 interface AIClientConfig {
     apiKey: string;
+    /** Model ID. Prefer `resolvePlannerModel()` over a literal — see models.ts. */
     model: string;
     maxTokens: number;
     timeout?: number;
@@ -1210,6 +1255,14 @@ declare class PlanRefinementService {
     readonly promptConstructor: PromptConstructor;
     private aiClient;
     private config;
+    /**
+     * Why the most recent refinement pass was discarded, if it was.
+     *
+     * A discarded refinement is no longer fatal, which means it is no longer
+     * loud either — without this the conductor would silently burn a model call
+     * per iteration and report an unchanged score with no reason given.
+     */
+    lastRefinementError?: string;
     constructor(aiClientConfig: AIClientConfig, refinementConfig?: Partial<PlanRefinementConfig>);
     /**
      * Generate and refine a wave plan until quality threshold is met.
@@ -1560,6 +1613,22 @@ declare class ConcurrencyManager {
 interface CompletionListenerOptions {
     /** Max retries per task before terminal failure. Default 1. */
     retryLimit?: number;
+    /**
+     * Called when a task reaches a terminal state but its wave has not finished —
+     * i.e. a concurrency slot just freed and pending tasks may now be dispatchable.
+     *
+     * Without this the executor was a **deadlock for any wave larger than
+     * `maxConcurrentSubagents`**. `dispatchWave` dispatches up to the cap and
+     * leaves the remainder `pending`; nothing ever dispatched them, and
+     * `checkWaveCompletion` requires *every* task to be terminal — so the wave
+     * could never complete and the run hung forever with the fleet idle.
+     *
+     * It stayed hidden because the only wave plan ever executed end to end had
+     * fewer tasks per wave than the cap. Real plans do not: the first live plan
+     * generated after this was found had waves of 8, 9 and 9 against a default cap
+     * of 4, so every wave of it would have hung.
+     */
+    onCapacityFreed?: (wavePlanId: string, waveIndex: number) => Promise<void>;
 }
 /**
  * CompletionListener handles task completion events from the orchestrator.
@@ -1569,7 +1638,17 @@ declare class CompletionListener {
     private onWaveComplete;
     private db;
     private retryLimit;
+    private onCapacityFreed?;
     constructor(onWaveComplete: (wavePlanId: string, waveIndex: number) => Promise<void>, options?: CompletionListenerOptions);
+    /**
+     * A task reached a terminal state: either the wave is done, or a slot just
+     * freed and the remaining pending tasks deserve a dispatch attempt.
+     *
+     * Centralised so completion and failure share it — a wave whose tasks *fail*
+     * frees capacity exactly as one whose tasks succeed, and handling only the
+     * success path would leave the same deadlock behind a different door.
+     */
+    private settleWave;
     /**
      * Handle task started event.
      * Idempotently marks the wave task 'running'; a task already in a terminal
@@ -1822,6 +1901,8 @@ type index_CriticalPathAnnotation = CriticalPathAnnotation;
 type index_CriticalPathResult = CriticalPathResult;
 type index_DAGNode = DAGNode;
 type index_DAGValidatorConfig = DAGValidatorConfig;
+declare const index_DEFAULT_PLANNER_MODEL: typeof DEFAULT_PLANNER_MODEL;
+declare const index_DEFAULT_WIKI_MODEL: typeof DEFAULT_WIKI_MODEL;
 type index_DispatchError = DispatchError;
 type index_DispatchResult = DispatchResult;
 type index_ExecutionBridge = ExecutionBridge;
@@ -1912,6 +1993,8 @@ declare const index_parseFilePaths: typeof parseFilePaths;
 declare const index_parseWavePlanResponse: typeof parseWavePlanResponse;
 declare const index_projectWavePlanToPlan: typeof projectWavePlanToPlan;
 declare const index_refinementTemplate: typeof refinementTemplate;
+declare const index_resolvePlannerModel: typeof resolvePlannerModel;
+declare const index_resolveWikiModel: typeof resolveWikiModel;
 declare const index_scorePlan: typeof scorePlan;
 declare const index_simplifiedTemplate: typeof simplifiedTemplate;
 declare const index_sleep: typeof sleep;
@@ -1919,7 +2002,7 @@ declare const index_toActivityEventType: typeof toActivityEventType;
 declare const index_topologicalSort: typeof topologicalSort;
 declare const index_validateDAG: typeof validateDAG;
 declare namespace index {
-  export { type index_AIClientConfig as AIClientConfig, type index_ActiveTaskInfo as ActiveTaskInfo, type index_AssignedWave as AssignedWave, type index_CodebaseContextBlock as CodebaseContextBlock, index_CodebaseContextService as CodebaseContextService, type index_CompletedWorkBlock as CompletedWorkBlock, index_CompletionListener as CompletionListener, type index_CompletionListenerOptions as CompletionListenerOptions, index_ConcurrencyManager as ConcurrencyManager, type index_ConfidenceSignalUpdate as ConfidenceSignalUpdate, type index_ConstraintBlock as ConstraintBlock, type index_CriticalPathAnnotation as CriticalPathAnnotation, type index_CriticalPathResult as CriticalPathResult, type index_DAGNode as DAGNode, type index_DAGValidatorConfig as DAGValidatorConfig, type index_DispatchError as DispatchError, type index_DispatchResult as DispatchResult, index_ExecutionBridge as ExecutionBridge, type index_ExecutionBridgeOptions as ExecutionBridgeOptions, type index_FleetCapacity as FleetCapacity, type index_FleetContextBlock as FleetContextBlock, index_FleetContextService as FleetContextService, type index_GenerationResult as GenerationResult, type index_MemoryContextBlock as MemoryContextBlock, type index_OptimizationResult as OptimizationResult, type index_ParsedEdge as ParsedEdge, type index_ParsedStatistics as ParsedStatistics, type index_ParsedTask as ParsedTask, type index_ParsedWave as ParsedWave, type index_ParsedWavePlan as ParsedWavePlan, type index_PlanRefinementConfig as PlanRefinementConfig, index_PlanRefinementService as PlanRefinementService, type index_PlanScore as PlanScore, type index_PredecessorSummary as PredecessorSummary, type index_ProjectedPlanIds as ProjectedPlanIds, index_PromptConstructor as PromptConstructor, type index_PromptConstructorConfig as PromptConstructorConfig, type index_PromptContext as PromptContext, type index_PromptTemplate as PromptTemplate, type index_RefinementPromptTemplate as RefinementPromptTemplate, type index_RefinementResult as RefinementResult, type index_RemainingWorkBlock as RemainingWorkBlock, type index_TaskDispatchOutcome as TaskDispatchOutcome, type index_TopologicalSortResult as TopologicalSortResult, type index_ValidationError as ValidationError, type index_ValidationErrorCode as ValidationErrorCode, type index_ValidationResult as ValidationResult, type index_ValidationWarning as ValidationWarning, type index_ValidationWarningCode as ValidationWarningCode, type index_WaveAdjustment as WaveAdjustment, type index_WaveAssignerConfig as WaveAssignerConfig, type index_WaveAssignmentResult as WaveAssignmentResult, type index_WaveDispatchContext as WaveDispatchContext, index_WaveDispatchCoordinator as WaveDispatchCoordinator, type index_WaveDispatchRequest as WaveDispatchRequest, type index_WaveExecutionConfig as WaveExecutionConfig, index_WaveExecutionController as WaveExecutionController, type index_WavePlanExecutionState as WavePlanExecutionState, type index_WavePlanGenerationResult as WavePlanGenerationResult, index_WavePlanGenerator as WavePlanGenerator, type index_WavePlanGeneratorConfig as WavePlanGeneratorConfig, index_WavePlannerAIClient as WavePlannerAIClient, type index_WavePlannerConfig as WavePlannerConfig, type index_WaveProgress as WaveProgress, type index_WaveSSEEvent as WaveSSEEvent, index_advanceToNextWave as advanceToNextWave, index_assignWaves as assignWaves, index_autoAdvanceWave as autoAdvanceWave, index_buildDAGGraph as buildDAGGraph, index_buildSpecContentForItem as buildSpecContentForItem, index_collectFinalMetrics as collectFinalMetrics, index_computeCriticalPath as computeCriticalPath, index_createFlatPlan as createFlatPlan, index_createFlatPlanFromDescriptions as createFlatPlanFromDescriptions, index_createPlanRefinementService as createPlanRefinementService, index_createPromptConstructor as createPromptConstructor, index_createWavePlanGenerator as createWavePlanGenerator, index_defaultTemplate as defaultTemplate, index_extractAllTaskCodes as extractAllTaskCodes, index_extractWaveFromTaskCode as extractWaveFromTaskCode, index_findCommonTheme as findCommonTheme, index_findTaskByCode as findTaskByCode, index_generatePlanForItem as generatePlanForItem, index_generateWaveLabel as generateWaveLabel, index_generateWavePlan as generateWavePlan, index_getExecutionBridgeOrNull as getExecutionBridgeOrNull, index_getTasksInWave as getTasksInWave, index_groupBy as groupBy, index_initExecutionBridge as initExecutionBridge, index_markWavePlanComplete as markWavePlanComplete, index_normalizeComplexity as normalizeComplexity, index_normalizeModel as normalizeModel, index_parseDependencies as parseDependencies, index_parseFilePaths as parseFilePaths, index_parseWavePlanResponse as parseWavePlanResponse, index_projectWavePlanToPlan as projectWavePlanToPlan, index_refinementTemplate as refinementTemplate, index_scorePlan as scorePlan, index_simplifiedTemplate as simplifiedTemplate, index_sleep as sleep, index_toActivityEventType as toActivityEventType, index_topologicalSort as topologicalSort, index_validateDAG as validateDAG };
+  export { type index_AIClientConfig as AIClientConfig, type index_ActiveTaskInfo as ActiveTaskInfo, type index_AssignedWave as AssignedWave, type index_CodebaseContextBlock as CodebaseContextBlock, index_CodebaseContextService as CodebaseContextService, type index_CompletedWorkBlock as CompletedWorkBlock, index_CompletionListener as CompletionListener, type index_CompletionListenerOptions as CompletionListenerOptions, index_ConcurrencyManager as ConcurrencyManager, type index_ConfidenceSignalUpdate as ConfidenceSignalUpdate, type index_ConstraintBlock as ConstraintBlock, type index_CriticalPathAnnotation as CriticalPathAnnotation, type index_CriticalPathResult as CriticalPathResult, type index_DAGNode as DAGNode, type index_DAGValidatorConfig as DAGValidatorConfig, index_DEFAULT_PLANNER_MODEL as DEFAULT_PLANNER_MODEL, index_DEFAULT_WIKI_MODEL as DEFAULT_WIKI_MODEL, type index_DispatchError as DispatchError, type index_DispatchResult as DispatchResult, index_ExecutionBridge as ExecutionBridge, type index_ExecutionBridgeOptions as ExecutionBridgeOptions, type index_FleetCapacity as FleetCapacity, type index_FleetContextBlock as FleetContextBlock, index_FleetContextService as FleetContextService, type index_GenerationResult as GenerationResult, type index_MemoryContextBlock as MemoryContextBlock, type index_OptimizationResult as OptimizationResult, type index_ParsedEdge as ParsedEdge, type index_ParsedStatistics as ParsedStatistics, type index_ParsedTask as ParsedTask, type index_ParsedWave as ParsedWave, type index_ParsedWavePlan as ParsedWavePlan, type index_PlanRefinementConfig as PlanRefinementConfig, index_PlanRefinementService as PlanRefinementService, type index_PlanScore as PlanScore, type index_PredecessorSummary as PredecessorSummary, type index_ProjectedPlanIds as ProjectedPlanIds, index_PromptConstructor as PromptConstructor, type index_PromptConstructorConfig as PromptConstructorConfig, type index_PromptContext as PromptContext, type index_PromptTemplate as PromptTemplate, type index_RefinementPromptTemplate as RefinementPromptTemplate, type index_RefinementResult as RefinementResult, type index_RemainingWorkBlock as RemainingWorkBlock, type index_TaskDispatchOutcome as TaskDispatchOutcome, type index_TopologicalSortResult as TopologicalSortResult, type index_ValidationError as ValidationError, type index_ValidationErrorCode as ValidationErrorCode, type index_ValidationResult as ValidationResult, type index_ValidationWarning as ValidationWarning, type index_ValidationWarningCode as ValidationWarningCode, type index_WaveAdjustment as WaveAdjustment, type index_WaveAssignerConfig as WaveAssignerConfig, type index_WaveAssignmentResult as WaveAssignmentResult, type index_WaveDispatchContext as WaveDispatchContext, index_WaveDispatchCoordinator as WaveDispatchCoordinator, type index_WaveDispatchRequest as WaveDispatchRequest, type index_WaveExecutionConfig as WaveExecutionConfig, index_WaveExecutionController as WaveExecutionController, type index_WavePlanExecutionState as WavePlanExecutionState, type index_WavePlanGenerationResult as WavePlanGenerationResult, index_WavePlanGenerator as WavePlanGenerator, type index_WavePlanGeneratorConfig as WavePlanGeneratorConfig, index_WavePlannerAIClient as WavePlannerAIClient, type index_WavePlannerConfig as WavePlannerConfig, type index_WaveProgress as WaveProgress, type index_WaveSSEEvent as WaveSSEEvent, index_advanceToNextWave as advanceToNextWave, index_assignWaves as assignWaves, index_autoAdvanceWave as autoAdvanceWave, index_buildDAGGraph as buildDAGGraph, index_buildSpecContentForItem as buildSpecContentForItem, index_collectFinalMetrics as collectFinalMetrics, index_computeCriticalPath as computeCriticalPath, index_createFlatPlan as createFlatPlan, index_createFlatPlanFromDescriptions as createFlatPlanFromDescriptions, index_createPlanRefinementService as createPlanRefinementService, index_createPromptConstructor as createPromptConstructor, index_createWavePlanGenerator as createWavePlanGenerator, index_defaultTemplate as defaultTemplate, index_extractAllTaskCodes as extractAllTaskCodes, index_extractWaveFromTaskCode as extractWaveFromTaskCode, index_findCommonTheme as findCommonTheme, index_findTaskByCode as findTaskByCode, index_generatePlanForItem as generatePlanForItem, index_generateWaveLabel as generateWaveLabel, index_generateWavePlan as generateWavePlan, index_getExecutionBridgeOrNull as getExecutionBridgeOrNull, index_getTasksInWave as getTasksInWave, index_groupBy as groupBy, index_initExecutionBridge as initExecutionBridge, index_markWavePlanComplete as markWavePlanComplete, index_normalizeComplexity as normalizeComplexity, index_normalizeModel as normalizeModel, index_parseDependencies as parseDependencies, index_parseFilePaths as parseFilePaths, index_parseWavePlanResponse as parseWavePlanResponse, index_projectWavePlanToPlan as projectWavePlanToPlan, index_refinementTemplate as refinementTemplate, index_resolvePlannerModel as resolvePlannerModel, index_resolveWikiModel as resolveWikiModel, index_scorePlan as scorePlan, index_simplifiedTemplate as simplifiedTemplate, index_sleep as sleep, index_toActivityEventType as toActivityEventType, index_topologicalSort as topologicalSort, index_validateDAG as validateDAG };
 }
 
-export { type DispatchError as $, type AddDrawerInput as A, type AIClientConfig as B, type Closet as C, DisabledClient as D, type ActiveTaskInfo as E, type AssignedWave as F, type CodebaseContextBlock as G, type Hall as H, CodebaseContextService as I, type CompletedWorkBlock as J, type KgAddInput as K, LocalShimClient as L, MemPalaceService as M, CompletionListener as N, type CompletionListenerOptions as O, type PalaceContextBlock as P, ConcurrencyManager as Q, type RecallInput as R, type SearchInput as S, type Tunnel as T, type ConfidenceSignalUpdate as U, type ConstraintBlock as V, type Wing as W, type CriticalPathAnnotation as X, type CriticalPathResult as Y, type DAGNode as Z, type DAGValidatorConfig as _, type MemPalaceConfig as a, extractWaveFromTaskCode as a$, type DispatchResult as a0, ExecutionBridge as a1, type ExecutionBridgeOptions as a2, type FleetCapacity as a3, type FleetContextBlock as a4, FleetContextService as a5, type GenerationResult as a6, type MemoryContextBlock as a7, type OptimizationResult as a8, type ParsedEdge as a9, type WaveDispatchContext as aA, WaveDispatchCoordinator as aB, type WaveDispatchRequest as aC, type WaveExecutionConfig as aD, WaveExecutionController as aE, type WavePlanExecutionState as aF, type WavePlanGenerationResult as aG, WavePlanGenerator as aH, type WavePlanGeneratorConfig as aI, WavePlannerAIClient as aJ, type WavePlannerConfig as aK, type WaveProgress as aL, type WaveSSEEvent as aM, advanceToNextWave as aN, assignWaves as aO, autoAdvanceWave as aP, buildDAGGraph as aQ, buildSpecContentForItem as aR, collectFinalMetrics as aS, computeCriticalPath as aT, createFlatPlan as aU, createFlatPlanFromDescriptions as aV, createPlanRefinementService as aW, createPromptConstructor as aX, createWavePlanGenerator as aY, defaultTemplate as aZ, extractAllTaskCodes as a_, type ParsedStatistics as aa, type ParsedTask as ab, type ParsedWave as ac, type ParsedWavePlan as ad, type PlanRefinementConfig as ae, PlanRefinementService as af, type PlanScore as ag, type PredecessorSummary as ah, type ProjectedPlanIds as ai, PromptConstructor as aj, type PromptConstructorConfig as ak, type PromptContext as al, type PromptTemplate as am, type RefinementPromptTemplate as an, type RefinementResult as ao, type RemainingWorkBlock as ap, type TaskDispatchOutcome as aq, type TopologicalSortResult as ar, type ValidationError as as, type ValidationErrorCode as at, type ValidationResult as au, type ValidationWarning as av, type ValidationWarningCode as aw, type WaveAdjustment as ax, type WaveAssignerConfig as ay, type WaveAssignmentResult as az, type MemPalaceClient as b, findCommonTheme as b0, findTaskByCode as b1, generatePlanForItem as b2, generateWaveLabel as b3, generateWavePlan as b4, getExecutionBridgeOrNull as b5, getTasksInWave as b6, groupBy as b7, initExecutionBridge as b8, markWavePlanComplete as b9, normalizeComplexity as ba, normalizeModel as bb, parseDependencies as bc, parseFilePaths as bd, parseWavePlanResponse as be, projectWavePlanToPlan as bf, refinementTemplate as bg, scorePlan as bh, simplifiedTemplate as bi, sleep as bj, toActivityEventType as bk, topologicalSort as bl, validateDAG as bm, type AddDrawerResult as c, type SearchResult as d, type WakeUpInput as e, type WakeUpResult as f, type RecallResult as g, type KgContradiction as h, type KgQueryInput as i, type KgTriple as j, type KgInvalidateInput as k, type Room as l, type Drawer as m, type DrawerSource as n, type HallRelation as o, McpAdapterClient as p, type McpTransport as q, type MemPalaceMode as r, type MemoryTier as s, type MemoryType as t, type SearchHit as u, type WingType as v, createMemPalaceClient as w, createMemPalaceService as x, estimateTokens as y, index as z };
+export { DEFAULT_PLANNER_MODEL as $, type AddDrawerInput as A, type AIClientConfig as B, type Closet as C, DisabledClient as D, type ActiveTaskInfo as E, type AssignedWave as F, type CodebaseContextBlock as G, type Hall as H, CodebaseContextService as I, type CompletedWorkBlock as J, type KgAddInput as K, LocalShimClient as L, MemPalaceService as M, CompletionListener as N, type CompletionListenerOptions as O, type PalaceContextBlock as P, ConcurrencyManager as Q, type RecallInput as R, type SearchInput as S, type Tunnel as T, type ConfidenceSignalUpdate as U, type ConstraintBlock as V, type Wing as W, type CriticalPathAnnotation as X, type CriticalPathResult as Y, type DAGNode as Z, type DAGValidatorConfig as _, type MemPalaceConfig as a, defaultTemplate as a$, DEFAULT_WIKI_MODEL as a0, type DispatchError as a1, type DispatchResult as a2, ExecutionBridge as a3, type ExecutionBridgeOptions as a4, type FleetCapacity as a5, type FleetContextBlock as a6, FleetContextService as a7, type GenerationResult as a8, type MemoryContextBlock as a9, type WaveAssignerConfig as aA, type WaveAssignmentResult as aB, type WaveDispatchContext as aC, WaveDispatchCoordinator as aD, type WaveDispatchRequest as aE, type WaveExecutionConfig as aF, WaveExecutionController as aG, type WavePlanExecutionState as aH, type WavePlanGenerationResult as aI, WavePlanGenerator as aJ, type WavePlanGeneratorConfig as aK, WavePlannerAIClient as aL, type WavePlannerConfig as aM, type WaveProgress as aN, type WaveSSEEvent as aO, advanceToNextWave as aP, assignWaves as aQ, autoAdvanceWave as aR, buildDAGGraph as aS, buildSpecContentForItem as aT, collectFinalMetrics as aU, computeCriticalPath as aV, createFlatPlan as aW, createFlatPlanFromDescriptions as aX, createPlanRefinementService as aY, createPromptConstructor as aZ, createWavePlanGenerator as a_, type OptimizationResult as aa, type ParsedEdge as ab, type ParsedStatistics as ac, type ParsedTask as ad, type ParsedWave as ae, type ParsedWavePlan as af, type PlanRefinementConfig as ag, PlanRefinementService as ah, type PlanScore as ai, type PredecessorSummary as aj, type ProjectedPlanIds as ak, PromptConstructor as al, type PromptConstructorConfig as am, type PromptContext as an, type PromptTemplate as ao, type RefinementPromptTemplate as ap, type RefinementResult as aq, type RemainingWorkBlock as ar, type TaskDispatchOutcome as as, type TopologicalSortResult as at, type ValidationError as au, type ValidationErrorCode as av, type ValidationResult as aw, type ValidationWarning as ax, type ValidationWarningCode as ay, type WaveAdjustment as az, type MemPalaceClient as b, extractAllTaskCodes as b0, extractWaveFromTaskCode as b1, findCommonTheme as b2, findTaskByCode as b3, generatePlanForItem as b4, generateWaveLabel as b5, generateWavePlan as b6, getExecutionBridgeOrNull as b7, getTasksInWave as b8, groupBy as b9, initExecutionBridge as ba, markWavePlanComplete as bb, normalizeComplexity as bc, normalizeModel as bd, parseDependencies as be, parseFilePaths as bf, parseWavePlanResponse as bg, projectWavePlanToPlan as bh, refinementTemplate as bi, resolvePlannerModel as bj, resolveWikiModel as bk, scorePlan as bl, simplifiedTemplate as bm, sleep as bn, toActivityEventType as bo, topologicalSort as bp, validateDAG as bq, type AddDrawerResult as c, type SearchResult as d, type WakeUpInput as e, type WakeUpResult as f, type RecallResult as g, type KgContradiction as h, type KgQueryInput as i, type KgTriple as j, type KgInvalidateInput as k, type Room as l, type Drawer as m, type DrawerSource as n, type HallRelation as o, McpAdapterClient as p, type McpTransport as q, type MemPalaceMode as r, type MemoryTier as s, type MemoryType as t, type SearchHit as u, type WingType as v, createMemPalaceClient as w, createMemPalaceService as x, estimateTokens as y, index as z };

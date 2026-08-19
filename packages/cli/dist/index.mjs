@@ -1025,12 +1025,145 @@ function createBridgeDispatchHandler(opts) {
   };
 }
 
+// src/commands/bridge/conductor-handler.ts
+var DEFAULT_TIMEOUT_MS = 15 * 6e4;
+async function call(url, init, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      ...init,
+      signal: controller.signal,
+      headers: { "Content-Type": "application/json", ...init.headers ?? {} }
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(`${init.method ?? "GET"} ${url} \u2192 ${res.status}: ${text.slice(0, 300)}`);
+    }
+    return text ? JSON.parse(text) : {};
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function existingItem(cockpitUrl, linearTicketId, timeoutMs) {
+  const items = await call(
+    `${cockpitUrl}/api/items?linearTicketId=${encodeURIComponent(linearTicketId)}`,
+    { method: "GET" },
+    timeoutMs
+  );
+  return Array.isArray(items) && items.length > 0 ? items[0] : null;
+}
+function describe(state) {
+  if (state.awaiting === "review") {
+    const score = state.review?.score?.parallelizationScore;
+    const pct = typeof score === "number" ? ` (parallelization ${Math.round(score * 100)}%)` : "";
+    return `Plan ready${pct} \u2014 awaiting review in the DevPilot cockpit.`;
+  }
+  if (state.awaiting === "wave") return "Plan approved \u2014 dispatching waves.";
+  if (state.status === "complete") return "All waves complete.";
+  if (state.status === "failed") {
+    return `Conductor run failed: ${state.errors?.[state.errors.length - 1] ?? "unknown error"}`;
+  }
+  return `Conductor run ${state.status ?? "started"}.`;
+}
+function createConductorDispatchHandler(opts) {
+  const log = opts.onLog ?? (() => {
+  });
+  const timeout = opts.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const base = opts.cockpitUrl.replace(/\/$/, "");
+  return async function handle(message) {
+    const { sessionId, linearIdentifier, title, repo, description } = message;
+    log(`${linearIdentifier} \u2192 conductor (${repo}): ${title}`);
+    try {
+      let item = await existingItem(base, linearIdentifier, timeout);
+      if (item) {
+        log(`${linearIdentifier} already on the board as ${item.id} \u2014 reusing`);
+        const current = await call(
+          `${base}/api/items/${item.id}/conductor`,
+          { method: "GET" },
+          timeout
+        ).catch(() => ({}));
+        const live = current.awaiting === "review" || current.awaiting === "wave" || current.status === "planning" || current.status === "executing";
+        if (live) {
+          const summary2 = describe(current);
+          log(`${linearIdentifier}: ${summary2} (no new run started)`);
+          await opts.client.reportSessionStatus(sessionId, {
+            status: "running",
+            progressPercent: current.awaiting === "review" ? 40 : 60,
+            message: summary2
+          });
+          return;
+        }
+      } else {
+        item = await call(
+          `${base}/api/items`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              title,
+              repo,
+              // REFINING is where an item that is about to be planned belongs;
+              // DIRECTIONAL (the API default) would leave it parked as an idea.
+              zone: "REFINING",
+              linearTicketId: linearIdentifier,
+              description
+            })
+          },
+          timeout
+        );
+        if (!item?.id) throw new Error("Cockpit did not return a created item id");
+        log(`${linearIdentifier} \u2192 item ${item.id}`);
+      }
+      await opts.client.reportSessionStatus(sessionId, {
+        status: "running",
+        progressPercent: 5,
+        message: `On the board as ${item.id}. Planning\u2026`
+      });
+      const state = await call(
+        `${base}/api/items/${item.id}/conductor`,
+        { method: "POST", body: JSON.stringify({}) },
+        timeout
+      );
+      const summary = describe(state);
+      log(`${linearIdentifier}: ${summary}`);
+      if (state.status === "failed") {
+        throw new Error(summary);
+      }
+      await opts.client.reportSessionStatus(sessionId, {
+        status: "running",
+        progressPercent: state.awaiting === "review" ? 40 : 60,
+        message: summary
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      log(`${linearIdentifier} failed: ${reason}`);
+      try {
+        await opts.client.reportSessionStatus(sessionId, {
+          status: "error",
+          progressPercent: 0,
+          message: reason
+        });
+      } catch {
+      }
+      throw new Error(reason);
+    }
+  };
+}
+
 // src/commands/bridge/connect.ts
 var connectCommand = new Command6("connect").description("Connect this machine to a DevPilot bridge and run dispatched work locally").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-n, --name <name>", "Name for this machine", os.hostname()).option("-r, --repos <repos>", "Comma-separated repos this machine handles").option("-m, --mode <mode>", "Local orchestrator mode (http|claude-session)", "http").option(
   "--transport <transport>",
   "realtime | poll \u2014 polling is fully correct, just higher latency",
   process.env.DEVPILOT_BRIDGE_TRANSPORT || "realtime"
-).option("-j, --max-jobs <n>", "Max concurrent local jobs", "4").option("--http-url <url>", "Orchestrator URL (required for --mode http)").option("--ao-project <name>", "ao project name (for --mode ao-cli)").option("--ao-path <path>", "Path to the ao binary (default: ao on PATH)").action(async (options) => {
+).option("-j, --max-jobs <n>", "Max concurrent local jobs", "4").option("--http-url <url>", "Orchestrator URL (required for --mode http)").option("--ao-project <name>", "ao project name (for --mode ao-cli)").option("--ao-path <path>", "Path to the ao binary (default: ao on PATH)").option(
+  "--plan",
+  "Route dispatches through the conductor (plan \u2192 waves) instead of one session",
+  process.env.DEVPILOT_BRIDGE_PLAN === "true"
+).option(
+  "--cockpit-url <url>",
+  "Local cockpit base URL for --plan",
+  process.env.DEVPILOT_COCKPIT_URL || "http://127.0.0.1:3000"
+).action(async (options) => {
   if (!options.url) {
     console.error(chalk7.red("\u2717 Bridge URL required (--url or DEVPILOT_BRIDGE_URL)"));
     process.exit(1);
@@ -1087,7 +1220,11 @@ var connectCommand = new Command6("connect").description("Connect this machine t
       jwt: registration.realtime.jwt
     } : null,
     maxConcurrent: maxConcurrentJobs,
-    handler: createBridgeDispatchHandler({
+    handler: options.plan ? createConductorDispatchHandler({
+      client,
+      cockpitUrl: options.cockpitUrl,
+      onLog: (line) => console.log(chalk7.blue(`   ${line}`))
+    }) : createBridgeDispatchHandler({
       client,
       orchestratorMode: options.mode,
       httpUrl: options.httpUrl,
@@ -2105,6 +2242,7 @@ import { Command as Command16 } from "commander";
 import { existsSync as existsSync7, mkdirSync as mkdirSync3, readFileSync as readFileSync4, writeFileSync as writeFileSync6 } from "fs";
 import { join as join7 } from "path";
 import chalk15 from "chalk";
+import { resolveWikiModel } from "@devpilot.sh/core/wave-planner";
 var wikiCommand = new Command16("wiki").description("LLM-compiled knowledge base \u2014 institutional memory for your codebase");
 wikiCommand.command("init").description("Initialize the wiki system in the current repository").option("--wiki-dir <path>", "Wiki output directory", ".devpilot/wiki").action(async (options) => {
   const cwd = process.cwd();
@@ -2449,7 +2587,7 @@ function getWikiConfig() {
   const cwd = process.cwd();
   return {
     apiKey: process.env.ANTHROPIC_API_KEY || "",
-    model: process.env.WIKI_MODEL || "claude-sonnet-4-20250514",
+    model: resolveWikiModel(),
     maxTokens: parseInt(process.env.WIKI_MAX_TOKENS || "8192", 10),
     repo: getRepoName(cwd),
     wikiDir: join7(cwd, ".devpilot", "wiki")

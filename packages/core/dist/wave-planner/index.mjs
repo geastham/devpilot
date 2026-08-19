@@ -1,4 +1,10 @@
 var __defProp = Object.defineProperty;
+var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
+  get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
+}) : x)(function(x) {
+  if (typeof require !== "undefined") return require.apply(this, arguments);
+  throw Error('Dynamic require of "' + x + '" is not supported');
+});
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, { get: all[name], enumerable: true });
@@ -261,7 +267,24 @@ function parseTaskTable(tableContent) {
   return tasks2;
 }
 function parseTableRow(line) {
-  return line.split("|").slice(1, -1).map((cell) => cell.trim());
+  const cells = [];
+  let current = "";
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char === "\\" && line[i + 1] === "|") {
+      current += "|";
+      i++;
+      continue;
+    }
+    if (char === "|") {
+      cells.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  cells.push(current);
+  return cells.slice(1, -1).map((cell) => cell.trim());
 }
 function buildColumnMap(headers) {
   const map = {
@@ -870,8 +893,40 @@ function computeConfidenceSignals(parallelizationScore, fileConflictScore) {
   };
 }
 
+// src/wave-planner/models.ts
+var DEFAULT_PLANNER_MODEL = "claude-opus-5";
+var DEFAULT_WIKI_MODEL = "claude-sonnet-5";
+function resolvePlannerModel(explicit) {
+  return explicit || process.env.WAVE_PLANNER_MODEL || DEFAULT_PLANNER_MODEL;
+}
+function resolveWikiModel(explicit) {
+  return explicit || process.env.WIKI_MODEL || DEFAULT_WIKI_MODEL;
+}
+
 // src/wave-planner/ai-client.ts
 import Anthropic from "@anthropic-ai/sdk";
+var NON_RETRYABLE_STATUS = /* @__PURE__ */ new Set([400, 401, 403, 404, 405, 422]);
+function dumpRawResponse(text8, model) {
+  const dir = process.env.DEVPILOT_PLANNER_DUMP_DIR;
+  if (!dir) return;
+  try {
+    const fs2 = __require("fs");
+    fs2.mkdirSync(dir, { recursive: true });
+    const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+    fs2.writeFileSync(
+      `${dir}/planner-${stamp}.md`,
+      `<!-- model: ${model} -->
+${text8}`,
+      { mode: 384 }
+    );
+  } catch {
+  }
+}
+function isRetryable(error) {
+  const status = error?.status;
+  if (typeof status !== "number") return true;
+  return !NON_RETRYABLE_STATUS.has(status);
+}
 var WavePlannerAIClient = class {
   constructor(config) {
     this.config = config;
@@ -900,6 +955,7 @@ var WavePlannerAIClient = class {
       });
       const durationMs = Date.now() - startTime;
       const textContent = response.content.filter((block) => block.type === "text").map((block) => "text" in block ? block.text : "").join("\n");
+      dumpRawResponse(textContent, response.model);
       return {
         content: textContent,
         tokensInput: response.usage.input_tokens,
@@ -911,9 +967,14 @@ var WavePlannerAIClient = class {
       };
     } catch (error) {
       const durationMs = Date.now() - startTime;
-      throw new Error(
+      const wrapped = new Error(
         `Claude API call failed after ${durationMs}ms: ${error instanceof Error ? error.message : String(error)}`
       );
+      const status = error?.status;
+      if (typeof status === "number") {
+        wrapped.status = status;
+      }
+      throw wrapped;
     }
   }
   /**
@@ -929,6 +990,9 @@ var WavePlannerAIClient = class {
         return await this.generatePlan(prompt);
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
+        if (!isRetryable(error)) {
+          throw lastError;
+        }
         if (attempt === maxRetries) {
           break;
         }
@@ -3332,9 +3396,12 @@ var PlanRefinementService = class {
       plan.dependencyEdges
     );
     if (!validation.valid) {
-      throw new Error(
-        `Refined plan has validation errors: ${validation.errors.map((e) => e.message).join("; ")}`
-      );
+      this.lastRefinementError = `Refinement discarded \u2014 ${validation.errors.map((e) => e.message).join("; ")}`;
+      return {
+        plan: currentPlan,
+        score: this.scorePlan(currentPlan),
+        tokensUsed
+      };
     }
     const score = this.scorePlan(plan);
     return { plan, score, tokensUsed };
@@ -3700,7 +3767,7 @@ async function generateWavePlan(horizonItemId, planId, specContent, itemTitle, r
   const generator = createWavePlanGenerator({
     aiClient: {
       apiKey,
-      model: process.env.WAVE_PLANNER_MODEL || "claude-sonnet-4-20250514",
+      model: resolvePlannerModel(),
       maxTokens: parseInt(process.env.WAVE_PLANNER_MAX_TOKENS || "8192", 10)
     },
     refinement: {
@@ -3980,6 +4047,27 @@ var CompletionListener = class {
     this.onWaveComplete = onWaveComplete;
     this.db = getDatabase();
     this.retryLimit = options?.retryLimit ?? 1;
+    this.onCapacityFreed = options?.onCapacityFreed;
+  }
+  /**
+   * A task reached a terminal state: either the wave is done, or a slot just
+   * freed and the remaining pending tasks deserve a dispatch attempt.
+   *
+   * Centralised so completion and failure share it — a wave whose tasks *fail*
+   * frees capacity exactly as one whose tasks succeed, and handling only the
+   * success path would leave the same deadlock behind a different door.
+   */
+  async settleWave(wavePlanId, waveIndex) {
+    if (await this.checkWaveCompletion(wavePlanId, waveIndex)) {
+      await this.onWaveComplete(wavePlanId, waveIndex);
+      return;
+    }
+    if (this.onCapacityFreed) {
+      try {
+        await this.onCapacityFreed(wavePlanId, waveIndex);
+      } catch {
+      }
+    }
   }
   /**
    * Handle task started event.
@@ -4046,10 +4134,7 @@ var CompletionListener = class {
       taskCode,
       waveIndex: task.waveIndex
     });
-    const isWaveComplete = await this.checkWaveCompletion(wavePlanId, task.waveIndex);
-    if (isWaveComplete) {
-      await this.onWaveComplete(wavePlanId, task.waveIndex);
-    }
+    await this.settleWave(wavePlanId, task.waveIndex);
   }
   /**
    * Handle task failure event.
@@ -4073,6 +4158,15 @@ var CompletionListener = class {
       taskCode,
       error
     });
+    const failed = await this.db.query.waveTasks.findFirst({
+      where: and(
+        eq4(waveTasks.wavePlanId, wavePlanId),
+        eq4(waveTasks.taskCode, taskCode)
+      )
+    });
+    if (failed) {
+      await this.settleWave(wavePlanId, failed.waveIndex);
+    }
   }
   /**
    * Check if all tasks in a wave are complete.
@@ -4744,7 +4838,7 @@ var WaveDispatchCoordinator = class {
         }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : "Unknown error";
-        if (errorMessage === "ORCHESTRATOR_UNAVAILABLE") {
+        if (errorMessage === "ORCHESTRATOR_UNAVAILABLE" || errorMessage === "CAPACITY" || /\b429\b/.test(errorMessage)) {
           result.queued++;
           continue;
         }
@@ -5002,7 +5096,13 @@ var ExecutionBridge = class {
     this.controller = new WaveExecutionController(options.execution, this.coordinator);
     this.listener = new CompletionListener(
       (wavePlanId, waveIndex) => this.controller.handleWaveComplete(wavePlanId, waveIndex),
-      { retryLimit: options.execution.retryLimit }
+      {
+        retryLimit: options.execution.retryLimit,
+        // Re-run the wave's dispatcher whenever a slot frees. `dispatchWave`
+        // re-selects pending/retrying tasks and respects the concurrency cap, so
+        // calling it again is safe and is what drains a wave larger than the cap.
+        onCapacityFreed: (wavePlanId, waveIndex) => this.controller.dispatchWave(wavePlanId, waveIndex).then(() => void 0)
+      }
     );
   }
   /** Subscribe to orchestrator events. Idempotent. */
@@ -5088,6 +5188,8 @@ export {
   CodebaseContextService,
   CompletionListener,
   ConcurrencyManager,
+  DEFAULT_PLANNER_MODEL,
+  DEFAULT_WIKI_MODEL,
   ExecutionBridge,
   FleetContextService,
   PlanRefinementService,
@@ -5128,6 +5230,8 @@ export {
   parseWavePlanResponse,
   projectWavePlanToPlan,
   refinementTemplate,
+  resolvePlannerModel,
+  resolveWikiModel,
   scorePlan,
   simplifiedTemplate,
   sleep,
