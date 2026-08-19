@@ -1,4 +1,5 @@
 import type { BridgeClient, TaskDispatchMessage } from '@devpilot.sh/bridge-client';
+import type { ConductorWatcher } from './conductor-watcher';
 
 /**
  * Bridge dispatch → the CONDUCTOR, rather than a single agent session.
@@ -38,6 +39,12 @@ export interface ConductorHandlerOptions {
   cockpitUrl: string;
   /** Bound on each cockpit call. Plan generation is a model call and is slow. */
   requestTimeoutMs?: number;
+  /**
+   * Watches handed-off runs and reports completion to the bridge, which is what
+   * triggers the Linear write-back. Optional: without it a planned ticket runs
+   * to completion and Linear is never told.
+   */
+  watcher?: ConductorWatcher;
   onLog?: (line: string) => void;
 }
 
@@ -160,6 +167,10 @@ export function createConductorDispatchHandler(
             progressPercent: current.awaiting === 'review' ? 40 : 60,
             message: summary,
           });
+          // Still hand it to the watcher: this claim is a *new* bridge session
+          // for a run that was already in flight, and its completion has to be
+          // reported against this session id or Linear never hears back.
+          opts.watcher?.watch({ sessionId, itemId: item.id, linearIdentifier });
           return;
         }
       } else {
@@ -212,6 +223,11 @@ export function createConductorDispatchHandler(
         progressPercent: state.awaiting === 'review' ? 40 : 60,
         message: summary,
       });
+
+      // The run continues under the cockpit after this returns, so completion
+      // is the watcher's job — it is what eventually calls
+      // reportSessionComplete and makes the hosted side write back to Linear.
+      opts.watcher?.watch({ sessionId, itemId: item.id, linearIdentifier });
 
       // Deliberately returns here. See the header: waiting for a human to
       // approve would strand the queue claim.

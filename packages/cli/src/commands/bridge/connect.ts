@@ -4,6 +4,7 @@ import chalk from 'chalk';
 import { BridgeClient, DispatchLoop, HeartbeatService } from '@devpilot.sh/bridge-client';
 import { createBridgeDispatchHandler } from './dispatch-handler';
 import { createConductorDispatchHandler } from './conductor-handler';
+import { ConductorWatcher } from './conductor-watcher';
 
 interface ConnectOptions {
   url?: string;
@@ -110,6 +111,23 @@ export const connectCommand = new Command('connect')
       console.log(chalk.yellow('   Realtime unavailable from this bridge — polling instead.'));
     }
 
+    // Reports a finished conductor run to the bridge, which is what makes the
+    // hosted side write back to Linear. Only the planned path needs it: the
+    // single-session path reports through the orchestrator's status poller.
+    const conductorWatcher = options.plan
+      ? new ConductorWatcher({
+          client,
+          cockpitUrl: options.cockpitUrl!,
+          onLog: (line) => console.log(chalk.blue(`   ${line}`)),
+          onLost: (run) =>
+            console.log(
+              chalk.yellow(
+                `   ${run.linearIdentifier} was still running at shutdown — Linear will not be updated for it`,
+              ),
+            ),
+        })
+      : null;
+
     const loop = new DispatchLoop({
       client,
       orchestratorId: registration.orchestratorId,
@@ -125,6 +143,7 @@ export const connectCommand = new Command('connect')
         ? createConductorDispatchHandler({
             client,
             cockpitUrl: options.cockpitUrl!,
+            watcher: conductorWatcher!,
             onLog: (line) => console.log(chalk.blue(`   ${line}`)),
           })
         : createBridgeDispatchHandler({
@@ -159,6 +178,10 @@ export const connectCommand = new Command('connect')
       console.log('');
       console.log(chalk.yellow('Disconnecting…'));
       heartbeat.stop();
+      // Before the loop: stopping surfaces any run still in flight via onLost,
+      // and that warning is the only signal that a ticket's completion will
+      // never reach Linear.
+      conductorWatcher?.stop();
       await loop.stop();
       console.log(chalk.green('✓ Disconnected'));
       process.exit(0);

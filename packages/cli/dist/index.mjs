@@ -1092,6 +1092,7 @@ function createConductorDispatchHandler(opts) {
             progressPercent: current.awaiting === "review" ? 40 : 60,
             message: summary2
           });
+          opts.watcher?.watch({ sessionId, itemId: item.id, linearIdentifier });
           return;
         }
       } else {
@@ -1134,6 +1135,7 @@ function createConductorDispatchHandler(opts) {
         progressPercent: state.awaiting === "review" ? 40 : 60,
         message: summary
       });
+      opts.watcher?.watch({ sessionId, itemId: item.id, linearIdentifier });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       log(`${linearIdentifier} failed: ${reason}`);
@@ -1149,6 +1151,78 @@ function createConductorDispatchHandler(opts) {
     }
   };
 }
+
+// src/commands/bridge/conductor-watcher.ts
+var TERMINAL = /* @__PURE__ */ new Set(["complete", "failed"]);
+var ConductorWatcher = class {
+  constructor(opts) {
+    this.opts = opts;
+    this.runs = /* @__PURE__ */ new Map();
+    this.timer = null;
+    this.base = opts.cockpitUrl.replace(/\/$/, "");
+    this.interval = opts.pollIntervalMs ?? 3e4;
+    this.log = opts.onLog ?? (() => {
+    });
+    this.doFetch = opts.fetchImpl ?? fetch;
+  }
+  /** Begin watching a run. Idempotent per bridge session. */
+  watch(run) {
+    if (this.runs.has(run.sessionId)) return;
+    this.runs.set(run.sessionId, run);
+    this.log(`watching ${run.linearIdentifier} (${this.runs.size} tracked)`);
+    this.start();
+  }
+  start() {
+    if (this.timer) return;
+    this.timer = setInterval(() => void this.sweep(), this.interval);
+    this.timer.unref?.();
+  }
+  stop() {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    for (const run of this.runs.values()) this.opts.onLost?.(run);
+    this.runs.clear();
+  }
+  /** Exposed for tests and for an immediate check after handing off a run. */
+  async sweep() {
+    for (const run of [...this.runs.values()]) {
+      try {
+        await this.check(run);
+      } catch (err) {
+        this.log(
+          `${run.linearIdentifier}: state check failed (${err instanceof Error ? err.message : String(err)})`
+        );
+      }
+    }
+    if (this.runs.size === 0 && this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+  async check(run) {
+    const res = await this.doFetch(`${this.base}/api/items/${run.itemId}/conductor`);
+    if (!res.ok) throw new Error(`conductor state \u2192 ${res.status}`);
+    const state = await res.json();
+    if (!state.status || !TERMINAL.has(state.status)) return;
+    const success = state.status === "complete";
+    const waves = state.completedWaves?.length ?? 0;
+    const tasks = state.review?.plan?.waves?.reduce((n, w) => n + (w.tasks?.length ?? 0), 0) ?? 0;
+    const summary = success ? `DevPilot completed ${waves} wave${waves === 1 ? "" : "s"}` + (tasks ? ` covering ${tasks} task${tasks === 1 ? "" : "s"}.` : ".") : `DevPilot run failed: ${state.errors?.[state.errors.length - 1] ?? "unknown error"}`;
+    this.runs.delete(run.sessionId);
+    await this.opts.client.reportSessionComplete(run.sessionId, {
+      success,
+      summary,
+      ...success ? {} : { errorMessage: summary }
+    });
+    this.log(`${run.linearIdentifier}: reported ${success ? "complete" : "failed"} to the bridge`);
+  }
+  /** Test/introspection helper. */
+  get tracked() {
+    return this.runs.size;
+  }
+};
 
 // src/commands/bridge/connect.ts
 var connectCommand = new Command6("connect").description("Connect this machine to a DevPilot bridge and run dispatched work locally").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-n, --name <name>", "Name for this machine", os.hostname()).option("-r, --repos <repos>", "Comma-separated repos this machine handles").option("-m, --mode <mode>", "Local orchestrator mode (http|claude-session)", "http").option(
@@ -1211,6 +1285,16 @@ var connectCommand = new Command6("connect").description("Connect this machine t
   if (options.transport !== "poll" && !registration.realtime) {
     console.log(chalk7.yellow("   Realtime unavailable from this bridge \u2014 polling instead."));
   }
+  const conductorWatcher = options.plan ? new ConductorWatcher({
+    client,
+    cockpitUrl: options.cockpitUrl,
+    onLog: (line) => console.log(chalk7.blue(`   ${line}`)),
+    onLost: (run) => console.log(
+      chalk7.yellow(
+        `   ${run.linearIdentifier} was still running at shutdown \u2014 Linear will not be updated for it`
+      )
+    )
+  }) : null;
   const loop = new DispatchLoop({
     client,
     orchestratorId: registration.orchestratorId,
@@ -1223,6 +1307,7 @@ var connectCommand = new Command6("connect").description("Connect this machine t
     handler: options.plan ? createConductorDispatchHandler({
       client,
       cockpitUrl: options.cockpitUrl,
+      watcher: conductorWatcher,
       onLog: (line) => console.log(chalk7.blue(`   ${line}`))
     }) : createBridgeDispatchHandler({
       client,
@@ -1252,6 +1337,7 @@ var connectCommand = new Command6("connect").description("Connect this machine t
     console.log("");
     console.log(chalk7.yellow("Disconnecting\u2026"));
     heartbeat.stop();
+    conductorWatcher?.stop();
     await loop.stop();
     console.log(chalk7.green("\u2713 Disconnected"));
     process.exit(0);
