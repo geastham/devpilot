@@ -1294,15 +1294,23 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
   console.log(import_chalk7.default.gray(`   ${options.url}`));
   console.log(import_chalk7.default.gray(`   machine: ${options.name}`));
   console.log("");
-  if (options.mode === "ao-cli") {
+  const usesLocalOrchestrator = !options.plan;
+  if (usesLocalOrchestrator && options.mode === "ao-cli") {
     console.error(import_chalk7.default.red("\u2717 --mode ao-cli is deprecated and non-functional."));
     console.error(import_chalk7.default.gray("  `ao` is now a daemon on 127.0.0.1:3001; point http mode at it:"));
     console.error(import_chalk7.default.gray("    devpilot bridge connect --mode http --http-url http://127.0.0.1:3001"));
     process.exit(1);
   }
-  if (options.mode === "http" && !options.httpUrl) {
+  if (usesLocalOrchestrator && options.mode === "http" && !options.httpUrl) {
     console.error(import_chalk7.default.red("\u2717 --mode http requires --http-url"));
     console.error(import_chalk7.default.gray("  For the ao daemon: --http-url http://127.0.0.1:3001"));
+    process.exit(1);
+  }
+  if (usesLocalOrchestrator && options.mode === "claude-session" && !options.sessionApiUrl) {
+    console.error(import_chalk7.default.red("\u2717 --mode claude-session requires --session-api-url"));
+    console.error(import_chalk7.default.gray("  Start the runner, then point at it:"));
+    console.error(import_chalk7.default.gray("    devpilot session-runner --port 3900 --token <t>"));
+    console.error(import_chalk7.default.gray("    \u2026 --session-api-url http://127.0.0.1:3900 --session-api-key <t>"));
     process.exit(1);
   }
   const client = new import_bridge_client.BridgeClient({ bridgeUrl: options.url, token: options.token });
