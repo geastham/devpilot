@@ -53,7 +53,9 @@ export interface ConductorState {
  * suppress repeats. Returns null when there is nothing worth saying.
  */
 function progressReport(
-  state: ConductorState
+  state: ConductorState,
+  /** Cockpit base URL and item, so the message can be somewhere you can go. */
+  links: { base: string; itemId: string }
 ): { signature: string; message: string; percent: number } | null {
   if (state.awaiting === 'review') {
     const waves = state.review?.plan?.waves?.length ?? 0;
@@ -64,8 +66,8 @@ function progressReport(
       signature: 'review',
       message:
         `Plan ready — ${waves} wave${waves === 1 ? '' : 's'}, ${tasks} task${tasks === 1 ? '' : 's'}, ` +
-        `${pct}% parallel. Approve it in the DevPilot cockpit to dispatch, or reply here with ` +
-        `constraints to re-plan. Awaiting review.`,
+        `${pct}% parallel. [Review it in the cockpit](${links.base}/?item=${links.itemId}) to ` +
+        `dispatch, or reply here with constraints to re-plan. Awaiting review.`,
       percent: 40,
     };
   }
@@ -79,7 +81,8 @@ function progressReport(
       signature: `wave:${wave}:${done}:${d}:${q}`,
       message:
         `Dispatching wave ${wave + 1}` +
-        (d || q ? ` — ${d} agent${d === 1 ? '' : 's'} running, ${q} queued.` : '.'),
+        (d || q ? ` — ${d} agent${d === 1 ? '' : 's'} running, ${q} queued` : '') +
+        `. [Watch the waves](${links.base}/waves?item=${links.itemId}).`,
       percent: Math.min(60 + done * 15, 95),
     };
   }
@@ -276,7 +279,7 @@ export class ConductorWatcher {
        * cockpit they may not know exists. Saying so there turns a dead-looking
        * session into a question they can answer.
        */
-      const progress = progressReport(state);
+      const progress = progressReport(state, { base: this.base, itemId: run.itemId });
       if (progress && this.reported.get(run.sessionId) !== progress.signature) {
         this.reported.set(run.sessionId, progress.signature);
         try {

@@ -199,6 +199,9 @@ describe('progress while the run is still going', () => {
     // looking hung. If this substring goes, the session state silently
     // degrades to a plain thought.
     expect(msg).toMatch(/awaiting review/i);
+    // Somewhere to go, not just something to read: the watcher's messages are
+    // the ones that fire repeatedly, so they carry the link too.
+    expect(msg).toContain('http://cockpit.test/?item=i1');
     expect(completions).toHaveLength(0);
   });
 
@@ -215,6 +218,7 @@ describe('progress while the run is still going', () => {
     // 30s poll would otherwise post the same line every 30 seconds forever.
     expect(statuses).toHaveLength(1);
     expect(String(statuses[0].report.message)).toContain('wave 1');
+    expect(String(statuses[0].report.message)).toContain('http://cockpit.test/waves?item=i1');
   });
 
   it('speaks again once the run actually moves', async () => {
