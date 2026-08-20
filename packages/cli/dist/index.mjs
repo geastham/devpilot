@@ -11,7 +11,7 @@ import { Command as Command17 } from "commander";
 import updateNotifier from "update-notifier";
 
 // src/version.ts
-var VERSION = "0.2.7";
+var VERSION = "0.2.8";
 
 // src/commands/init.ts
 import { Command } from "commander";
@@ -1247,6 +1247,8 @@ var ConductorWatcher = class {
     this.runs = /* @__PURE__ */ new Map();
     /** Last progress signature reported per session, so we do not repeat ourselves. */
     this.reported = /* @__PURE__ */ new Map();
+    /** Sessions whose plan has already been mirrored, so we upload it once. */
+    this.mirroredPlans = /* @__PURE__ */ new Set();
     this.timer = null;
     this.base = opts.cockpitUrl.replace(/\/$/, "");
     this.interval = opts.pollIntervalMs ?? 3e4;
@@ -1349,6 +1351,30 @@ var ConductorWatcher = class {
     if (!res.ok) throw new Error(`conductor state \u2192 ${res.status}`);
     const state = await res.json();
     if (!state.status || !TERMINAL.has(state.status)) {
+      if (state.review?.plan?.waves?.length && !this.mirroredPlans.has(run.sessionId) && typeof this.opts.client.mirrorSessionPlan === "function") {
+        const ok = await this.opts.client.mirrorSessionPlan(run.sessionId, {
+          cockpitItemId: run.itemId,
+          parallelization: state.review.score?.parallelizationScore,
+          waves: state.review.plan.waves.map((w) => ({
+            label: w.label,
+            tasks: (w.tasks ?? []).map((t) => ({
+              taskCode: t.taskCode ?? "",
+              description: t.description ?? "",
+              // The planner writes paths as markdown code spans.
+              filePaths: (t.filePaths ?? []).map((f) => f.replace(/`/g, "").trim()),
+              complexity: t.complexity,
+              recommendedModel: t.recommendedModel,
+              canRunInParallel: t.canRunInParallel
+            }))
+          })),
+          dependencyEdges: state.review.plan.dependencyEdges ?? [],
+          criticalPath: state.review.plan.criticalPath ?? []
+        });
+        if (ok) {
+          this.mirroredPlans.add(run.sessionId);
+          this.log(`${run.linearIdentifier}: plan mirrored to the hosted cockpit`);
+        }
+      }
       const progress = progressReport(state, {
         // Same guard as the handler: an older client has no `hostedUrl`, and a
         // missing link must never cost the progress report itself.
@@ -1387,6 +1413,7 @@ var ConductorWatcher = class {
     const summary = success ? `DevPilot completed ${waves} wave${waves === 1 ? "" : "s"}` + (tasks ? ` covering ${tasks} task${tasks === 1 ? "" : "s"}.` : ".") : `DevPilot run failed: ${state.errors?.[state.errors.length - 1] ?? "unknown error"}`;
     this.runs.delete(run.sessionId);
     this.reported.delete(run.sessionId);
+    this.mirroredPlans.delete(run.sessionId);
     this.persist();
     await this.opts.client.reportSessionComplete(run.sessionId, {
       success,

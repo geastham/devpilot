@@ -1,6 +1,6 @@
 {
   "name": "@devpilot.sh/bridge-client",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "DevPilot bridge client \u2014 connects a local orchestrator to a DevPilot bridge over a durable queue",
   "license": "MIT",
   "author": "DevPilot Team",
