@@ -5,8 +5,51 @@ import { BridgeClient, DispatchLoop, HeartbeatService } from '@devpilot.sh/bridg
 import { createBridgeDispatchHandler } from './dispatch-handler';
 import { createConductorDispatchHandler } from './conductor-handler';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+
+/**
+ * A machine name that does not change between runs.
+ *
+ * The hosted side upserts orchestrators on (orgId, name), so a stable name
+ * means one orchestrator per machine. `os.hostname()` is not stable on macOS:
+ * it returns the mDNS name or the DHCP-assigned one depending on the network,
+ * and this machine alternated between `Mac.lan` and
+ * `Garretts-MacBook-Pro-2.local` across restarts on the same day.
+ *
+ * Every flip minted a NEW orchestrator. That littered the org with duplicate
+ * machines, and worse: sessions belong to the orchestrator that claimed them,
+ * so a rename orphaned every run in flight — `requireOwnedSession` correctly
+ * answered 404 and the bridge could never report how those runs ended.
+ *
+ * So the first name this machine ever used is written down and reused. An
+ * explicit `--name` still wins, and is what a user should reach for if they
+ * genuinely want to re-identify a machine.
+ */
+function stableMachineName(): string {
+  const path = join(homedir(), '.devpilot', 'machine.json');
+  try {
+    if (existsSync(path)) {
+      const saved = JSON.parse(readFileSync(path, 'utf8')) as { name?: string };
+      if (saved.name) return saved.name;
+    }
+  } catch {
+    // A corrupt file must not stop the bridge from connecting; fall through and
+    // rewrite it below.
+  }
+
+  const name = os.hostname();
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ name }, null, 2), 'utf8');
+  } catch {
+    // Unwritable home directory: the name is still correct for this run, it
+    // just will not be remembered.
+  }
+  return name;
+}
 import { ConductorWatcher } from './conductor-watcher';
+import { CommandApplier } from './command-applier';
 
 interface ConnectOptions {
   url?: string;
@@ -29,7 +72,7 @@ export const connectCommand = new Command('connect')
   .description('Connect this machine to a DevPilot bridge and run dispatched work locally')
   .option('-u, --url <url>', 'Bridge URL', process.env.DEVPILOT_BRIDGE_URL)
   .option('-t, --token <token>', 'Orchestrator token (dp_orch_…)', process.env.DEVPILOT_BRIDGE_TOKEN)
-  .option('-n, --name <name>', 'Name for this machine', os.hostname())
+  .option('-n, --name <name>', 'Name for this machine (defaults to a stable name for this machine)')
   .option('-r, --repos <repos>', 'Comma-separated repos this machine handles')
   // Default is `http`: ao-cli is deprecated and throws (see ao-cli-adapter.ts),
   // and http is the mode that points at the current ao daemon on :3001.
@@ -114,7 +157,8 @@ export const connectCommand = new Command('connect')
 
     let registration;
     try {
-      registration = await client.register({ name: options.name, repos, maxConcurrentJobs });
+      const machineName = options.name ?? stableMachineName();
+      registration = await client.register({ name: machineName, repos, maxConcurrentJobs });
     } catch (err) {
       console.error(chalk.red('✗ Registration failed'));
       console.error(chalk.red(`   ${err instanceof Error ? err.message : err}`));
@@ -158,6 +202,29 @@ export const connectCommand = new Command('connect')
             ),
         })
       : null;
+
+    /**
+     * Decisions taken in the hosted cockpit, applied here.
+     *
+     * Polled on the same cadence as everything else rather than pushed: the
+     * machine holding the credentials stays the only thing that can act, and
+     * nothing needs to reach into it.
+     */
+    const commandApplier =
+      options.plan && conductorWatcher
+        ? new CommandApplier({
+            client,
+            cockpitUrl: options.cockpitUrl!,
+            resolveItemId: (sessionId) => conductorWatcher.itemFor(sessionId),
+            onLog: (line) => console.log(chalk.blue(`   ${line}`)),
+          })
+        : null;
+
+    if (commandApplier) {
+      const tick = () => void commandApplier.sweep();
+      setInterval(tick, 15_000).unref?.();
+      tick();
+    }
 
     const readopted = conductorWatcher?.restore() ?? 0;
     if (readopted > 0) {

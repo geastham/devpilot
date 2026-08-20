@@ -1243,6 +1243,7 @@ function createConductorDispatchHandler(opts) {
 // src/commands/bridge/connect.ts
 var import_node_os = require("os");
 var import_node_path2 = require("path");
+var import_node_fs2 = require("fs");
 
 // src/commands/bridge/conductor-watcher.ts
 var import_node_fs = require("fs");
@@ -1453,14 +1454,105 @@ var ConductorWatcher = class {
     });
     this.log(`${run.linearIdentifier}: reported ${success ? "complete" : "failed"} to the bridge`);
   }
+  /**
+   * The cockpit item a session's run belongs to, if this bridge is tracking it.
+   *
+   * The command applier needs this: a decision arrives addressed to a bridge
+   * session, and the conductor is addressed by horizon item.
+   */
+  itemFor(sessionId) {
+    return this.runs.get(sessionId)?.itemId;
+  }
   /** Test/introspection helper. */
   get tracked() {
     return this.runs.size;
   }
 };
 
+// src/commands/bridge/command-applier.ts
+var CommandApplier = class {
+  constructor(opts) {
+    this.opts = opts;
+    this.base = opts.cockpitUrl.replace(/\/$/, "");
+    this.log = opts.onLog ?? (() => {
+    });
+    this.doFetch = opts.fetchImpl ?? fetch;
+    this.timeout = opts.requestTimeoutMs ?? 15 * 6e4;
+  }
+  /** One pass: fetch pending commands and apply them in order. */
+  async sweep() {
+    let commands;
+    try {
+      commands = await this.opts.client.pollSessionCommands();
+    } catch (err) {
+      this.log(`command poll failed (${err instanceof Error ? err.message : String(err)})`);
+      return;
+    }
+    for (const command of commands) {
+      await this.apply(command);
+    }
+  }
+  async apply(command) {
+    const itemId = this.opts.resolveItemId(command.sessionId);
+    if (!itemId) {
+      await this.opts.client.acknowledgeCommands(
+        [command.id],
+        "failed",
+        "This bridge is not tracking that run, so the decision could not be applied."
+      );
+      this.log(`command ${command.command} for an untracked session \u2014 reported as failed`);
+      return;
+    }
+    const decision = command.command === "approve" ? { action: "approve" } : command.command === "replan" ? { action: "refine", constraints: command.payload?.constraints ?? [] } : { action: "abort", reason: "Aborted from the hosted cockpit" };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeout);
+    try {
+      const res = await this.doFetch(`${this.base}/api/items/${itemId}/conductor`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision })
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        throw new Error(`conductor \u2192 ${res.status} ${detail.slice(0, 200)}`);
+      }
+      await this.opts.client.acknowledgeCommands([command.id], "applied");
+      this.log(`applied ${command.command} from the hosted cockpit`);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      const transient = /fetch failed|ECONNREFUSED|abort|timeout/i.test(reason);
+      if (transient) {
+        this.log(`command ${command.command} deferred \u2014 cockpit unreachable (${reason})`);
+        return;
+      }
+      await this.opts.client.acknowledgeCommands([command.id], "failed", reason);
+      this.log(`command ${command.command} failed: ${reason}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+};
+
 // src/commands/bridge/connect.ts
-var connectCommand = new import_commander6.Command("connect").description("Connect this machine to a DevPilot bridge and run dispatched work locally").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-n, --name <name>", "Name for this machine", import_os2.default.hostname()).option("-r, --repos <repos>", "Comma-separated repos this machine handles").option("-m, --mode <mode>", "Local orchestrator mode (http|claude-session)", "http").option(
+function stableMachineName() {
+  const path = (0, import_node_path2.join)((0, import_node_os.homedir)(), ".devpilot", "machine.json");
+  try {
+    if ((0, import_node_fs2.existsSync)(path)) {
+      const saved = JSON.parse((0, import_node_fs2.readFileSync)(path, "utf8"));
+      if (saved.name) return saved.name;
+    }
+  } catch {
+  }
+  const name = import_os2.default.hostname();
+  try {
+    (0, import_node_fs2.mkdirSync)((0, import_node_path2.dirname)(path), { recursive: true });
+    (0, import_node_fs2.writeFileSync)(path, JSON.stringify({ name }, null, 2), "utf8");
+  } catch {
+  }
+  return name;
+}
+var connectCommand = new import_commander6.Command("connect").description("Connect this machine to a DevPilot bridge and run dispatched work locally").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-n, --name <name>", "Name for this machine (defaults to a stable name for this machine)").option("-r, --repos <repos>", "Comma-separated repos this machine handles").option("-m, --mode <mode>", "Local orchestrator mode (http|claude-session)", "http").option(
   "--transport <transport>",
   "realtime | poll \u2014 polling is fully correct, just higher latency",
   process.env.DEVPILOT_BRIDGE_TRANSPORT || "realtime"
@@ -1518,7 +1610,8 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
   const client = new import_bridge_client.BridgeClient({ bridgeUrl: options.url, token: options.token });
   let registration;
   try {
-    registration = await client.register({ name: options.name, repos, maxConcurrentJobs });
+    const machineName = options.name ?? stableMachineName();
+    registration = await client.register({ name: machineName, repos, maxConcurrentJobs });
   } catch (err) {
     console.error(import_chalk7.default.red("\u2717 Registration failed"));
     console.error(import_chalk7.default.red(`   ${err instanceof Error ? err.message : err}`));
@@ -1550,6 +1643,17 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
       )
     )
   }) : null;
+  const commandApplier = options.plan && conductorWatcher ? new CommandApplier({
+    client,
+    cockpitUrl: options.cockpitUrl,
+    resolveItemId: (sessionId) => conductorWatcher.itemFor(sessionId),
+    onLog: (line) => console.log(import_chalk7.default.blue(`   ${line}`))
+  }) : null;
+  if (commandApplier) {
+    const tick = () => void commandApplier.sweep();
+    setInterval(tick, 15e3).unref?.();
+    tick();
+  }
   const readopted = conductorWatcher?.restore() ?? 0;
   if (readopted > 0) {
     console.log(

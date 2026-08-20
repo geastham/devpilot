@@ -425,6 +425,16 @@ export class ConductorWatcher {
     this.log(`${run.linearIdentifier}: reported ${success ? 'complete' : 'failed'} to the bridge`);
   }
 
+  /**
+   * The cockpit item a session's run belongs to, if this bridge is tracking it.
+   *
+   * The command applier needs this: a decision arrives addressed to a bridge
+   * session, and the conductor is addressed by horizon item.
+   */
+  itemFor(sessionId: string): string | undefined {
+    return this.runs.get(sessionId)?.itemId;
+  }
+
   /** Test/introspection helper. */
   get tracked(): number {
     return this.runs.size;

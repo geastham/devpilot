@@ -1211,7 +1211,8 @@ function createConductorDispatchHandler(opts) {
 
 // src/commands/bridge/connect.ts
 import { homedir as homedir2 } from "os";
-import { join as join6 } from "path";
+import { join as join6, dirname as dirname2 } from "path";
+import { readFileSync as readFileSync5, writeFileSync as writeFileSync6, mkdirSync as mkdirSync4, existsSync as existsSync7 } from "fs";
 
 // src/commands/bridge/conductor-watcher.ts
 import { readFileSync as readFileSync4, writeFileSync as writeFileSync5, mkdirSync as mkdirSync3, unlinkSync, existsSync as existsSync6 } from "fs";
@@ -1422,14 +1423,105 @@ var ConductorWatcher = class {
     });
     this.log(`${run.linearIdentifier}: reported ${success ? "complete" : "failed"} to the bridge`);
   }
+  /**
+   * The cockpit item a session's run belongs to, if this bridge is tracking it.
+   *
+   * The command applier needs this: a decision arrives addressed to a bridge
+   * session, and the conductor is addressed by horizon item.
+   */
+  itemFor(sessionId) {
+    return this.runs.get(sessionId)?.itemId;
+  }
   /** Test/introspection helper. */
   get tracked() {
     return this.runs.size;
   }
 };
 
+// src/commands/bridge/command-applier.ts
+var CommandApplier = class {
+  constructor(opts) {
+    this.opts = opts;
+    this.base = opts.cockpitUrl.replace(/\/$/, "");
+    this.log = opts.onLog ?? (() => {
+    });
+    this.doFetch = opts.fetchImpl ?? fetch;
+    this.timeout = opts.requestTimeoutMs ?? 15 * 6e4;
+  }
+  /** One pass: fetch pending commands and apply them in order. */
+  async sweep() {
+    let commands;
+    try {
+      commands = await this.opts.client.pollSessionCommands();
+    } catch (err) {
+      this.log(`command poll failed (${err instanceof Error ? err.message : String(err)})`);
+      return;
+    }
+    for (const command of commands) {
+      await this.apply(command);
+    }
+  }
+  async apply(command) {
+    const itemId = this.opts.resolveItemId(command.sessionId);
+    if (!itemId) {
+      await this.opts.client.acknowledgeCommands(
+        [command.id],
+        "failed",
+        "This bridge is not tracking that run, so the decision could not be applied."
+      );
+      this.log(`command ${command.command} for an untracked session \u2014 reported as failed`);
+      return;
+    }
+    const decision = command.command === "approve" ? { action: "approve" } : command.command === "replan" ? { action: "refine", constraints: command.payload?.constraints ?? [] } : { action: "abort", reason: "Aborted from the hosted cockpit" };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeout);
+    try {
+      const res = await this.doFetch(`${this.base}/api/items/${itemId}/conductor`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision })
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        throw new Error(`conductor \u2192 ${res.status} ${detail.slice(0, 200)}`);
+      }
+      await this.opts.client.acknowledgeCommands([command.id], "applied");
+      this.log(`applied ${command.command} from the hosted cockpit`);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      const transient = /fetch failed|ECONNREFUSED|abort|timeout/i.test(reason);
+      if (transient) {
+        this.log(`command ${command.command} deferred \u2014 cockpit unreachable (${reason})`);
+        return;
+      }
+      await this.opts.client.acknowledgeCommands([command.id], "failed", reason);
+      this.log(`command ${command.command} failed: ${reason}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+};
+
 // src/commands/bridge/connect.ts
-var connectCommand = new Command6("connect").description("Connect this machine to a DevPilot bridge and run dispatched work locally").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-n, --name <name>", "Name for this machine", os.hostname()).option("-r, --repos <repos>", "Comma-separated repos this machine handles").option("-m, --mode <mode>", "Local orchestrator mode (http|claude-session)", "http").option(
+function stableMachineName() {
+  const path = join6(homedir2(), ".devpilot", "machine.json");
+  try {
+    if (existsSync7(path)) {
+      const saved = JSON.parse(readFileSync5(path, "utf8"));
+      if (saved.name) return saved.name;
+    }
+  } catch {
+  }
+  const name = os.hostname();
+  try {
+    mkdirSync4(dirname2(path), { recursive: true });
+    writeFileSync6(path, JSON.stringify({ name }, null, 2), "utf8");
+  } catch {
+  }
+  return name;
+}
+var connectCommand = new Command6("connect").description("Connect this machine to a DevPilot bridge and run dispatched work locally").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-n, --name <name>", "Name for this machine (defaults to a stable name for this machine)").option("-r, --repos <repos>", "Comma-separated repos this machine handles").option("-m, --mode <mode>", "Local orchestrator mode (http|claude-session)", "http").option(
   "--transport <transport>",
   "realtime | poll \u2014 polling is fully correct, just higher latency",
   process.env.DEVPILOT_BRIDGE_TRANSPORT || "realtime"
@@ -1487,7 +1579,8 @@ var connectCommand = new Command6("connect").description("Connect this machine t
   const client = new BridgeClient({ bridgeUrl: options.url, token: options.token });
   let registration;
   try {
-    registration = await client.register({ name: options.name, repos, maxConcurrentJobs });
+    const machineName = options.name ?? stableMachineName();
+    registration = await client.register({ name: machineName, repos, maxConcurrentJobs });
   } catch (err) {
     console.error(chalk7.red("\u2717 Registration failed"));
     console.error(chalk7.red(`   ${err instanceof Error ? err.message : err}`));
@@ -1519,6 +1612,17 @@ var connectCommand = new Command6("connect").description("Connect this machine t
       )
     )
   }) : null;
+  const commandApplier = options.plan && conductorWatcher ? new CommandApplier({
+    client,
+    cockpitUrl: options.cockpitUrl,
+    resolveItemId: (sessionId) => conductorWatcher.itemFor(sessionId),
+    onLog: (line) => console.log(chalk7.blue(`   ${line}`))
+  }) : null;
+  if (commandApplier) {
+    const tick = () => void commandApplier.sweep();
+    setInterval(tick, 15e3).unref?.();
+    tick();
+  }
   const readopted = conductorWatcher?.restore() ?? 0;
   if (readopted > 0) {
     console.log(
@@ -1830,13 +1934,13 @@ import { resolve as resolve3 } from "path";
 // src/commands/session-runner/server.ts
 import { createServer } from "http";
 import { randomUUID } from "crypto";
-import { existsSync as existsSync7 } from "fs";
+import { existsSync as existsSync8 } from "fs";
 import { basename as basename2, isAbsolute, resolve as resolve2 } from "path";
 
 // src/commands/session-runner/claude-runner.ts
 import { spawn as spawn2, execFile } from "child_process";
 import { promisify } from "util";
-import { mkdtempSync, rmSync, writeFileSync as writeFileSync6 } from "fs";
+import { mkdtempSync, rmSync, writeFileSync as writeFileSync7 } from "fs";
 import { tmpdir } from "os";
 import { join as join7 } from "path";
 var execFileAsync = promisify(execFile);
@@ -1898,7 +2002,7 @@ function parseEnvelope(stdout) {
 function writeSessionMcpConfig(sessionLink2) {
   const dir = mkdtempSync(join7(tmpdir(), "devpilot-mcp-"));
   const file = join7(dir, "mcp.json");
-  writeFileSync6(
+  writeFileSync7(
     file,
     JSON.stringify(
       {
@@ -2106,10 +2210,10 @@ var SessionRunner = class {
   resolveWorkdir(repo) {
     const mapped = this.config.repoMap.get(repo);
     if (mapped) {
-      return existsSync7(mapped) ? { workdir: mapped } : { error: `Mapped path for '${repo}' does not exist: ${mapped}` };
+      return existsSync8(mapped) ? { workdir: mapped } : { error: `Mapped path for '${repo}' does not exist: ${mapped}` };
     }
     const candidate = isAbsolute(repo) ? repo : resolve2(this.config.workspace, basename2(repo));
-    if (!existsSync7(candidate)) {
+    if (!existsSync8(candidate)) {
       return {
         error: `No checkout for '${repo}'. Tried ${candidate}. Pass --repo ${repo}=/path/to/checkout, or set --workspace.`
       };
@@ -2559,7 +2663,7 @@ var updateCommand = new Command15("update").description("Update DevPilot CLI to 
 
 // src/commands/wiki.ts
 import { Command as Command16 } from "commander";
-import { existsSync as existsSync8, mkdirSync as mkdirSync4, readFileSync as readFileSync5, writeFileSync as writeFileSync7 } from "fs";
+import { existsSync as existsSync9, mkdirSync as mkdirSync5, readFileSync as readFileSync6, writeFileSync as writeFileSync8 } from "fs";
 import { join as join8 } from "path";
 import chalk15 from "chalk";
 import { resolveWikiModel } from "@devpilot.sh/core/wave-planner";
@@ -2568,17 +2672,17 @@ wikiCommand.command("init").description("Initialize the wiki system in the curre
   const cwd = process.cwd();
   const devpilotDir = join8(cwd, ".devpilot");
   const wikiDir = join8(cwd, options.wikiDir);
-  if (!existsSync8(devpilotDir)) {
+  if (!existsSync9(devpilotDir)) {
     console.log(
       chalk15.yellow("\u26A0\uFE0F  DevPilot not initialized. Run `devpilot init` first.")
     );
     return;
   }
-  if (!existsSync8(wikiDir)) {
-    mkdirSync4(wikiDir, { recursive: true });
+  if (!existsSync9(wikiDir)) {
+    mkdirSync5(wikiDir, { recursive: true });
   }
   const indexPath = join8(wikiDir, "index.md");
-  if (!existsSync8(indexPath)) {
+  if (!existsSync9(indexPath)) {
     const initialIndex = `# Wiki Index
 
 > Auto-generated wiki \u2014 compiled from session logs, commits, specs, and decisions.
@@ -2593,11 +2697,11 @@ This wiki will grow automatically as you work with DevPilot:
 
 Run \`devpilot wiki ingest\` to manually add sources, or let the session hook capture knowledge automatically.
 `;
-    writeFileSync7(indexPath, initialIndex);
+    writeFileSync8(indexPath, initialIndex);
   }
   const logPath = join8(wikiDir, "log.md");
-  if (!existsSync8(logPath)) {
-    writeFileSync7(
+  if (!existsSync9(logPath)) {
+    writeFileSync8(
       logPath,
       `# Wiki Activity Log
 
@@ -2608,8 +2712,8 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
     );
   }
   const gitignorePath = join8(cwd, ".gitignore");
-  if (existsSync8(gitignorePath)) {
-    const gitignore = readFileSync5(gitignorePath, "utf-8");
+  if (existsSync9(gitignorePath)) {
+    const gitignore = readFileSync6(gitignorePath, "utf-8");
     if (!gitignore.includes(".devpilot/wiki")) {
     }
   }
@@ -2637,13 +2741,13 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
 wikiCommand.command("ingest").description("Ingest a source document into the wiki").requiredOption("--type <type>", "Source type: session_log, commit, spec, decision, manual").requiredOption("--title <title>", "Human-readable title for the source").option("--file <path>", "Path to source file").option("--stdin", "Read source from stdin").option("--origin <origin>", "Origin identifier (e.g. session ID, commit SHA)").action(async (options) => {
   let content;
   if (options.file) {
-    if (!existsSync8(options.file)) {
+    if (!existsSync9(options.file)) {
       console.log(chalk15.red(`\u274C File not found: ${options.file}`));
       return;
     }
-    content = readFileSync5(options.file, "utf-8");
+    content = readFileSync6(options.file, "utf-8");
   } else if (options.stdin) {
-    content = readFileSync5(0, "utf-8");
+    content = readFileSync6(0, "utf-8");
   } else {
     console.log(
       chalk15.red("\u274C Provide either --file <path> or --stdin")

@@ -39,6 +39,16 @@ interface MirroredPlan {
     }[];
     criticalPath?: string[];
 }
+/** A decision taken in the hosted cockpit, on its way to the conductor. */
+interface SessionCommandMessage {
+    id: string;
+    sessionId: string;
+    command: 'approve' | 'replan' | 'abort';
+    payload?: {
+        constraints?: string[];
+    };
+    createdAt?: string;
+}
 declare class BridgeClient {
     private readonly config;
     private readonly fetchImpl;
@@ -86,6 +96,16 @@ declare class BridgeClient {
      * Callers get a boolean and decide whether to mention it.
      */
     mirrorSessionPlan(sessionId: string, plan: MirroredPlan): Promise<boolean>;
+    /**
+     * Pending commands for this machine's sessions.
+     *
+     * The counterpart to everything else here: the hosted plane finally has a way
+     * to answer a run, and this is how the answer arrives. Rides the same poll
+     * the bridge already runs rather than a second transport.
+     */
+    pollSessionCommands(): Promise<SessionCommandMessage[]>;
+    /** Close out commands once applied. Never throws: see the caller. */
+    acknowledgeCommands(commandIds: string[], status: 'applied' | 'failed', error?: string): Promise<boolean>;
     /** Fixes the `getOrchestatorId` typo from 0.1.x. */
     getOrchestratorId(): string | null;
     setOrchestratorId(id: string): void;
@@ -293,4 +313,4 @@ declare class PubSubSubscriber {
     constructor();
 }
 
-export { BridgeClient, type BridgeClientConfig, BridgeError, type DispatchHandler, DispatchLoop, type DispatchLoopConfig, type EntryStatus, type HeartbeatConfig, HeartbeatService, type MirroredPlan, PubSubSubscriber, RealtimeSubscriber, type RealtimeSubscriberConfig, SharedSessionClient, type SharedSessionJoinOptions, type TranscriptEntry };
+export { BridgeClient, type BridgeClientConfig, BridgeError, type DispatchHandler, DispatchLoop, type DispatchLoopConfig, type EntryStatus, type HeartbeatConfig, HeartbeatService, type MirroredPlan, PubSubSubscriber, RealtimeSubscriber, type RealtimeSubscriberConfig, type SessionCommandMessage, SharedSessionClient, type SharedSessionJoinOptions, type TranscriptEntry };

@@ -183,6 +183,32 @@ var BridgeClient = class {
       return false;
     }
   }
+  /**
+   * Pending commands for this machine's sessions.
+   *
+   * The counterpart to everything else here: the hosted plane finally has a way
+   * to answer a run, and this is how the answer arrives. Rides the same poll
+   * the bridge already runs rather than a second transport.
+   */
+  async pollSessionCommands() {
+    const res = await this.request(
+      "/api/dispatch/commands"
+    );
+    return res.commands ?? [];
+  }
+  /** Close out commands once applied. Never throws: see the caller. */
+  async acknowledgeCommands(commandIds, status, error) {
+    if (commandIds.length === 0) return true;
+    try {
+      await this.request("/api/dispatch/commands", {
+        method: "POST",
+        body: JSON.stringify({ commandIds, status, ...error ? { error } : {} })
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
   /** Fixes the `getOrchestatorId` typo from 0.1.x. */
   getOrchestratorId() {
     return this.orchestratorId;
