@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@devpilot.sh/cockpit-ui':
+        specifier: workspace:*
+        version: link:packages/cockpit-ui
       '@devpilot.sh/conductor-agent':
         specifier: workspace:*
         version: link:packages/conductor-agent
@@ -268,6 +271,34 @@ importers:
         version: 8.5.1(jiti@1.21.7)(postcss@8.5.8)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.2)
       typescript:
         specifier: ^5.3.0
+        version: 5.9.3
+      vitest:
+        specifier: ^1.0.0
+        version: 1.6.1(@types/node@20.19.37)
+
+  packages/cockpit-ui:
+    dependencies:
+      clsx:
+        specifier: ^2.1.0
+        version: 2.1.1
+      react:
+        specifier: '>=18'
+        version: 18.3.1
+      react-dom:
+        specifier: '>=18'
+        version: 18.3.1(react@18.3.1)
+      tailwind-merge:
+        specifier: ^2.2.0
+        version: 2.6.1
+    devDependencies:
+      '@types/react':
+        specifier: ^18.0.0
+        version: 18.3.28
+      tsup:
+        specifier: ^8.0.0
+        version: 8.5.1(jiti@1.21.7)(postcss@8.5.8)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.2)
+      typescript:
+        specifier: ^5.0.0
         version: 5.9.3
       vitest:
         specifier: ^1.0.0

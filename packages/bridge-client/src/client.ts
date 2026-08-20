@@ -32,6 +32,25 @@ export class BridgeError extends Error {
  * Talks to *a* bridge, not *the* bridge: point `bridgeUrl` at devpilot.sh or at
  * any service implementing @devpilot.sh/bridge-protocol.
  */
+/** What the hosted cockpit needs to render a plan. Structure, never source. */
+export interface MirroredPlan {
+  cockpitItemId?: string;
+  parallelization?: number;
+  waves: {
+    label?: string;
+    tasks: {
+      taskCode: string;
+      description: string;
+      filePaths?: string[];
+      complexity?: string;
+      recommendedModel?: string;
+      canRunInParallel?: boolean;
+    }[];
+  }[];
+  dependencyEdges?: { from: string; to: string; type?: string }[];
+  criticalPath?: string[];
+}
+
 export class BridgeClient {
   private readonly fetchImpl: typeof fetch;
   private orchestratorId: string | null = null;
@@ -139,6 +158,30 @@ export class BridgeClient {
       method: 'POST',
       body: JSON.stringify(report),
     });
+  }
+
+  /**
+   * Mirror a wave plan to the hosted cockpit.
+   *
+   * Derived structure only — waves, task descriptions, file paths, dependency
+   * edges. Never source: no file contents, no diffs. The hosted schema has no
+   * column for those, which is the enforcement; this comment is only the intent.
+   *
+   * Best-effort by design. Mirroring is what makes the plan visible on
+   * devpilot.sh, but the run is real work already underway on this machine, and
+   * losing it because a display copy failed to upload would be an absurd trade.
+   * Callers get a boolean and decide whether to mention it.
+   */
+  async mirrorSessionPlan(sessionId: string, plan: MirroredPlan): Promise<boolean> {
+    try {
+      await this.request(`/api/sessions/${sessionId}/plan`, {
+        method: 'POST',
+        body: JSON.stringify(plan),
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Fixes the `getOrchestatorId` typo from 0.1.x. */

@@ -1,6 +1,6 @@
 'use client';
 
-import { cn } from '@/lib/utils';
+import { cn } from '../cn';
 import type { ParsedWavePlan, ParsedWave, WaveProgress } from '@devpilot.sh/core/wave-planner';
 
 // ============================================================================

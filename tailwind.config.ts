@@ -5,6 +5,9 @@ const config: Config = {
     './src/pages/**/*.{js,ts,jsx,tsx,mdx}',
     './src/components/**/*.{js,ts,jsx,tsx,mdx}',
     './src/app/**/*.{js,ts,jsx,tsx,mdx}',
+    // The shared cockpit components ship as source-mapped dist; without this
+    // Tailwind purges every class they use and the DAG renders unstyled.
+    './node_modules/@devpilot.sh/cockpit-ui/dist/**/*.{js,mjs}',
   ],
   theme: {
     extend: {

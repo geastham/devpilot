@@ -1,4 +1,4 @@
-import type { BridgeClient, TaskDispatchMessage } from '@devpilot.sh/bridge-client';
+import type { BridgeClient, MirroredPlan, TaskDispatchMessage } from '@devpilot.sh/bridge-client';
 import type { ConductorWatcher } from './conductor-watcher';
 
 /**
@@ -61,10 +61,68 @@ interface ConductorState {
     score?: { parallelizationScore?: number };
     /** Carried so the review message can say how big the plan is, not just that
         one exists — "2 waves, 9 tasks, 89% parallel" is a decision; "plan
-        ready" is a notification. */
-    plan?: { waves?: { tasks?: unknown[] }[] };
+        ready" is a notification. It is also what gets mirrored to the hosted
+        cockpit. */
+    plan?: PlanShape;
   } | null;
   errors?: string[];
+}
+
+/** The planner's output, as the cockpit returns it. */
+interface PlanShape {
+  waves?: {
+    label?: string;
+    tasks?: {
+      taskCode?: string;
+      description?: string;
+      filePaths?: string[];
+      complexity?: string;
+      recommendedModel?: string;
+      canRunInParallel?: boolean;
+    }[];
+  }[];
+  dependencyEdges?: { from: string; to: string; type?: string }[];
+  criticalPath?: string[];
+}
+
+/**
+ * The planner writes file paths as markdown code spans — `` `src/lib/x.ts` `` —
+ * because its output is a markdown table. Storing the backticks would push them
+ * into every hosted surface that renders a path.
+ */
+function cleanPath(value: string): string {
+  return value.replace(/`/g, '').trim();
+}
+
+/**
+ * Reshape a plan for the hosted cockpit.
+ *
+ * Structure only. Task descriptions and file paths cross the boundary; nothing
+ * that could carry file contents does, and the hosted schema has no column for
+ * it either.
+ */
+function toMirroredPlan(
+  plan: PlanShape,
+  itemId: string,
+  parallelization?: number
+): MirroredPlan {
+  return {
+    cockpitItemId: itemId,
+    parallelization,
+    waves: (plan.waves ?? []).map((w) => ({
+      label: w.label,
+      tasks: (w.tasks ?? []).map((t) => ({
+        taskCode: t.taskCode ?? '',
+        description: t.description ?? '',
+        filePaths: (t.filePaths ?? []).map(cleanPath),
+        complexity: t.complexity,
+        recommendedModel: t.recommendedModel,
+        canRunInParallel: t.canRunInParallel,
+      })),
+    })),
+    dependencyEdges: plan.dependencyEdges ?? [],
+    criticalPath: plan.criticalPath ?? [],
+  };
 }
 
 const DEFAULT_TIMEOUT_MS = 15 * 60_000;
@@ -250,6 +308,30 @@ export function createConductorDispatchHandler(
 
       const summary = describe(state, base, item.id);
       log(`${linearIdentifier}: ${summary}`);
+
+      /**
+       * Mirror the plan so it is visible on devpilot.sh, not only on this
+       * machine. Best-effort: the run is real work already underway, and losing
+       * it because a display copy failed to upload would be an absurd trade.
+       */
+      // The capability check is not defensive noise. `mirrorSessionPlan` arrived
+      // in a later bridge-client, and a client without it threw a TypeError
+      // here — which propagates, releases the queue claim, and fails the ticket.
+      // Losing real work because a *display copy* could not be uploaded is
+      // exactly the trade this must never make.
+      if (state.review?.plan?.waves?.length && typeof opts.client.mirrorSessionPlan === 'function') {
+        const mirrored = await opts.client.mirrorSessionPlan(
+          sessionId,
+          toMirroredPlan(
+            state.review.plan,
+            item.id,
+            state.review.score?.parallelizationScore
+          )
+        );
+        log(
+          `${linearIdentifier}: plan ${mirrored ? 'mirrored to the hosted cockpit' : 'not mirrored (hosted unreachable)'}`
+        );
+      }
 
       if (state.status === 'failed') {
         throw new Error(summary);

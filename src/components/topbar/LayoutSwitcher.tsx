@@ -10,27 +10,39 @@ const layouts: {
   label: string;
   description: string;
   icon: React.ReactNode;
+  /**
+   * False for variants the page does not render yet. `HomePage` falls back to
+   * the gradient strip for these, so choosing one moved the checkmark and
+   * changed nothing on screen — a menu that reports a state the app is not in.
+   * Marking them unavailable is honest and costs nothing; silently ignoring the
+   * choice made the whole surface feel broken.
+   */
+  built: boolean;
 }[] = [
   {
     variant: 'gradient-strip',
+    built: true,
     label: 'Gradient Strip',
     description: 'Default — 4-zone horizontal flow',
     icon: <GradientStripIcon />,
   },
   {
     variant: 'mission-control',
+    built: true,
     label: 'Mission Control',
     description: 'Full density — fleet + horizon + feed',
     icon: <MissionControlIcon />,
   },
   {
     variant: 'three-panel',
+    built: false,
     label: 'Three Panel',
     description: 'NOW / NEXT / THINK',
     icon: <ThreePanelIcon />,
   },
   {
     variant: 'timeline',
+    built: false,
     label: 'Runway Timeline',
     description: 'Temporal view — Gantt tracks + queue',
     icon: <TimelineIcon />,
@@ -73,16 +85,26 @@ export function LayoutSwitcher() {
         {layouts.map((layout) => (
           <DropdownItem
             key={layout.variant}
-            onClick={() => setLayoutVariant(layout.variant)}
-            selected={layout.variant === layoutVariant}
-            className="flex items-start gap-3 px-3 py-2"
+            // Selecting an unbuilt variant silently rendered the default, so the
+            // menu claimed a layout the app was not showing.
+            onClick={() => layout.built && setLayoutVariant(layout.variant)}
+            selected={layout.built && layout.variant === layoutVariant}
+            className={cn(
+              'flex items-start gap-3 px-3 py-2',
+              !layout.built && 'cursor-default opacity-45'
+            )}
           >
             <div className="mt-0.5 w-10 h-6 rounded bg-bg-panel border border-border-default overflow-hidden flex-shrink-0">
               {layout.icon}
             </div>
             <div className="flex-1 min-w-0">
-              <div className="text-sm font-medium text-text-primary">
-                {layout.label}
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-text-primary">{layout.label}</span>
+                {!layout.built && (
+                  <span className="rounded bg-bg-panel px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-muted">
+                    Not built
+                  </span>
+                )}
               </div>
               <div className="text-xs text-text-muted truncate">
                 {layout.description}

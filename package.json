@@ -33,7 +33,8 @@
     "zustand": "^4.5.0",
     "@devpilot.sh/conductor-agent": "workspace:*",
     "@langchain/langgraph": "^1.4.9",
-    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3"
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3",
+    "@devpilot.sh/cockpit-ui": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

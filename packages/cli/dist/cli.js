@@ -39,7 +39,7 @@ var import_commander17 = require("commander");
 var import_update_notifier = __toESM(require("update-notifier"));
 
 // src/version.ts
-var VERSION = "0.2.4";
+var VERSION = "0.2.5";
 
 // src/commands/init.ts
 var import_commander = require("commander");
@@ -1056,6 +1056,28 @@ function createBridgeDispatchHandler(opts) {
 }
 
 // src/commands/bridge/conductor-handler.ts
+function cleanPath(value) {
+  return value.replace(/`/g, "").trim();
+}
+function toMirroredPlan(plan, itemId, parallelization) {
+  return {
+    cockpitItemId: itemId,
+    parallelization,
+    waves: (plan.waves ?? []).map((w) => ({
+      label: w.label,
+      tasks: (w.tasks ?? []).map((t) => ({
+        taskCode: t.taskCode ?? "",
+        description: t.description ?? "",
+        filePaths: (t.filePaths ?? []).map(cleanPath),
+        complexity: t.complexity,
+        recommendedModel: t.recommendedModel,
+        canRunInParallel: t.canRunInParallel
+      }))
+    })),
+    dependencyEdges: plan.dependencyEdges ?? [],
+    criticalPath: plan.criticalPath ?? []
+  };
+}
 var DEFAULT_TIMEOUT_MS = 15 * 6e4;
 async function call(url, init, timeoutMs) {
   const controller = new AbortController();
@@ -1174,6 +1196,19 @@ function createConductorDispatchHandler(opts) {
       );
       const summary = describe(state, base, item.id);
       log(`${linearIdentifier}: ${summary}`);
+      if (state.review?.plan?.waves?.length && typeof opts.client.mirrorSessionPlan === "function") {
+        const mirrored = await opts.client.mirrorSessionPlan(
+          sessionId,
+          toMirroredPlan(
+            state.review.plan,
+            item.id,
+            state.review.score?.parallelizationScore
+          )
+        );
+        log(
+          `${linearIdentifier}: plan ${mirrored ? "mirrored to the hosted cockpit" : "not mirrored (hosted unreachable)"}`
+        );
+      }
       if (state.status === "failed") {
         throw new Error(summary);
       }
@@ -1206,14 +1241,14 @@ var import_node_path2 = require("path");
 // src/commands/bridge/conductor-watcher.ts
 var import_node_fs = require("fs");
 var import_node_path = require("path");
-function progressReport(state) {
+function progressReport(state, links) {
   if (state.awaiting === "review") {
     const waves = state.review?.plan?.waves?.length ?? 0;
     const tasks = state.review?.plan?.waves?.reduce((n, w) => n + (w.tasks?.length ?? 0), 0) ?? 0;
     const pct = Math.round((state.score?.parallelizationScore ?? 0) * 100);
     return {
       signature: "review",
-      message: `Plan ready \u2014 ${waves} wave${waves === 1 ? "" : "s"}, ${tasks} task${tasks === 1 ? "" : "s"}, ${pct}% parallel. Approve it in the DevPilot cockpit to dispatch, or reply here with constraints to re-plan. Awaiting review.`,
+      message: `Plan ready \u2014 ${waves} wave${waves === 1 ? "" : "s"}, ${tasks} task${tasks === 1 ? "" : "s"}, ${pct}% parallel. [Review it in the cockpit](${links.base}/?item=${links.itemId}) to dispatch, or reply here with constraints to re-plan. Awaiting review.`,
       percent: 40
     };
   }
@@ -1224,7 +1259,7 @@ function progressReport(state) {
     const q = state.lastDispatch?.queued ?? 0;
     return {
       signature: `wave:${wave}:${done}:${d}:${q}`,
-      message: `Dispatching wave ${wave + 1}` + (d || q ? ` \u2014 ${d} agent${d === 1 ? "" : "s"} running, ${q} queued.` : "."),
+      message: `Dispatching wave ${wave + 1}` + (d || q ? ` \u2014 ${d} agent${d === 1 ? "" : "s"} running, ${q} queued` : "") + `. [Watch the waves](${links.base}/waves?item=${links.itemId}).`,
       percent: Math.min(60 + done * 15, 95)
     };
   }
@@ -1339,7 +1374,7 @@ var ConductorWatcher = class {
     if (!res.ok) throw new Error(`conductor state \u2192 ${res.status}`);
     const state = await res.json();
     if (!state.status || !TERMINAL.has(state.status)) {
-      const progress = progressReport(state);
+      const progress = progressReport(state, { base: this.base, itemId: run.itemId });
       if (progress && this.reported.get(run.sessionId) !== progress.signature) {
         this.reported.set(run.sessionId, progress.signature);
         try {

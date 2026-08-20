@@ -1,9 +1,9 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { cn } from '@/lib/utils';
+import { cn } from '../cn';
 import type { WavePlan, WaveTask, DependencyEdge } from '@devpilot.sh/core/db';
-import { plainText } from '@/lib/plan-text';
+import { plainText } from '../plan-text';
 
 // ============================================================================
 // Types

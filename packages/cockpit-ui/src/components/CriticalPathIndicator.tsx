@@ -1,10 +1,10 @@
 'use client';
 
 import { useMemo } from 'react';
-import { cn } from '@/lib/utils';
-import { formatMinutes } from '@/lib/utils';
+import { cn } from '../cn';
+import { formatMinutes } from '../format';
 import type { ParsedWavePlan, ParsedTask, CriticalPathResult, WaveProgress } from '@devpilot.sh/core/wave-planner';
-import { plainText, pluralize } from '@/lib/plan-text';
+import { plainText, pluralize } from '../plan-text';
 
 // ============================================================================
 // Types

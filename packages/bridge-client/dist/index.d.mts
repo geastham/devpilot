@@ -17,6 +17,28 @@ declare class BridgeError extends Error {
  * Talks to *a* bridge, not *the* bridge: point `bridgeUrl` at devpilot.sh or at
  * any service implementing @devpilot.sh/bridge-protocol.
  */
+/** What the hosted cockpit needs to render a plan. Structure, never source. */
+interface MirroredPlan {
+    cockpitItemId?: string;
+    parallelization?: number;
+    waves: {
+        label?: string;
+        tasks: {
+            taskCode: string;
+            description: string;
+            filePaths?: string[];
+            complexity?: string;
+            recommendedModel?: string;
+            canRunInParallel?: boolean;
+        }[];
+    }[];
+    dependencyEdges?: {
+        from: string;
+        to: string;
+        type?: string;
+    }[];
+    criticalPath?: string[];
+}
 declare class BridgeClient {
     private readonly config;
     private readonly fetchImpl;
@@ -42,6 +64,19 @@ declare class BridgeClient {
     release(queueId: string, error: string): Promise<void>;
     reportSessionStatus(sessionId: string, status: SessionStatusUpdate): Promise<void>;
     reportSessionComplete(sessionId: string, report: SessionComplete): Promise<void>;
+    /**
+     * Mirror a wave plan to the hosted cockpit.
+     *
+     * Derived structure only — waves, task descriptions, file paths, dependency
+     * edges. Never source: no file contents, no diffs. The hosted schema has no
+     * column for those, which is the enforcement; this comment is only the intent.
+     *
+     * Best-effort by design. Mirroring is what makes the plan visible on
+     * devpilot.sh, but the run is real work already underway on this machine, and
+     * losing it because a display copy failed to upload would be an absurd trade.
+     * Callers get a boolean and decide whether to mention it.
+     */
+    mirrorSessionPlan(sessionId: string, plan: MirroredPlan): Promise<boolean>;
     /** Fixes the `getOrchestatorId` typo from 0.1.x. */
     getOrchestratorId(): string | null;
     setOrchestratorId(id: string): void;
@@ -249,4 +284,4 @@ declare class PubSubSubscriber {
     constructor();
 }
 
-export { BridgeClient, type BridgeClientConfig, BridgeError, type DispatchHandler, DispatchLoop, type DispatchLoopConfig, type EntryStatus, type HeartbeatConfig, HeartbeatService, PubSubSubscriber, RealtimeSubscriber, type RealtimeSubscriberConfig, SharedSessionClient, type SharedSessionJoinOptions, type TranscriptEntry };
+export { BridgeClient, type BridgeClientConfig, BridgeError, type DispatchHandler, DispatchLoop, type DispatchLoopConfig, type EntryStatus, type HeartbeatConfig, HeartbeatService, type MirroredPlan, PubSubSubscriber, RealtimeSubscriber, type RealtimeSubscriberConfig, SharedSessionClient, type SharedSessionJoinOptions, type TranscriptEntry };

@@ -1,8 +1,8 @@
 'use client';
 
 import { useState, useMemo } from 'react';
-import { cn } from '@/lib/utils';
-import { ModelBadge, ComplexityBadge } from '@/components/ui/badge';
+import { cn } from '../cn';
+import { ModelBadge, ComplexityBadge } from './badges';
 import type { ParsedWavePlan, ParsedTask, ParsedWave, WaveProgress } from '@devpilot.sh/core/wave-planner';
 
 // ============================================================================

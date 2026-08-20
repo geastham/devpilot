@@ -32,9 +32,14 @@ let conductorResponse: { status: number; body: unknown } = {
 
 /** What the handler reported to the bridge. */
 let reported: { status: string; message?: string }[] = [];
+let mirrored: { sessionId: string; plan: Record<string, unknown> }[] = [];
 const client = {
   reportSessionStatus: async (_id: string, s: { status: string; message?: string }) => {
     reported.push(s);
+  },
+  mirrorSessionPlan: async (sessionId: string, plan: Record<string, unknown>) => {
+    mirrored.push({ sessionId, plan });
+    return true;
   },
 } as never;
 
@@ -98,6 +103,7 @@ afterAll(async () => {
 beforeEach(() => {
   calls = [];
   reported = [];
+  mirrored = [];
   existing = [];
   existingRunState = {};
   conductorResponse = {
@@ -291,5 +297,102 @@ describe('links back into the cockpit', () => {
 
     const dispatching = reported.find((r) => /dispatching waves/i.test(r.message ?? ''));
     expect(dispatching?.message).toContain(`${baseUrl}/waves?item=item_new`);
+  });
+});
+
+
+/**
+ * Mirroring the plan to the hosted cockpit.
+ *
+ * The hosted plane knew what a run was and never what it planned to do, so the
+ * cockpit existed only on the machine running the bridge — a customer could
+ * manage connections on devpilot.sh and could not look at the thing they were
+ * paying for. What crosses the boundary is structure; what must never cross is
+ * source.
+ */
+describe('hosted cockpit mirroring', () => {
+  const planFixture = {
+    waves: [
+      {
+        label: 'Contracts',
+        tasks: [
+          {
+            taskCode: '1.1',
+            description: 'Freeze the retry contract',
+            // The planner writes paths as markdown code spans, because its
+            // output is a markdown table.
+            filePaths: ['`src/utils/retry/types.ts`'],
+            complexity: 'S',
+            recommendedModel: 'sonnet',
+            canRunInParallel: true,
+          },
+        ],
+      },
+    ],
+    dependencyEdges: [{ from: '1.1', to: '2.1', type: 'hard' }],
+    criticalPath: ['1.1'],
+  };
+
+  it('mirrors the plan structure once one exists', async () => {
+    conductorResponse = {
+      status: 200,
+      body: {
+        status: 'planning',
+        awaiting: 'review',
+        review: { score: { parallelizationScore: 0.75 }, plan: planFixture },
+      },
+    };
+
+    await handler()(message);
+
+    expect(mirrored).toHaveLength(1);
+    expect(mirrored[0].sessionId).toBe('sesn_1');
+    const plan = mirrored[0].plan as {
+      cockpitItemId: string;
+      parallelization: number;
+      waves: { tasks: { filePaths: string[] }[] }[];
+      criticalPath: string[];
+    };
+    expect(plan.cockpitItemId).toBe('item_new');
+    expect(plan.parallelization).toBe(0.75);
+    expect(plan.criticalPath).toEqual(['1.1']);
+    // Backticks stripped, or every hosted surface that renders a path shows them.
+    expect(plan.waves[0].tasks[0].filePaths).toEqual(['src/utils/retry/types.ts']);
+  });
+
+  it('does not mirror when there is no plan to mirror', async () => {
+    conductorResponse = { status: 200, body: { status: 'planning', awaiting: null } };
+    await handler()(message);
+    expect(mirrored).toHaveLength(0);
+  });
+
+  it('completes the dispatch when the client cannot mirror at all', async () => {
+    // An older bridge-client has no `mirrorSessionPlan`. Calling it threw a
+    // TypeError that propagated, released the queue claim and failed the
+    // ticket — real work lost because a display copy could not be uploaded.
+    const older = {
+      reportSessionStatus: async (_id: string, st: { status: string; message?: string }) => {
+        reported.push(st);
+      },
+    } as never;
+
+    conductorResponse = {
+      status: 200,
+      body: {
+        status: 'planning',
+        awaiting: 'review',
+        review: { score: { parallelizationScore: 0.75 }, plan: planFixture },
+      },
+    };
+
+    await expect(
+      createConductorDispatchHandler({
+        client: older,
+        cockpitUrl: baseUrl,
+        requestTimeoutMs: 10_000,
+      })(message)
+    ).resolves.toBeUndefined();
+
+    expect(reported.some((r) => /awaiting review/i.test(r.message ?? ''))).toBe(true);
   });
 });

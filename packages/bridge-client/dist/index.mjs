@@ -112,6 +112,29 @@ var BridgeClient = class {
       body: JSON.stringify(report)
     });
   }
+  /**
+   * Mirror a wave plan to the hosted cockpit.
+   *
+   * Derived structure only — waves, task descriptions, file paths, dependency
+   * edges. Never source: no file contents, no diffs. The hosted schema has no
+   * column for those, which is the enforcement; this comment is only the intent.
+   *
+   * Best-effort by design. Mirroring is what makes the plan visible on
+   * devpilot.sh, but the run is real work already underway on this machine, and
+   * losing it because a display copy failed to upload would be an absurd trade.
+   * Callers get a boolean and decide whether to mention it.
+   */
+  async mirrorSessionPlan(sessionId, plan) {
+    try {
+      await this.request(`/api/sessions/${sessionId}/plan`, {
+        method: "POST",
+        body: JSON.stringify(plan)
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
   /** Fixes the `getOrchestatorId` typo from 0.1.x. */
   getOrchestratorId() {
     return this.orchestratorId;
