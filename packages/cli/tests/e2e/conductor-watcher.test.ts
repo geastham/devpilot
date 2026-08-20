@@ -17,9 +17,13 @@ import { ConductorWatcher } from '../../src/commands/bridge/conductor-watcher';
  */
 
 let completions: { sessionId: string; report: Record<string, unknown> }[] = [];
+let statuses: { sessionId: string; report: Record<string, unknown> }[] = [];
 const client = {
   reportSessionComplete: async (sessionId: string, report: Record<string, unknown>) => {
     completions.push({ sessionId, report });
+  },
+  reportSessionStatus: async (sessionId: string, report: Record<string, unknown>) => {
+    statuses.push({ sessionId, report });
   },
 } as never;
 
@@ -148,5 +152,106 @@ describe('conductor watcher → bridge completion', () => {
 
     expect(lost).toEqual(['ENG-42']);
     expect(w.tracked).toBe(0);
+  });
+});
+
+
+/**
+ * Mid-flight narration.
+ *
+ * The watcher used to return early for any non-terminal state, so a run that
+ * takes minutes to hours said nothing between "claimed" and "finished". Linear
+ * marks an agent that stops emitting activities as unresponsive: AVA-10 showed
+ * one thought, thirty minutes of silence, then "Stopped responding" — while the
+ * planner was working correctly the entire time.
+ */
+describe('progress while the run is still going', () => {
+  beforeEach(() => {
+    completions = [];
+    statuses = [];
+    states = {};
+    failNext = 0;
+  });
+
+  it('reports the review gate as something a human can act on', async () => {
+    states.i1 = {
+      status: 'planning',
+      awaiting: 'review',
+      score: { parallelizationScore: 0.8888 },
+      review: { plan: { waves: [{ tasks: [1, 2] }, { tasks: [3] }] } },
+    };
+
+    const w = watcher();
+    w.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-10' });
+    await w.sweep();
+
+    expect(statuses).toHaveLength(1);
+    const msg = String(statuses[0].report.message);
+    // The numbers a reviewer needs, and the fact that they are the blocker.
+    expect(msg).toContain('2 waves');
+    expect(msg).toContain('3 tasks');
+    expect(msg).toContain('89% parallel');
+    // The hosted side turns "awaiting review" into a Linear `elicitation`,
+    // which is what moves the session to awaitingInput instead of leaving it
+    // looking hung. If this substring goes, the session state silently
+    // degrades to a plain thought.
+    expect(msg).toMatch(/awaiting review/i);
+    expect(completions).toHaveLength(0);
+  });
+
+  it('does not repeat itself while nothing changes', async () => {
+    states.i1 = { status: 'executing', currentWaveIndex: 0, lastDispatch: { dispatched: 3, queued: 0 } };
+
+    const w = watcher();
+    w.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-10' });
+    await w.sweep();
+    await w.sweep();
+    await w.sweep();
+
+    // Three sweeps, one message: Linear activities are not idempotent, and a
+    // 30s poll would otherwise post the same line every 30 seconds forever.
+    expect(statuses).toHaveLength(1);
+    expect(String(statuses[0].report.message)).toContain('wave 1');
+  });
+
+  it('speaks again once the run actually moves', async () => {
+    states.i1 = { status: 'executing', currentWaveIndex: 0, lastDispatch: { dispatched: 3, queued: 0 } };
+    const w = watcher();
+    w.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-10' });
+    await w.sweep();
+
+    states.i1 = {
+      status: 'executing',
+      currentWaveIndex: 1,
+      completedWaves: [0],
+      lastDispatch: { dispatched: 2, queued: 0 },
+    };
+    await w.sweep();
+
+    expect(statuses).toHaveLength(2);
+    expect(String(statuses[1].report.message)).toContain('wave 2');
+  });
+
+  it('keeps watching when a progress report fails', async () => {
+    states.i1 = { status: 'executing', currentWaveIndex: 0 };
+    const boom = {
+      reportSessionComplete: async () => {},
+      reportSessionStatus: async () => {
+        throw new Error('hosted plane down');
+      },
+    } as never;
+
+    const w = new ConductorWatcher({
+      client: boom,
+      cockpitUrl: 'http://cockpit.test',
+      pollIntervalMs: 60_000,
+      fetchImpl,
+    });
+    w.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-10' });
+    await w.sweep();
+
+    // A failed narration must never cost us the run: completion is the thing
+    // that actually matters, and it is still owed.
+    expect(w.tracked).toBe(1);
   });
 });

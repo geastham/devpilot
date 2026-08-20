@@ -38,6 +38,8 @@ import type {
 import { getWaveExecutionConfig, getServerOrchestrator } from './orchestrator';
 import { mempalace } from '@devpilot.sh/core';
 import { memoryConfigFromEnv, wingSlugForRepo } from './conductor-memory';
+import { db, wavePlans } from '@/lib/db';
+import { eq } from 'drizzle-orm';
 
 export interface DevPilotPortsOptions {
   apiKey: string;
@@ -172,6 +174,14 @@ export function createDevPilotPorts(options: DevPilotPortsOptions): ConductorPor
       getServerOrchestrator();
 
       const result = await controller.dispatchWave(wavePlanId, waveIndex);
+
+      // Move the plan out of `approved` the moment work actually goes out, and
+      // keep the wave pointer in the row rather than only in graph state — the
+      // cockpit and the hosted plane both read this table, not the checkpoint.
+      await db
+        .update(wavePlans)
+        .set({ status: 'executing', currentWaveIndex: waveIndex })
+        .where(eq(wavePlans.id, wavePlanId));
       return {
         dispatched: result.dispatched,
         queued: result.queued,

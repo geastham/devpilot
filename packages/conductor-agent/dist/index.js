@@ -239,7 +239,7 @@ function makeNodes(ports, config) {
 
 // src/types.ts
 var DEFAULT_CONFIG = {
-  minParallelizationScore: 70,
+  minParallelizationScore: 0.7,
   maxRefinementIterations: 3,
   requireReview: true,
   failurePolicy: "halt",

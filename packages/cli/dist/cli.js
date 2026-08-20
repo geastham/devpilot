@@ -1183,11 +1183,37 @@ function createConductorDispatchHandler(opts) {
 }
 
 // src/commands/bridge/conductor-watcher.ts
+function progressReport(state) {
+  if (state.awaiting === "review") {
+    const waves = state.review?.plan?.waves?.length ?? 0;
+    const tasks = state.review?.plan?.waves?.reduce((n, w) => n + (w.tasks?.length ?? 0), 0) ?? 0;
+    const pct = Math.round((state.score?.parallelizationScore ?? 0) * 100);
+    return {
+      signature: "review",
+      message: `Plan ready \u2014 ${waves} wave${waves === 1 ? "" : "s"}, ${tasks} task${tasks === 1 ? "" : "s"}, ${pct}% parallel. Approve it in the DevPilot cockpit to dispatch, or reply here with constraints to re-plan. Awaiting review.`,
+      percent: 40
+    };
+  }
+  if (state.status === "executing") {
+    const wave = state.currentWaveIndex ?? 0;
+    const done = state.completedWaves?.length ?? 0;
+    const d = state.lastDispatch?.dispatched ?? 0;
+    const q = state.lastDispatch?.queued ?? 0;
+    return {
+      signature: `wave:${wave}:${done}:${d}:${q}`,
+      message: `Dispatching wave ${wave + 1}` + (d || q ? ` \u2014 ${d} agent${d === 1 ? "" : "s"} running, ${q} queued.` : "."),
+      percent: Math.min(60 + done * 15, 95)
+    };
+  }
+  return null;
+}
 var TERMINAL = /* @__PURE__ */ new Set(["complete", "failed"]);
 var ConductorWatcher = class {
   constructor(opts) {
     this.opts = opts;
     this.runs = /* @__PURE__ */ new Map();
+    /** Last progress signature reported per session, so we do not repeat ourselves. */
+    this.reported = /* @__PURE__ */ new Map();
     this.timer = null;
     this.base = opts.cockpitUrl.replace(/\/$/, "");
     this.interval = opts.pollIntervalMs ?? 3e4;
@@ -1235,12 +1261,32 @@ var ConductorWatcher = class {
     const res = await this.doFetch(`${this.base}/api/items/${run.itemId}/conductor`);
     if (!res.ok) throw new Error(`conductor state \u2192 ${res.status}`);
     const state = await res.json();
-    if (!state.status || !TERMINAL.has(state.status)) return;
+    if (!state.status || !TERMINAL.has(state.status)) {
+      const progress = progressReport(state);
+      if (progress && this.reported.get(run.sessionId) !== progress.signature) {
+        this.reported.set(run.sessionId, progress.signature);
+        try {
+          await this.opts.client.reportSessionStatus(run.sessionId, {
+            status: "running",
+            progressPercent: progress.percent,
+            message: progress.message
+          });
+          this.log(`${run.linearIdentifier}: ${progress.message}`);
+        } catch (err) {
+          this.reported.delete(run.sessionId);
+          this.log(
+            `${run.linearIdentifier}: progress report failed (${err instanceof Error ? err.message : String(err)})`
+          );
+        }
+      }
+      return;
+    }
     const success = state.status === "complete";
     const waves = state.completedWaves?.length ?? 0;
     const tasks = state.review?.plan?.waves?.reduce((n, w) => n + (w.tasks?.length ?? 0), 0) ?? 0;
     const summary = success ? `DevPilot completed ${waves} wave${waves === 1 ? "" : "s"}` + (tasks ? ` covering ${tasks} task${tasks === 1 ? "" : "s"}.` : ".") : `DevPilot run failed: ${state.errors?.[state.errors.length - 1] ?? "unknown error"}`;
     this.runs.delete(run.sessionId);
+    this.reported.delete(run.sessionId);
     await this.opts.client.reportSessionComplete(run.sessionId, {
       success,
       summary,

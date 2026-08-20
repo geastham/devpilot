@@ -153,7 +153,16 @@ type ConductorEvent = {
     reason: string;
 };
 interface ConductorConfig {
-    /** Refinement stops once the score reaches this. */
+    /**
+     * Refinement stops once the score reaches this.
+     *
+     * A RATIO in [0,1], matching `PlanScore.parallelizationScore` and core's
+     * `PlanRefinementService`. This default was `70` — a percentage compared
+     * against a ratio, so `0.89 < 70` held for every plan ever scored. The
+     * refinement loop therefore ran to `maxRefinementIterations` no matter how
+     * good the plan was, and the review panel's "could not improve it further"
+     * warning appeared on every single plan, including perfect ones.
+     */
     minParallelizationScore: number;
     /** Hard cap on refinement passes. */
     maxRefinementIterations: number;

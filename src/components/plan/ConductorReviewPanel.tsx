@@ -176,7 +176,7 @@ export function ConductorReviewPanel() {
                 <div className="flex items-baseline justify-between">
                   <span className="text-xs text-text-secondary">Parallelization</span>
                   <span className="text-sm font-bold tabular-nums text-text-primary">
-                    {Math.round(review.score?.parallelizationScore ?? 0)}
+                    {Math.round((review.score?.parallelizationScore ?? 0) * 100)}%
                   </span>
                 </div>
                 <p className="mt-1 text-xs text-text-muted">

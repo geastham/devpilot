@@ -22,7 +22,7 @@ import {
   type PlanScore,
   resolvePlannerModel,
 } from '@devpilot.sh/core/wave-planner';
-import { db, activityEvents, plans } from '@/lib/db';
+import { db, activityEvents, plans, wavePlans } from '@/lib/db';
 import { eq } from 'drizzle-orm';
 import type { EventType } from '@devpilot.sh/core/db';
 import { createDevPilotPorts } from './conductor';
@@ -77,24 +77,72 @@ async function persistPlan(
     .where(eq(plans.horizonItemId, input.itemId))
     .limit(1);
 
+  /**
+   * Create the parent row when it is missing rather than refusing to persist.
+   *
+   * `generatePlanForItem` creates a `plans` row before planning because the
+   * generator needs a planId. The conductor does not go through that function —
+   * it runs its own generate node and comes straight here — so on every
+   * conductor-planned item the row simply did not exist.
+   *
+   * This threw instead, with a message telling the user to "generate the item's
+   * plan before approving a wave plan". There is no way to do that: the plan
+   * *was* generated, by the conductor, which is what produced the plan being
+   * approved. Every item arriving from the Linear bridge hit this, so approval
+   * on that path could never succeed — observed on AVA-10, a finished two-wave
+   * plan that failed at the moment of approval.
+   *
+   * A missing parent is not a user error here; it is a bookkeeping gap between
+   * two entry points. Fill it. Cost fields stay neutral, matching
+   * `generatePlanForItem`'s precedent — `projectWavePlanToPlan` computes the
+   * real numbers later. The confidence signals we already have from scoring.
+   */
+  let planId: string;
   if (planRow.length === 0) {
-    // Fail with the diagnosis rather than letting sqlite report an anonymous
-    // constraint violation three frames away.
-    throw new Error(
-      `Cannot persist a wave plan for ${input.itemId}: no plans row exists for ` +
-        `this horizon item, and wave_plans.plan_id requires one. Generate the ` +
-        `item's plan before approving a wave plan.`
-    );
+    const [created] = await db
+      .insert(plans)
+      .values({
+        horizonItemId: input.itemId,
+        estimatedCostUsd: 0,
+        baselineCostUsd: 0,
+        acceptanceCriteria: [],
+        confidenceSignals: {
+          overallConfidence: score.parallelizationScore,
+          parallelization: score.confidenceSignals?.parallelization,
+        },
+        fleetContextSnapshot: {},
+        memorySessionsUsed: [],
+      })
+      .returning({ id: plans.id });
+    planId = created.id;
+  } else {
+    planId = planRow[0].id;
   }
 
   const wavePlanId = await generator.persistWavePlan(
     input.itemId,
-    planRow[0].id,
+    planId,
     plan,
     criticalPath,
     assignment,
     score
   );
+
+  /**
+   * `persistWavePlan` inserts every plan as `draft`, and nothing moved it.
+   * Rows sat at `draft` while their waves were dispatching, so the column
+   * reported the plan's lifecycle stage as "not yet reviewed" for runs that
+   * were already executing — verified on wave plan d2p1ljmu…, `draft` with
+   * eight tasks dispatching.
+   *
+   * In the conductor this node is only ever reached past the review gate, so
+   * `approved` is exactly what it means. `dispatchWave` advances it to
+   * `executing`.
+   */
+  await db
+    .update(wavePlans)
+    .set({ status: 'approved' })
+    .where(eq(wavePlans.id, wavePlanId));
 
   return { wavePlanId };
 }
