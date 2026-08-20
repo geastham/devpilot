@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { DAGVisualization, CriticalPathIndicator, WaveProgressBar } from '@/components/wave-planner';
@@ -31,7 +31,7 @@ import { RepoBadge } from '@/components/ui/badge';
  * to the first active plan, because arriving from the nav tab with nothing in
  * mind should show you something — but it says what it picked.
  */
-export default function WavesPage() {
+function WavesView() {
   const [state, setState] = useState<{
     loading: boolean;
     error: string | null;
@@ -217,5 +217,21 @@ function Centered({
         {children}
       </p>
     </div>
+  );
+}
+
+
+/**
+ * `useSearchParams` opts the tree into client-side rendering, and Next requires
+ * a Suspense boundary around that so the rest of the page can still be
+ * prerendered. Without one `next build` fails outright — while `tsc` passes and
+ * `next dev` renders happily, which is exactly how this shipped to a build
+ * break: the checks that were run could not see it.
+ */
+export default function WavesPage() {
+  return (
+    <Suspense fallback={<Centered>Loading wave plan…</Centered>}>
+      <WavesView />
+    </Suspense>
   );
 }

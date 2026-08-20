@@ -17,7 +17,8 @@
     "db:seed": "turbo run db:seed",
     "db:studio": "turbo run db:studio",
     "db:check-sync": "tsx scripts/check-schema-sync.ts",
-    "clean": "turbo run clean && rm -rf node_modules"
+    "clean": "turbo run clean && rm -rf node_modules",
+    "verify": "pnpm run typecheck && pnpm run test && pnpm run build:app"
   },
   "dependencies": {
     "@devpilot.sh/core": "workspace:*",
