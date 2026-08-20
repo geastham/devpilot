@@ -13,6 +13,8 @@ interface ConnectOptions {
   repos?: string;
   mode: 'ao-cli' | 'http' | 'claude-session';
   transport: 'realtime' | 'poll';
+  sessionApiUrl?: string;
+  sessionApiKey?: string;
   plan?: boolean;
   cockpitUrl?: string;
   maxJobs: string;
@@ -39,6 +41,16 @@ export const connectCommand = new Command('connect')
   .option('--http-url <url>', 'Orchestrator URL (required for --mode http)')
   .option('--ao-project <name>', 'ao project name (for --mode ao-cli)')
   .option('--ao-path <path>', 'Path to the ao binary (default: ao on PATH)')
+  .option(
+    '--session-api-url <url>',
+    'Session runner URL (required for --mode claude-session)',
+    process.env.DEVPILOT_SESSION_API_URL,
+  )
+  .option(
+    '--session-api-key <token>',
+    'Bearer token the session runner expects',
+    process.env.DEVPILOT_SESSION_API_KEY,
+  )
   // Off by default: planning a ticket costs a model call and stops at a human
   // review gate, which is a different contract from "run this ticket now".
   // Opt in per machine until the planned path is the one you want by default.
@@ -150,6 +162,8 @@ export const connectCommand = new Command('connect')
             client,
             orchestratorMode: options.mode,
             httpUrl: options.httpUrl,
+            sessionApiUrl: options.sessionApiUrl,
+            sessionApiKey: options.sessionApiKey,
             aoProjectName: options.aoProject,
             aoPath: options.aoPath,
             onLog: (line) => console.log(chalk.blue(`   ${line}`)),

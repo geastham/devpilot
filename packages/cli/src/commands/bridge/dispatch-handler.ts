@@ -19,6 +19,15 @@ export interface DispatchHandlerOptions {
   aoPath?: string;
   httpUrl?: string;
   apiKey?: string;
+  /**
+   * Where the local session runner listens, for `claude-session` mode.
+   *
+   * Without these the adapter is constructed with no endpoint and every
+   * dispatch goes nowhere — the mode was selectable from `--mode` and could
+   * never have worked.
+   */
+  sessionApiUrl?: string;
+  sessionApiKey?: string;
   callbackUrl?: string;
   /** Status poll cadence. Core defaults to 5s. */
   pollIntervalMs?: number;
@@ -45,6 +54,8 @@ function service(opts: DispatchHandlerOptions): OrchestratorService {
     callbackUrl: opts.callbackUrl,
     aoProjectName: opts.aoProjectName,
     aoPath: opts.aoPath,
+    sessionApiUrl: opts.sessionApiUrl,
+    sessionApiKey: opts.sessionApiKey,
     pollIntervalMs: opts.pollIntervalMs,
   });
 }

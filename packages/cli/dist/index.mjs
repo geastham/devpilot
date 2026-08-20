@@ -910,6 +910,8 @@ function service(opts) {
     callbackUrl: opts.callbackUrl,
     aoProjectName: opts.aoProjectName,
     aoPath: opts.aoPath,
+    sessionApiUrl: opts.sessionApiUrl,
+    sessionApiKey: opts.sessionApiKey,
     pollIntervalMs: opts.pollIntervalMs
   });
 }
@@ -1230,6 +1232,14 @@ var connectCommand = new Command6("connect").description("Connect this machine t
   "realtime | poll \u2014 polling is fully correct, just higher latency",
   process.env.DEVPILOT_BRIDGE_TRANSPORT || "realtime"
 ).option("-j, --max-jobs <n>", "Max concurrent local jobs", "4").option("--http-url <url>", "Orchestrator URL (required for --mode http)").option("--ao-project <name>", "ao project name (for --mode ao-cli)").option("--ao-path <path>", "Path to the ao binary (default: ao on PATH)").option(
+  "--session-api-url <url>",
+  "Session runner URL (required for --mode claude-session)",
+  process.env.DEVPILOT_SESSION_API_URL
+).option(
+  "--session-api-key <token>",
+  "Bearer token the session runner expects",
+  process.env.DEVPILOT_SESSION_API_KEY
+).option(
   "--plan",
   "Route dispatches through the conductor (plan \u2192 waves) instead of one session",
   process.env.DEVPILOT_BRIDGE_PLAN === "true"
@@ -1313,6 +1323,8 @@ var connectCommand = new Command6("connect").description("Connect this machine t
       client,
       orchestratorMode: options.mode,
       httpUrl: options.httpUrl,
+      sessionApiUrl: options.sessionApiUrl,
+      sessionApiKey: options.sessionApiKey,
       aoProjectName: options.aoProject,
       aoPath: options.aoPath,
       onLog: (line) => console.log(chalk7.blue(`   ${line}`))
