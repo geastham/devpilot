@@ -1086,13 +1086,30 @@ async function existingItem(cockpitUrl, linearTicketId, timeoutMs) {
   );
   return Array.isArray(items) && items.length > 0 ? items[0] : null;
 }
-function describe(state) {
+function boardLink(base, itemId) {
+  return `${base}/?item=${itemId}`;
+}
+function wavesLink(base, itemId) {
+  return `${base}/waves?item=${itemId}`;
+}
+function describe(state, base, itemId) {
   if (state.awaiting === "review") {
     const score = state.review?.score?.parallelizationScore;
-    const pct = typeof score === "number" ? ` (parallelization ${Math.round(score * 100)}%)` : "";
-    return `Plan ready${pct} \u2014 awaiting review in the DevPilot cockpit.`;
+    const waves = state.review?.plan?.waves?.length;
+    const tasks = state.review?.plan?.waves?.reduce(
+      (n, w) => n + (w.tasks?.length ?? 0),
+      0
+    );
+    const parts = [
+      waves && tasks ? `${waves} wave${waves === 1 ? "" : "s"}, ${tasks} tasks` : null,
+      typeof score === "number" ? `${Math.round(score * 100)}% parallel` : null
+    ].filter(Boolean);
+    const shape = parts.length ? ` \u2014 ${parts.join(", ")}` : "";
+    return `Plan ready${shape}. [Review it in the cockpit](${boardLink(base, itemId)}) to dispatch, or reply here with constraints to re-plan. Awaiting review.`;
   }
-  if (state.awaiting === "wave") return "Plan approved \u2014 dispatching waves.";
+  if (state.awaiting === "wave") {
+    return `Plan approved \u2014 dispatching waves. [Watch the waves](${wavesLink(base, itemId)}).`;
+  }
   if (state.status === "complete") return "All waves complete.";
   if (state.status === "failed") {
     return `Conductor run failed: ${state.errors?.[state.errors.length - 1] ?? "unknown error"}`;
@@ -1118,7 +1135,7 @@ function createConductorDispatchHandler(opts) {
         ).catch(() => ({}));
         const live = current.awaiting === "review" || current.awaiting === "wave" || current.status === "planning" || current.status === "executing";
         if (live) {
-          const summary2 = describe(current);
+          const summary2 = describe(current, base, item.id);
           log(`${linearIdentifier}: ${summary2} (no new run started)`);
           await opts.client.reportSessionStatus(sessionId, {
             status: "running",
@@ -1151,14 +1168,14 @@ function createConductorDispatchHandler(opts) {
       await opts.client.reportSessionStatus(sessionId, {
         status: "running",
         progressPercent: 5,
-        message: `On the board as ${item.id}. Planning\u2026`
+        message: `Planning \u2014 [open it in the cockpit](${boardLink(base, item.id)}).`
       });
       const state = await call(
         `${base}/api/items/${item.id}/conductor`,
         { method: "POST", body: JSON.stringify({}) },
         timeout
       );
-      const summary = describe(state);
+      const summary = describe(state, base, item.id);
       log(`${linearIdentifier}: ${summary}`);
       if (state.status === "failed") {
         throw new Error(summary);

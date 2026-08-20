@@ -136,7 +136,7 @@ describe('bridge dispatch → conductor', () => {
 
     const last = reported[reported.length - 1];
     expect(last.status).toBe('running');
-    expect(last.message).toContain('awaiting review');
+    expect(last.message).toMatch(/awaiting review/i);
     // The score is the reason a conductor would bother opening the cockpit.
     expect(last.message).toContain('88%');
   });
@@ -182,7 +182,7 @@ describe('bridge dispatch → conductor', () => {
 
     const last = reported[reported.length - 1];
     expect(last.status).toBe('running');
-    expect(last.message).toContain('awaiting review');
+    expect(last.message).toMatch(/awaiting review/i);
   });
 
   it('does start a run when the existing item has no live run', async () => {
@@ -226,5 +226,70 @@ describe('bridge dispatch → conductor', () => {
 
     await expect(handler()(message)).rejects.toThrow(/no API key configured/);
     expect(reported[reported.length - 1].status).toBe('error');
+  });
+});
+
+
+/**
+ * Deep links.
+ *
+ * These messages become agent activities on the Linear issue. They used to name
+ * the board item as a bare id — "On the board as ds21hni0xpviz8210xk7q8p9" —
+ * which is a fact you cannot act on, in the one moment the product is asking a
+ * human to go and look at something.
+ */
+describe('links back into the cockpit', () => {
+  it('links to the item, not just its id, while planning', async () => {
+    await handler()(message);
+
+    const planning = reported.find((r) => /planning/i.test(r.message ?? ''));
+    expect(planning?.message).toContain(`${baseUrl}/?item=item_new`);
+    // A bare id was the bug; a markdown link is the fix.
+    expect(planning?.message).toMatch(/\[.+\]\(http/);
+  });
+
+  it('sends the reviewer to the board, with the plan shape in the sentence', async () => {
+    conductorResponse = {
+      status: 200,
+      body: {
+        status: 'planning',
+        awaiting: 'review',
+        review: {
+          score: { parallelizationScore: 0.89 },
+          plan: { waves: [{ tasks: [1, 2] }, { tasks: [3] }] },
+        },
+      },
+    };
+
+    await handler()(message);
+
+    const gate = reported.find((r) => /awaiting review/i.test(r.message ?? ''));
+    // "2 waves, 3 tasks, 89% parallel" is a decision; "plan ready" is a
+    // notification. The numbers are the point.
+    expect(gate?.message).toContain('2 waves, 3 tasks');
+    expect(gate?.message).toContain('89% parallel');
+    expect(gate?.message).toContain(`${baseUrl}/?item=item_new`);
+  });
+
+  it('does not stitch a placeholder in when the plan shape is unknown', async () => {
+    // The default fixture has a score but no plan — exactly the case that once
+    // read "Plan ready — Plan ready, 88% parallel".
+    await handler()(message);
+
+    const gate = reported.find((r) => /awaiting review/i.test(r.message ?? ''));
+    expect(gate?.message).not.toMatch(/Plan ready.*Plan ready/);
+    expect(gate?.message).toContain('88% parallel');
+  });
+
+  it('points at the wave view once the plan is dispatching', async () => {
+    conductorResponse = {
+      status: 200,
+      body: { status: 'executing', awaiting: 'wave' },
+    };
+
+    await handler()(message);
+
+    const dispatching = reported.find((r) => /dispatching waves/i.test(r.message ?? ''));
+    expect(dispatching?.message).toContain(`${baseUrl}/waves?item=item_new`);
   });
 });

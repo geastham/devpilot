@@ -57,7 +57,13 @@ interface HorizonItem {
 interface ConductorState {
   status?: string;
   awaiting?: 'review' | 'wave' | null;
-  review?: { score?: { parallelizationScore?: number } } | null;
+  review?: {
+    score?: { parallelizationScore?: number };
+    /** Carried so the review message can say how big the plan is, not just that
+        one exists — "2 waves, 9 tasks, 89% parallel" is a decision; "plan
+        ready" is a notification. */
+    plan?: { waves?: { tasks?: unknown[] }[] };
+  } | null;
   errors?: string[];
 }
 
@@ -112,13 +118,48 @@ async function existingItem(
 }
 
 /** Describe where the run got to, for the status line a human reads in Linear. */
-function describe(state: ConductorState): string {
+/**
+ * Deep links back into the cockpit.
+ *
+ * These messages become agent activities on the Linear issue, and they used to
+ * name the board item as a bare id — "On the board as ds21hni0xpviz…" — which
+ * is a fact you cannot act on. The whole point of the review gate is that a
+ * human goes and looks; telling them where without letting them go there is the
+ * wrong half of the sentence.
+ *
+ * Linear renders activity bodies as markdown, so these are real links. They
+ * point at the cockpit, which is the machine the bridge runs on: the hosted
+ * plane never sees a plan, so there is nothing to link to there.
+ */
+function boardLink(base: string, itemId: string): string {
+  return `${base}/?item=${itemId}`;
+}
+
+function wavesLink(base: string, itemId: string): string {
+  return `${base}/waves?item=${itemId}`;
+}
+
+function describe(state: ConductorState, base: string, itemId: string): string {
   if (state.awaiting === 'review') {
     const score = state.review?.score?.parallelizationScore;
-    const pct = typeof score === 'number' ? ` (parallelization ${Math.round(score * 100)}%)` : '';
-    return `Plan ready${pct} — awaiting review in the DevPilot cockpit.`;
+    const waves = state.review?.plan?.waves?.length;
+    const tasks = state.review?.plan?.waves?.reduce(
+      (n, w) => n + (w.tasks?.length ?? 0),
+      0
+    );
+    // Assembled from the parts that exist. The shape is absent on a run whose
+    // plan we have not read back, and stitching in a placeholder produced
+    // "Plan ready — Plan ready, 88% parallel".
+    const parts = [
+      waves && tasks ? `${waves} wave${waves === 1 ? '' : 's'}, ${tasks} tasks` : null,
+      typeof score === 'number' ? `${Math.round(score * 100)}% parallel` : null,
+    ].filter(Boolean);
+    const shape = parts.length ? ` — ${parts.join(', ')}` : '';
+    return `Plan ready${shape}. [Review it in the cockpit](${boardLink(base, itemId)}) to dispatch, or reply here with constraints to re-plan. Awaiting review.`;
   }
-  if (state.awaiting === 'wave') return 'Plan approved — dispatching waves.';
+  if (state.awaiting === 'wave') {
+    return `Plan approved — dispatching waves. [Watch the waves](${wavesLink(base, itemId)}).`;
+  }
   if (state.status === 'complete') return 'All waves complete.';
   if (state.status === 'failed') {
     return `Conductor run failed: ${state.errors?.[state.errors.length - 1] ?? 'unknown error'}`;
@@ -160,7 +201,7 @@ export function createConductorDispatchHandler(
           current.status === 'executing';
 
         if (live) {
-          const summary = describe(current);
+          const summary = describe(current, base, item.id);
           log(`${linearIdentifier}: ${summary} (no new run started)`);
           await opts.client.reportSessionStatus(sessionId, {
             status: 'running',
@@ -197,7 +238,7 @@ export function createConductorDispatchHandler(
       await opts.client.reportSessionStatus(sessionId, {
         status: 'running',
         progressPercent: 5,
-        message: `On the board as ${item.id}. Planning…`,
+        message: `Planning — [open it in the cockpit](${boardLink(base, item.id)}).`,
       });
 
       // The planning call itself. Minutes, and it costs tokens.
@@ -207,7 +248,7 @@ export function createConductorDispatchHandler(
         timeout
       );
 
-      const summary = describe(state);
+      const summary = describe(state, base, item.id);
       log(`${linearIdentifier}: ${summary}`);
 
       if (state.status === 'failed') {
