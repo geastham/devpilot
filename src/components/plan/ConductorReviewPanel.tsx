@@ -103,12 +103,27 @@ export function ConductorReviewPanel() {
     setState(null);
     setPhase({ kind: 'working', label: 'Loading' });
     fetch(`/api/items/${itemId}/conductor`)
-      .then(async (res) => (res.ok ? res.json() : null))
+      .then(async (res) => {
+        // 404 is the honest "no run for this item" answer. Anything else is a
+        // failure to find out, which is NOT the same thing — and the difference
+        // matters, because `state === null` renders an offer to start a paid
+        // planning run. A dropped fetch against an item mid-execution would
+        // invite the user to re-plan a run that is already dispatching agents.
+        if (res.status === 404) return null;
+        if (!res.ok) throw new Error(`conductor state → ${res.status}`);
+        return res.json();
+      })
       .then((json) => {
         setState(json);
         setPhase({ kind: 'idle' });
       })
-      .catch(() => setPhase({ kind: 'idle' }));
+      .catch((error) =>
+        setPhase({
+          kind: 'error',
+          message: 'Could not read the conductor run for this item.',
+          detail: error instanceof Error ? error.message : String(error),
+        })
+      );
   }, [isOpen, itemId]);
 
   if (!isOpen || !itemId) return null;
@@ -158,7 +173,7 @@ export function ConductorReviewPanel() {
 
           {/* No run yet. Starting one costs a model call, so it is an explicit
               action rather than a side effect of opening the panel. */}
-          {!state?.status && phase.kind !== 'working' && (
+          {!state?.status && phase.kind === 'idle' && (
             <div className="space-y-3">
               <p className="text-xs leading-relaxed text-text-secondary">
                 No conductor run for this item yet. Generating a plan calls the

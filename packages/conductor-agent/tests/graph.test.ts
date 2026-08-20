@@ -33,7 +33,16 @@ interface StubOptions {
 }
 
 function stubPorts(options: StubOptions = {}) {
-  const scores = options.scores ?? [90];
+  /**
+   * Scores are RATIOS in [0,1] — the domain `PlanScore.parallelizationScore`
+   * actually uses. These fixtures used to be 90/40/85, a 0-100 scale that
+   * matched the old `minParallelizationScore: 70` default and nothing else.
+   * The suite was self-consistent and wrong: the live scorer emits values like
+   * 0.888, so `score < 70` held for every real plan and refinement always ran
+   * to the iteration cap. Keep these as ratios or the tests stop describing
+   * production again.
+   */
+  const scores = options.scores ?? [0.9];
   const waveCount = options.waveCount ?? 1;
   const outcomes = options.waveOutcomes ?? [];
   const events: ConductorEvent[] = [];
@@ -99,7 +108,7 @@ const thread = (id: string) => ({ configurable: { thread_id: id } });
 
 describe('conductor graph — planning', () => {
   it('skips refinement when the first plan already clears the threshold', async () => {
-    const { ports, calls } = stubPorts({ scores: [90] });
+    const { ports, calls } = stubPorts({ scores: [0.9] });
     const graph = createConductorGraph({ ports, config: { requireReview: false } });
 
     const result = await graph.invoke(input, thread('t1'));
@@ -110,7 +119,7 @@ describe('conductor graph — planning', () => {
   });
 
   it('refines until the score clears the threshold', async () => {
-    const { ports, calls } = stubPorts({ scores: [40, 55, 85] });
+    const { ports, calls } = stubPorts({ scores: [0.4, 0.55, 0.85] });
     const graph = createConductorGraph({ ports, config: { requireReview: false } });
 
     await graph.invoke(input, thread('t2'));
@@ -119,7 +128,7 @@ describe('conductor graph — planning', () => {
   });
 
   it('gives up after maxRefinementIterations rather than looping forever', async () => {
-    const { ports, calls } = stubPorts({ scores: [10] });
+    const { ports, calls } = stubPorts({ scores: [0.1] });
     const graph = createConductorGraph({
       ports,
       config: { requireReview: false, maxRefinementIterations: 3 },
@@ -134,7 +143,7 @@ describe('conductor graph — planning', () => {
 
   it('keeps the better plan when a refinement scores worse', async () => {
     // Initial 50, refinement 20: the refinement must be discarded.
-    const { ports } = stubPorts({ scores: [50, 20, 20] });
+    const { ports } = stubPorts({ scores: [0.5, 0.2, 0.2] });
     const graph = createConductorGraph({
       ports,
       config: { requireReview: false, maxRefinementIterations: 2 },
@@ -142,13 +151,13 @@ describe('conductor graph — planning', () => {
 
     const result = await graph.invoke(input, thread('t4'));
 
-    expect(result.score?.parallelizationScore).toBe(50);
+    expect(result.score?.parallelizationScore).toBe(0.5);
   });
 });
 
 describe('conductor graph — human review interrupt', () => {
   it('suspends at review and resumes on approval', async () => {
-    const { ports, calls } = stubPorts({ scores: [90] });
+    const { ports, calls } = stubPorts({ scores: [0.9] });
     const graph = createConductorGraph({
       ports,
       config: { requireReview: true },
@@ -173,7 +182,7 @@ describe('conductor graph — human review interrupt', () => {
   });
 
   it("feeds the conductor's constraints back into refinement", async () => {
-    const { ports, calls } = stubPorts({ scores: [90] });
+    const { ports, calls } = stubPorts({ scores: [0.9] });
     const graph = createConductorGraph({
       ports,
       config: { requireReview: true },
@@ -192,7 +201,7 @@ describe('conductor graph — human review interrupt', () => {
   });
 
   it('aborts the run when the conductor rejects the plan', async () => {
-    const { ports, calls } = stubPorts({ scores: [90] });
+    const { ports, calls } = stubPorts({ scores: [0.9] });
     const graph = createConductorGraph({
       ports,
       config: { requireReview: true },
@@ -291,7 +300,7 @@ describe('conductor graph — wave execution', () => {
 
 describe('conductor graph — accounting', () => {
   it('accumulates tokens across generation and refinement', async () => {
-    const { ports } = stubPorts({ scores: [40, 85] });
+    const { ports } = stubPorts({ scores: [0.4, 0.85] });
     const graph = createConductorGraph({ ports, config: { requireReview: false } });
 
     const result = await graph.invoke(input, thread('a1'));

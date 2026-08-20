@@ -33,6 +33,17 @@ export function RefiningCard({ item }: RefiningCardProps) {
   const conductor = item.conductor;
   const awaitingReview = conductor?.awaiting === 'review';
 
+  /**
+   * Say which of the three states the run is actually in. "Planning" was shown
+   * for all of them, so an approved run dispatching eight agents still read as
+   * though the planner were thinking about it.
+   */
+  const phase = awaitingReview
+    ? 'Plan ready — your call'
+    : conductor?.status === 'executing'
+      ? `Executing — wave ${(conductor.currentWaveIndex ?? 0) + 1} of ${conductor.waveCount}`
+      : 'Planning';
+
   const handleReviewPlan = () => {
     setSelectedItem(item.id);
     openConfidencePanel(item.id);
@@ -73,8 +84,14 @@ export function RefiningCard({ item }: RefiningCardProps) {
         <p className="text-xs text-text-secondary mb-3">
           {conductor && conductor.waveCount > 0 ? (
             <>
-              <span className="font-medium text-accent-green">
-                {awaitingReview ? 'Plan ready — your call' : 'Planning'}
+              <span
+                className={
+                  awaitingReview
+                    ? 'font-medium text-accent-green'
+                    : 'font-medium text-text-secondary'
+                }
+              >
+                {phase}
               </span>
               {' — '}
               {conductor.waveCount} wave{conductor.waveCount !== 1 ? 's' : ''} ·{' '}
