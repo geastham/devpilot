@@ -42,7 +42,24 @@ export interface ConductorState {
   awaiting?: 'review' | 'wave' | null;
   completedWaves?: number[];
   errors?: string[];
-  review?: { plan?: { waves?: { tasks?: unknown[] }[] } } | null;
+  review?: {
+    score?: { parallelizationScore?: number };
+    plan?: {
+      waves?: {
+        label?: string;
+        tasks?: {
+          taskCode?: string;
+          description?: string;
+          filePaths?: string[];
+          complexity?: string;
+          recommendedModel?: string;
+          canRunInParallel?: boolean;
+        }[];
+      }[];
+      dependencyEdges?: { from: string; to: string; type?: string }[];
+      criticalPath?: string[];
+    };
+  } | null;
   currentWaveIndex?: number;
   score?: { parallelizationScore?: number } | null;
   lastDispatch?: { dispatched?: number; queued?: number } | null;
@@ -126,6 +143,8 @@ export class ConductorWatcher {
   private readonly runs = new Map<string, WatchedRun>();
   /** Last progress signature reported per session, so we do not repeat ourselves. */
   private readonly reported = new Map<string, string>();
+  /** Sessions whose plan has already been mirrored, so we upload it once. */
+  private readonly mirroredPlans = new Set<string>();
   private timer: NodeJS.Timeout | null = null;
   private readonly base: string;
   private readonly interval: number;
@@ -284,6 +303,49 @@ export class ConductorWatcher {
        * cockpit they may not know exists. Saying so there turns a dead-looking
        * session into a question they can answer.
        */
+      /**
+       * Mirror the plan from here as well as from the dispatch handler.
+       *
+       * The handler mirrors once, at claim time. If that call fails — the
+       * hosted plane is unreachable, the cockpit restarts mid-plan, the bridge
+       * is upgraded — nothing ever tried again, and the hosted cockpit stayed
+       * empty for a run that has a perfectly good plan. Observed on AVA-12: the
+       * cockpit was restarted during planning, the handler's call died with it,
+       * and the plan existed everywhere except the place a hosted customer
+       * would look.
+       *
+       * The watcher is already polling this exact state, so it is the natural
+       * place to catch up. Once per session; best-effort, like the handler's.
+       */
+      if (
+        state.review?.plan?.waves?.length &&
+        !this.mirroredPlans.has(run.sessionId) &&
+        typeof this.opts.client.mirrorSessionPlan === 'function'
+      ) {
+        const ok = await this.opts.client.mirrorSessionPlan(run.sessionId, {
+          cockpitItemId: run.itemId,
+          parallelization: state.review.score?.parallelizationScore,
+          waves: state.review.plan.waves.map((w) => ({
+            label: w.label,
+            tasks: (w.tasks ?? []).map((t) => ({
+              taskCode: t.taskCode ?? '',
+              description: t.description ?? '',
+              // The planner writes paths as markdown code spans.
+              filePaths: (t.filePaths ?? []).map((f) => f.replace(/`/g, '').trim()),
+              complexity: t.complexity,
+              recommendedModel: t.recommendedModel,
+              canRunInParallel: t.canRunInParallel,
+            })),
+          })),
+          dependencyEdges: state.review.plan.dependencyEdges ?? [],
+          criticalPath: state.review.plan.criticalPath ?? [],
+        });
+        if (ok) {
+          this.mirroredPlans.add(run.sessionId);
+          this.log(`${run.linearIdentifier}: plan mirrored to the hosted cockpit`);
+        }
+      }
+
       const progress = progressReport(state, {
         // Same guard as the handler: an older client has no `hostedUrl`, and a
         // missing link must never cost the progress report itself.
@@ -351,6 +413,7 @@ export class ConductorWatcher {
     // cockpit would otherwise post the same comment repeatedly.
     this.runs.delete(run.sessionId);
     this.reported.delete(run.sessionId);
+    this.mirroredPlans.delete(run.sessionId);
     this.persist();
 
     await this.opts.client.reportSessionComplete(run.sessionId, {

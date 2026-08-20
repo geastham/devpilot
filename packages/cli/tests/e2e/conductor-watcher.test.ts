@@ -21,6 +21,7 @@ import { ConductorWatcher } from '../../src/commands/bridge/conductor-watcher';
 
 let completions: { sessionId: string; report: Record<string, unknown> }[] = [];
 let statuses: { sessionId: string; report: Record<string, unknown> }[] = [];
+let mirrors: { sessionId: string; plan: Record<string, unknown> }[] = [];
 const client = {
   reportSessionComplete: async (sessionId: string, report: Record<string, unknown>) => {
     completions.push({ sessionId, report });
@@ -29,6 +30,10 @@ const client = {
     statuses.push({ sessionId, report });
   },
   hostedUrl: () => 'https://devpilot.test',
+  mirrorSessionPlan: async (sessionId: string, plan: Record<string, unknown>) => {
+    mirrors.push({ sessionId, plan });
+    return true;
+  },
 } as never;
 
 /** Cockpit stub: state per item id, plus optional failure injection. */
@@ -173,6 +178,7 @@ describe('progress while the run is still going', () => {
   beforeEach(() => {
     completions = [];
     statuses = [];
+    mirrors = [];
     states = {};
     failNext = 0;
   });
@@ -282,6 +288,7 @@ describe('restart survival', () => {
   beforeEach(() => {
     completions = [];
     statuses = [];
+    mirrors = [];
     states = {};
     failNext = 0;
     dir = mkdtempSync(join(tmpdir(), 'dp-watch-'));
@@ -360,5 +367,75 @@ describe('restart survival', () => {
     const w = watcher();
     w.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-10' });
     expect(existsSync(statePath)).toBe(false);
+  });
+});
+
+
+/**
+ * Catching up a plan the handler failed to mirror.
+ *
+ * The dispatch handler mirrors once, at claim time. If that call fails —
+ * hosted unreachable, cockpit restarted mid-plan, bridge upgraded — nothing
+ * ever tried again and the hosted cockpit stayed empty for a run with a
+ * perfectly good plan. Observed on AVA-12.
+ */
+describe('mirroring from the watcher', () => {
+  beforeEach(() => {
+    completions = [];
+    statuses = [];
+    mirrors = [];
+    states = {};
+    failNext = 0;
+  });
+
+  const reviewState = {
+    status: 'planning',
+    awaiting: 'review',
+    score: { parallelizationScore: 0.83 },
+    review: {
+      score: { parallelizationScore: 0.83 },
+      plan: {
+        waves: [
+          {
+            label: 'Core',
+            tasks: [
+              {
+                taskCode: '1.1',
+                description: 'Shared timer core',
+                filePaths: ['`src/timers.ts`'],
+              },
+            ],
+          },
+        ],
+        dependencyEdges: [],
+        criticalPath: ['1.1'],
+      },
+    },
+  };
+
+  it('mirrors a plan the handler never uploaded', async () => {
+    states.i1 = reviewState;
+    const w = watcher();
+    w.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-12' });
+    await w.sweep();
+
+    expect(mirrors).toHaveLength(1);
+    const plan = mirrors[0].plan as {
+      cockpitItemId: string;
+      waves: { tasks: { filePaths: string[] }[] }[];
+    };
+    expect(plan.cockpitItemId).toBe('i1');
+    expect(plan.waves[0].tasks[0].filePaths).toEqual(['src/timers.ts']);
+  });
+
+  it('uploads it once, not on every sweep', async () => {
+    states.i1 = reviewState;
+    const w = watcher();
+    w.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-12' });
+    await w.sweep();
+    await w.sweep();
+    await w.sweep();
+
+    expect(mirrors).toHaveLength(1);
   });
 });
