@@ -109,6 +109,26 @@ export class WavePlannerAIClient {
       // DEVPILOT_PLANNER_DUMP_DIR to keep the raw text for diagnosis.
       dumpRawResponse(textContent, response.model);
 
+      /**
+       * A plan cut off at the token ceiling is not a plan.
+       *
+       * Observed on AVA-12: the model ran out of output tokens mid-table, the
+       * last row ended after two pipes instead of seven, and the parser
+       * salvaged a task code with an empty description. That plan was then
+       * scored, shown to a human as complete, and would have dispatched an
+       * agent with no instructions.
+       *
+       * `stop_reason: 'max_tokens'` is the API telling us exactly this, and it
+       * was being ignored. Refusing here means the caller's retry/refinement
+       * path sees a real failure rather than a quietly shorter plan.
+       */
+      if (response.stop_reason === 'max_tokens') {
+        throw new Error(
+          `Planner response hit the ${this.config.maxTokens}-token ceiling and was ` +
+            `truncated mid-plan. Raise WAVE_PLANNER_MAX_TOKENS, or narrow the spec.`
+        );
+      }
+
       return {
         content: textContent,
         tokensInput: response.usage.input_tokens,

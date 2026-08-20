@@ -145,8 +145,28 @@ function parseTaskTable(tableContent: string): ParsedTask[] {
     const cells = parseTableRow(line);
     if (cells.length === 0) continue;
 
+    /**
+     * A row with fewer cells than the header has is not a task — it is the
+     * wreckage of a response that stopped mid-write.
+     *
+     * Observed on AVA-12: the planner hit its token ceiling partway through the
+     * final row, which arrived as `| 2.1 | Implement debounce() over the...`
+     * with no closing pipe and no remaining columns. This loop happily parsed
+     * it into a task with a task code and an empty description, which was then
+     * scored, presented to a human as part of a finished plan, and would have
+     * been dispatched to an agent as an instruction to do nothing.
+     *
+     * `ai-client` now rejects a truncated response outright, so this should be
+     * unreachable — but a malformed row must never again become a silent empty
+     * task, whatever produced it.
+     */
+    if (cells.length < headerCells.length) {
+      continue;
+    }
+
     const task = parseTaskRow(cells, columnMap);
-    if (task) {
+    // A task with no description cannot be executed and must not be counted.
+    if (task && task.description.trim().length > 0) {
       tasks.push(task);
     }
   }

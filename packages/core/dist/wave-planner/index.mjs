@@ -259,8 +259,11 @@ function parseTaskTable(tableContent) {
     if (!line.startsWith("|")) break;
     const cells = parseTableRow(line);
     if (cells.length === 0) continue;
+    if (cells.length < headerCells.length) {
+      continue;
+    }
     const task = parseTaskRow(cells, columnMap);
-    if (task) {
+    if (task && task.description.trim().length > 0) {
       tasks2.push(task);
     }
   }
@@ -956,6 +959,11 @@ var WavePlannerAIClient = class {
       const durationMs = Date.now() - startTime;
       const textContent = response.content.filter((block) => block.type === "text").map((block) => "text" in block ? block.text : "").join("\n");
       dumpRawResponse(textContent, response.model);
+      if (response.stop_reason === "max_tokens") {
+        throw new Error(
+          `Planner response hit the ${this.config.maxTokens}-token ceiling and was truncated mid-plan. Raise WAVE_PLANNER_MAX_TOKENS, or narrow the spec.`
+        );
+      }
       return {
         content: textContent,
         tokensInput: response.usage.input_tokens,
