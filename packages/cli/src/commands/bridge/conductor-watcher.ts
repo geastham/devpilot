@@ -55,7 +55,7 @@ export interface ConductorState {
 function progressReport(
   state: ConductorState,
   /** Cockpit base URL and item, so the message can be somewhere you can go. */
-  links: { base: string; itemId: string }
+  links: { hosted: string; sessionId: string }
 ): { signature: string; message: string; percent: number } | null {
   if (state.awaiting === 'review') {
     const waves = state.review?.plan?.waves?.length ?? 0;
@@ -66,8 +66,11 @@ function progressReport(
       signature: 'review',
       message:
         `Plan ready — ${waves} wave${waves === 1 ? '' : 's'}, ${tasks} task${tasks === 1 ? '' : 's'}, ` +
-        `${pct}% parallel. [Review it in the cockpit](${links.base}/?item=${links.itemId}) to ` +
-        `dispatch, or reply here with constraints to re-plan. Awaiting review.`,
+        `${pct}% parallel. ` +
+        (links.hosted
+          ? `[Review it in the cockpit](${links.hosted}/sessions/${links.sessionId}) to dispatch`
+          : 'Review it in the cockpit to dispatch') +
+        `, or reply here with constraints to re-plan. Awaiting review.`,
       percent: 40,
     };
   }
@@ -82,7 +85,9 @@ function progressReport(
       message:
         `Dispatching wave ${wave + 1}` +
         (d || q ? ` — ${d} agent${d === 1 ? '' : 's'} running, ${q} queued` : '') +
-        `. [Watch the waves](${links.base}/waves?item=${links.itemId}).`,
+        (links.hosted
+          ? `. [Watch the waves](${links.hosted}/sessions/${links.sessionId}).`
+          : '.'),
       percent: Math.min(60 + done * 15, 95),
     };
   }
@@ -279,7 +284,13 @@ export class ConductorWatcher {
        * cockpit they may not know exists. Saying so there turns a dead-looking
        * session into a question they can answer.
        */
-      const progress = progressReport(state, { base: this.base, itemId: run.itemId });
+      const progress = progressReport(state, {
+        // Same guard as the handler: an older client has no `hostedUrl`, and a
+        // missing link must never cost the progress report itself.
+        hosted:
+          typeof this.opts.client.hostedUrl === 'function' ? this.opts.client.hostedUrl() : '',
+        sessionId: run.sessionId,
+      });
       if (progress && this.reported.get(run.sessionId) !== progress.signature) {
         this.reported.set(run.sessionId, progress.signature);
         try {
@@ -290,13 +301,36 @@ export class ConductorWatcher {
           });
           this.log(`${run.linearIdentifier}: ${progress.message}`);
         } catch (err) {
-          // Never let a failed narration drop the run from tracking.
+          const reason = err instanceof Error ? err.message : String(err);
+
+          /**
+           * A missing session is permanent, not transient.
+           *
+           * Every `bridge connect` registers a NEW orchestrator, so a restart
+           * leaves restored runs pointing at sessions the hosted plane now
+           * considers owned by the previous identity — `requireOwnedSession`
+           * correctly answers 404. Retrying that on every sweep never succeeds
+           * and logs the same failure forever; observed on AVA-11 after several
+           * restarts, once per poll indefinitely.
+           *
+           * Drop it, and say why. We deliberately do NOT report completion: we
+           * do not know how the run ended, and inventing an outcome for a
+           * Linear ticket is worse than admitting we lost track of it.
+           */
+          if (/not_found|not found/i.test(reason)) {
+            this.runs.delete(run.sessionId);
+            this.reported.delete(run.sessionId);
+            this.persist();
+            this.log(
+              `${run.linearIdentifier}: session no longer reachable from this bridge — stopped watching`
+            );
+            return;
+          }
+
+          // Anything else may be transient. Never let a failed narration drop a
+          // run whose completion is still owed.
           this.reported.delete(run.sessionId);
-          this.log(
-            `${run.linearIdentifier}: progress report failed (${
-              err instanceof Error ? err.message : String(err)
-            })`
-          );
+          this.log(`${run.linearIdentifier}: progress report failed (${reason})`);
         }
       }
       return;

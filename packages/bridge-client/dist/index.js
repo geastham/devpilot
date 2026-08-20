@@ -64,7 +64,18 @@ var BridgeClient = class {
     this.fetchImpl = config.fetchImpl ?? globalThis.fetch;
   }
   url(path) {
-    return `${this.config.bridgeUrl.replace(/\/+$/, "")}${path}`;
+    return `${this.hostedUrl()}${path}`;
+  }
+  /**
+   * The hosted plane's base URL, without a trailing slash.
+   *
+   * Exposed because agent activities need to link a person to the hosted
+   * cockpit. The first version of those links pointed at the *local* cockpit,
+   * which is a dead link for anyone not sitting at the machine the bridge runs
+   * on — and most people on the hosted product never run it at all.
+   */
+  hostedUrl() {
+    return this.config.bridgeUrl.replace(/\/+$/, "");
   }
   async request(path, init = {}) {
     const res = await this.fetchImpl(this.url(path), {

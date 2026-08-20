@@ -11,7 +11,7 @@ import { Command as Command17 } from "commander";
 import updateNotifier from "update-notifier";
 
 // src/version.ts
-var VERSION = "0.2.5";
+var VERSION = "0.2.6";
 
 // src/commands/init.ts
 import { Command } from "commander";
@@ -1077,13 +1077,16 @@ async function existingItem(cockpitUrl, linearTicketId, timeoutMs) {
   );
   return Array.isArray(items) && items.length > 0 ? items[0] : null;
 }
-function boardLink(base, itemId) {
-  return `${base}/?item=${itemId}`;
+function sessionLink(hosted, sessionId) {
+  return `${hosted}/sessions/${sessionId}`;
 }
-function wavesLink(base, itemId) {
-  return `${base}/waves?item=${itemId}`;
+function hostedBase(client) {
+  return typeof client.hostedUrl === "function" ? client.hostedUrl() : "";
 }
-function describe(state, base, itemId) {
+function linkOrText(hosted, sessionId, text) {
+  return hosted ? `[${text}](${sessionLink(hosted, sessionId)})` : text;
+}
+function describe(state, hosted, sessionId) {
   if (state.awaiting === "review") {
     const score = state.review?.score?.parallelizationScore;
     const waves = state.review?.plan?.waves?.length;
@@ -1096,10 +1099,10 @@ function describe(state, base, itemId) {
       typeof score === "number" ? `${Math.round(score * 100)}% parallel` : null
     ].filter(Boolean);
     const shape = parts.length ? ` \u2014 ${parts.join(", ")}` : "";
-    return `Plan ready${shape}. [Review it in the cockpit](${boardLink(base, itemId)}) to dispatch, or reply here with constraints to re-plan. Awaiting review.`;
+    return `Plan ready${shape}. ${linkOrText(hosted, sessionId, "Review it in the cockpit")} to dispatch, or reply here with constraints to re-plan. Awaiting review.`;
   }
   if (state.awaiting === "wave") {
-    return `Plan approved \u2014 dispatching waves. [Watch the waves](${wavesLink(base, itemId)}).`;
+    return `Plan approved \u2014 dispatching waves. ${linkOrText(hosted, sessionId, "Watch the waves")}.`;
   }
   if (state.status === "complete") return "All waves complete.";
   if (state.status === "failed") {
@@ -1126,7 +1129,7 @@ function createConductorDispatchHandler(opts) {
         ).catch(() => ({}));
         const live = current.awaiting === "review" || current.awaiting === "wave" || current.status === "planning" || current.status === "executing";
         if (live) {
-          const summary2 = describe(current, base, item.id);
+          const summary2 = describe(current, hostedBase(opts.client), sessionId);
           log(`${linearIdentifier}: ${summary2} (no new run started)`);
           await opts.client.reportSessionStatus(sessionId, {
             status: "running",
@@ -1159,14 +1162,14 @@ function createConductorDispatchHandler(opts) {
       await opts.client.reportSessionStatus(sessionId, {
         status: "running",
         progressPercent: 5,
-        message: `Planning \u2014 [open it in the cockpit](${boardLink(base, item.id)}).`
+        message: `Planning \u2014 ${linkOrText(hostedBase(opts.client), sessionId, "open it in the cockpit")}.`
       });
       const state = await call(
         `${base}/api/items/${item.id}/conductor`,
         { method: "POST", body: JSON.stringify({}) },
         timeout
       );
-      const summary = describe(state, base, item.id);
+      const summary = describe(state, hostedBase(opts.client), sessionId);
       log(`${linearIdentifier}: ${summary}`);
       if (state.review?.plan?.waves?.length && typeof opts.client.mirrorSessionPlan === "function") {
         const mirrored = await opts.client.mirrorSessionPlan(
@@ -1220,7 +1223,7 @@ function progressReport(state, links) {
     const pct = Math.round((state.score?.parallelizationScore ?? 0) * 100);
     return {
       signature: "review",
-      message: `Plan ready \u2014 ${waves} wave${waves === 1 ? "" : "s"}, ${tasks} task${tasks === 1 ? "" : "s"}, ${pct}% parallel. [Review it in the cockpit](${links.base}/?item=${links.itemId}) to dispatch, or reply here with constraints to re-plan. Awaiting review.`,
+      message: `Plan ready \u2014 ${waves} wave${waves === 1 ? "" : "s"}, ${tasks} task${tasks === 1 ? "" : "s"}, ${pct}% parallel. ` + (links.hosted ? `[Review it in the cockpit](${links.hosted}/sessions/${links.sessionId}) to dispatch` : "Review it in the cockpit to dispatch") + `, or reply here with constraints to re-plan. Awaiting review.`,
       percent: 40
     };
   }
@@ -1231,7 +1234,7 @@ function progressReport(state, links) {
     const q = state.lastDispatch?.queued ?? 0;
     return {
       signature: `wave:${wave}:${done}:${d}:${q}`,
-      message: `Dispatching wave ${wave + 1}` + (d || q ? ` \u2014 ${d} agent${d === 1 ? "" : "s"} running, ${q} queued` : "") + `. [Watch the waves](${links.base}/waves?item=${links.itemId}).`,
+      message: `Dispatching wave ${wave + 1}` + (d || q ? ` \u2014 ${d} agent${d === 1 ? "" : "s"} running, ${q} queued` : "") + (links.hosted ? `. [Watch the waves](${links.hosted}/sessions/${links.sessionId}).` : "."),
       percent: Math.min(60 + done * 15, 95)
     };
   }
@@ -1346,7 +1349,12 @@ var ConductorWatcher = class {
     if (!res.ok) throw new Error(`conductor state \u2192 ${res.status}`);
     const state = await res.json();
     if (!state.status || !TERMINAL.has(state.status)) {
-      const progress = progressReport(state, { base: this.base, itemId: run.itemId });
+      const progress = progressReport(state, {
+        // Same guard as the handler: an older client has no `hostedUrl`, and a
+        // missing link must never cost the progress report itself.
+        hosted: typeof this.opts.client.hostedUrl === "function" ? this.opts.client.hostedUrl() : "",
+        sessionId: run.sessionId
+      });
       if (progress && this.reported.get(run.sessionId) !== progress.signature) {
         this.reported.set(run.sessionId, progress.signature);
         try {
@@ -1357,10 +1365,18 @@ var ConductorWatcher = class {
           });
           this.log(`${run.linearIdentifier}: ${progress.message}`);
         } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          if (/not_found|not found/i.test(reason)) {
+            this.runs.delete(run.sessionId);
+            this.reported.delete(run.sessionId);
+            this.persist();
+            this.log(
+              `${run.linearIdentifier}: session no longer reachable from this bridge \u2014 stopped watching`
+            );
+            return;
+          }
           this.reported.delete(run.sessionId);
-          this.log(
-            `${run.linearIdentifier}: progress report failed (${err instanceof Error ? err.message : String(err)})`
-          );
+          this.log(`${run.linearIdentifier}: progress report failed (${reason})`);
         }
       }
       return;
@@ -1852,7 +1868,7 @@ function parseEnvelope(stdout) {
   }
   return null;
 }
-function writeSessionMcpConfig(sessionLink) {
+function writeSessionMcpConfig(sessionLink2) {
   const dir = mkdtempSync(join7(tmpdir(), "devpilot-mcp-"));
   const file = join7(dir, "mcp.json");
   writeFileSync6(
@@ -1863,7 +1879,7 @@ function writeSessionMcpConfig(sessionLink) {
           "devpilot-session": {
             command: "npx",
             args: ["-y", "@devpilot.sh/mcp-session"],
-            env: { DEVPILOT_SESSION_LINK: sessionLink }
+            env: { DEVPILOT_SESSION_LINK: sessionLink2 }
           }
         }
       },
@@ -1893,15 +1909,15 @@ function sessionPreamble() {
   ].join("\n");
 }
 async function runClaudeSession(options) {
-  const { workdir, prompt: prompt2, sessionLink, model, claudePath, permissionMode, timeoutMs, onLog, onSpawn } = options;
+  const { workdir, prompt: prompt2, sessionLink: sessionLink2, model, claudePath, permissionMode, timeoutMs, onLog, onSpawn } = options;
   const before = await snapshot(workdir);
   const startedAt = Date.now();
   const args = ["-p", "--output-format", "json", "--permission-mode", permissionMode];
   if (model) args.push("--model", model);
   let mcpDir;
   let effectivePrompt = prompt2;
-  if (sessionLink) {
-    const cfg = writeSessionMcpConfig(sessionLink);
+  if (sessionLink2) {
+    const cfg = writeSessionMcpConfig(sessionLink2);
     mcpDir = cfg.dir;
     args.push("--mcp-config", cfg.file, "--strict-mcp-config");
     effectivePrompt = sessionPreamble() + prompt2;

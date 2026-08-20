@@ -189,15 +189,37 @@ async function existingItem(
  * point at the cockpit, which is the machine the bridge runs on: the hosted
  * plane never sees a plan, so there is nothing to link to there.
  */
-function boardLink(base: string, itemId: string): string {
-  return `${base}/?item=${itemId}`;
+/**
+ * Where a link in a Linear activity should send someone.
+ *
+ * The first version pointed at the local cockpit — `127.0.0.1:3100/?item=…` —
+ * which is a dead link for anyone not sitting at the machine the bridge runs
+ * on. Most people on the hosted product never run that app at all, so the link
+ * has to go to the hosted session page, which renders the mirrored plan with
+ * the same cockpit components.
+ */
+function sessionLink(hosted: string, sessionId: string): string {
+  return `${hosted}/sessions/${sessionId}`;
 }
 
-function wavesLink(base: string, itemId: string): string {
-  return `${base}/waves?item=${itemId}`;
+/**
+ * The hosted base URL, or empty if this client cannot say.
+ *
+ * `hostedUrl` arrived in a later bridge-client, and calling it unconditionally
+ * threw on an older one — propagating out, releasing the queue claim and
+ * failing the ticket. That is the second time a *link* nearly cost a dispatch;
+ * a message that cannot be decorated is still a message worth sending.
+ */
+function hostedBase(client: BridgeClient): string {
+  return typeof client.hostedUrl === 'function' ? client.hostedUrl() : '';
 }
 
-function describe(state: ConductorState, base: string, itemId: string): string {
+/** A markdown link, or bare text when we have nowhere to point. */
+function linkOrText(hosted: string, sessionId: string, text: string): string {
+  return hosted ? `[${text}](${sessionLink(hosted, sessionId)})` : text;
+}
+
+function describe(state: ConductorState, hosted: string, sessionId: string): string {
   if (state.awaiting === 'review') {
     const score = state.review?.score?.parallelizationScore;
     const waves = state.review?.plan?.waves?.length;
@@ -213,10 +235,10 @@ function describe(state: ConductorState, base: string, itemId: string): string {
       typeof score === 'number' ? `${Math.round(score * 100)}% parallel` : null,
     ].filter(Boolean);
     const shape = parts.length ? ` — ${parts.join(', ')}` : '';
-    return `Plan ready${shape}. [Review it in the cockpit](${boardLink(base, itemId)}) to dispatch, or reply here with constraints to re-plan. Awaiting review.`;
+    return `Plan ready${shape}. ${linkOrText(hosted, sessionId, 'Review it in the cockpit')} to dispatch, or reply here with constraints to re-plan. Awaiting review.`;
   }
   if (state.awaiting === 'wave') {
-    return `Plan approved — dispatching waves. [Watch the waves](${wavesLink(base, itemId)}).`;
+    return `Plan approved — dispatching waves. ${linkOrText(hosted, sessionId, 'Watch the waves')}.`;
   }
   if (state.status === 'complete') return 'All waves complete.';
   if (state.status === 'failed') {
@@ -259,7 +281,7 @@ export function createConductorDispatchHandler(
           current.status === 'executing';
 
         if (live) {
-          const summary = describe(current, base, item.id);
+          const summary = describe(current, hostedBase(opts.client), sessionId);
           log(`${linearIdentifier}: ${summary} (no new run started)`);
           await opts.client.reportSessionStatus(sessionId, {
             status: 'running',
@@ -296,7 +318,7 @@ export function createConductorDispatchHandler(
       await opts.client.reportSessionStatus(sessionId, {
         status: 'running',
         progressPercent: 5,
-        message: `Planning — [open it in the cockpit](${boardLink(base, item.id)}).`,
+        message: `Planning — ${linkOrText(hostedBase(opts.client), sessionId, 'open it in the cockpit')}.`,
       });
 
       // The planning call itself. Minutes, and it costs tokens.
@@ -306,7 +328,7 @@ export function createConductorDispatchHandler(
         timeout
       );
 
-      const summary = describe(state, base, item.id);
+      const summary = describe(state, hostedBase(opts.client), sessionId);
       log(`${linearIdentifier}: ${summary}`);
 
       /**

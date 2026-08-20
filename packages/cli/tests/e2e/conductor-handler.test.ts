@@ -41,6 +41,8 @@ const client = {
     mirrored.push({ sessionId, plan });
     return true;
   },
+  // Links in agent activities must reach the hosted cockpit, not the local one.
+  hostedUrl: () => 'https://devpilot.test',
 } as never;
 
 const message = {
@@ -249,7 +251,7 @@ describe('links back into the cockpit', () => {
     await handler()(message);
 
     const planning = reported.find((r) => /planning/i.test(r.message ?? ''));
-    expect(planning?.message).toContain(`${baseUrl}/?item=item_new`);
+    expect(planning?.message).toContain('https://devpilot.test/sessions/sesn_1');
     // A bare id was the bug; a markdown link is the fix.
     expect(planning?.message).toMatch(/\[.+\]\(http/);
   });
@@ -274,7 +276,7 @@ describe('links back into the cockpit', () => {
     // notification. The numbers are the point.
     expect(gate?.message).toContain('2 waves, 3 tasks');
     expect(gate?.message).toContain('89% parallel');
-    expect(gate?.message).toContain(`${baseUrl}/?item=item_new`);
+    expect(gate?.message).toContain('https://devpilot.test/sessions/sesn_1');
   });
 
   it('does not stitch a placeholder in when the plan shape is unknown', async () => {
@@ -296,7 +298,7 @@ describe('links back into the cockpit', () => {
     await handler()(message);
 
     const dispatching = reported.find((r) => /dispatching waves/i.test(r.message ?? ''));
-    expect(dispatching?.message).toContain(`${baseUrl}/waves?item=item_new`);
+    expect(dispatching?.message).toContain('https://devpilot.test/sessions/sesn_1');
   });
 });
 
@@ -394,5 +396,36 @@ describe('hosted cockpit mirroring', () => {
     ).resolves.toBeUndefined();
 
     expect(reported.some((r) => /awaiting review/i.test(r.message ?? ''))).toBe(true);
+  });
+});
+
+
+/**
+ * A link is decoration; the dispatch is the work.
+ *
+ * Twice now a newly added client method has been called unconditionally and
+ * thrown on an older bridge-client — propagating out, releasing the queue claim
+ * and failing the ticket. Both times the feature at stake was cosmetic.
+ */
+describe('older clients still work', () => {
+  it('reports the review gate without a link when the client cannot say where hosted is', async () => {
+    const older = {
+      reportSessionStatus: async (_id: string, st: { status: string; message?: string }) => {
+        reported.push(st);
+      },
+    } as never;
+
+    await createConductorDispatchHandler({
+      client: older,
+      cockpitUrl: baseUrl,
+      requestTimeoutMs: 10_000,
+    })(message);
+
+    const gate = reported.find((r) => /awaiting review/i.test(r.message ?? ''));
+    expect(gate, 'the review gate must still be reported').toBeTruthy();
+    // No markdown link, and crucially no dangling "(undefined/sessions/…)".
+    expect(gate!.message).toContain('Review it in the cockpit');
+    expect(gate!.message).not.toContain('](');
+    expect(gate!.message).not.toMatch(/undefined/);
   });
 });

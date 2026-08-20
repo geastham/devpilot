@@ -28,6 +28,7 @@ const client = {
   reportSessionStatus: async (sessionId: string, report: Record<string, unknown>) => {
     statuses.push({ sessionId, report });
   },
+  hostedUrl: () => 'https://devpilot.test',
 } as never;
 
 /** Cockpit stub: state per item id, plus optional failure injection. */
@@ -201,7 +202,7 @@ describe('progress while the run is still going', () => {
     expect(msg).toMatch(/awaiting review/i);
     // Somewhere to go, not just something to read: the watcher's messages are
     // the ones that fire repeatedly, so they carry the link too.
-    expect(msg).toContain('http://cockpit.test/?item=i1');
+    expect(msg).toContain('https://devpilot.test/sessions/s1');
     expect(completions).toHaveLength(0);
   });
 
@@ -218,7 +219,7 @@ describe('progress while the run is still going', () => {
     // 30s poll would otherwise post the same line every 30 seconds forever.
     expect(statuses).toHaveLength(1);
     expect(String(statuses[0].report.message)).toContain('wave 1');
-    expect(String(statuses[0].report.message)).toContain('http://cockpit.test/waves?item=i1');
+    expect(String(statuses[0].report.message)).toContain('https://devpilot.test/sessions/s1');
   });
 
   it('speaks again once the run actually moves', async () => {
@@ -246,6 +247,7 @@ describe('progress while the run is still going', () => {
       reportSessionStatus: async () => {
         throw new Error('hosted plane down');
       },
+      hostedUrl: () => 'https://devpilot.test',
     } as never;
 
     const w = new ConductorWatcher({
