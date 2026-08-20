@@ -24,6 +24,15 @@ export function RefiningCard({ item }: RefiningCardProps) {
     (plan?.sequentialTasks.length ?? 0);
   const estimatedCost = plan?.estimatedCostUsd ?? 0;
 
+  /**
+   * A conductor run has no `plan` row until the plan is approved — the graph
+   * interrupts at the review gate and persists afterwards. Reading only `plan`
+   * made a finished plan render as "still working", which is precisely backwards
+   * at the moment we are asking someone to review it.
+   */
+  const conductor = item.conductor;
+  const awaitingReview = conductor?.awaiting === 'review';
+
   const handleReviewPlan = () => {
     setSelectedItem(item.id);
     openConfidencePanel(item.id);
@@ -62,7 +71,19 @@ export function RefiningCard({ item }: RefiningCardProps) {
 
         {/* Plan Summary */}
         <p className="text-xs text-text-secondary mb-3">
-          {plan ? (
+          {conductor && conductor.waveCount > 0 ? (
+            <>
+              <span className="font-medium text-accent-green">
+                {awaitingReview ? 'Plan ready — your call' : 'Planning'}
+              </span>
+              {' — '}
+              {conductor.waveCount} wave{conductor.waveCount !== 1 ? 's' : ''} ·{' '}
+              {conductor.taskCount} task{conductor.taskCount !== 1 ? 's' : ''}
+              {conductor.parallelizationScore !== null && (
+                <> · {Math.round(conductor.parallelizationScore * 100)}% parallel</>
+              )}
+            </>
+          ) : plan ? (
             <>
               <span className="font-medium text-accent-green">Plan ready</span>
               {' — '}

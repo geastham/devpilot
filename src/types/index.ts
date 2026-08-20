@@ -43,6 +43,26 @@ export interface HorizonItem {
   createdAt: Date;
   updatedAt: Date;
   conflictingFiles: InFlightFile[];
+  /**
+   * Live conductor run state, present on REFINING items that have been through
+   * the planning agent. Distinct from `plan`, which is the legacy workstream
+   * shape and stays null for conductor runs until a plan is approved and
+   * persisted. See `conductorSummary` in /api/items.
+   */
+  conductor?: ConductorSummary | null;
+}
+
+/** What the board needs to show about an in-flight conductor run. */
+export interface ConductorSummary {
+  status: string;
+  /** 'review' means a human is the blocker; 'wave' means agents are running. */
+  awaiting: 'review' | 'wave' | null;
+  waveCount: number;
+  taskCount: number;
+  waveNames: string[];
+  parallelizationScore: number | null;
+  currentWaveIndex: number;
+  wavePlanId: string | null;
 }
 
 export interface Plan {
