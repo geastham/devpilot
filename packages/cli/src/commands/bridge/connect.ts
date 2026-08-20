@@ -4,6 +4,8 @@ import chalk from 'chalk';
 import { BridgeClient, DispatchLoop, HeartbeatService } from '@devpilot.sh/bridge-client';
 import { createBridgeDispatchHandler } from './dispatch-handler';
 import { createConductorDispatchHandler } from './conductor-handler';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { ConductorWatcher } from './conductor-watcher';
 
 interface ConnectOptions {
@@ -143,15 +145,28 @@ export const connectCommand = new Command('connect')
       ? new ConductorWatcher({
           client,
           cockpitUrl: options.cockpitUrl!,
+          // Survives a restart. Without this, upgrading the CLI or closing a
+          // laptop lid orphaned every in-flight run: the cockpit kept working
+          // and Linear was never told how any of it ended.
+          statePath: join(homedir(), '.devpilot', 'conductor-watch.json'),
           onLog: (line) => console.log(chalk.blue(`   ${line}`)),
           onLost: (run) =>
             console.log(
               chalk.yellow(
-                `   ${run.linearIdentifier} was still running at shutdown — Linear will not be updated for it`,
+                `   ${run.linearIdentifier} still running at shutdown — it will be picked up on the next start`,
               ),
             ),
         })
       : null;
+
+    const readopted = conductorWatcher?.restore() ?? 0;
+    if (readopted > 0) {
+      console.log(
+        chalk.blue(
+          `   Resumed watching ${readopted} run${readopted === 1 ? '' : 's'} from a previous session`,
+        ),
+      );
+    }
 
     const loop = new DispatchLoop({
       client,

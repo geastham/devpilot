@@ -1154,7 +1154,13 @@ function createConductorDispatchHandler(opts) {
   };
 }
 
+// src/commands/bridge/connect.ts
+import { homedir as homedir2 } from "os";
+import { join as join6 } from "path";
+
 // src/commands/bridge/conductor-watcher.ts
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync5, mkdirSync as mkdirSync3, unlinkSync, existsSync as existsSync6 } from "fs";
+import { dirname } from "path";
 function progressReport(state) {
   if (state.awaiting === "review") {
     const waves = state.review?.plan?.waves?.length ?? 0;
@@ -1197,8 +1203,53 @@ var ConductorWatcher = class {
   watch(run) {
     if (this.runs.has(run.sessionId)) return;
     this.runs.set(run.sessionId, run);
+    this.persist();
     this.log(`watching ${run.linearIdentifier} (${this.runs.size} tracked)`);
     this.start();
+  }
+  /**
+   * Re-adopt runs left behind by a previous process.
+   *
+   * Restored runs are claims, not facts — `check` verifies each against the
+   * cockpit on the next sweep and drops any whose item has gone. Returns how
+   * many were adopted so the caller can say so.
+   */
+  restore() {
+    const path = this.opts.statePath;
+    if (!path || !existsSync6(path)) return 0;
+    let entries = [];
+    try {
+      const parsed = JSON.parse(readFileSync4(path, "utf8"));
+      if (Array.isArray(parsed)) {
+        entries = parsed.filter(
+          (e) => Boolean(e) && typeof e.sessionId === "string" && typeof e.itemId === "string"
+        );
+      }
+    } catch {
+      return 0;
+    }
+    let adopted = 0;
+    for (const run of entries) {
+      if (this.runs.has(run.sessionId)) continue;
+      this.runs.set(run.sessionId, run);
+      adopted++;
+    }
+    if (adopted > 0) this.start();
+    return adopted;
+  }
+  /** Mirror the tracked set to disk. Never throws — this is bookkeeping. */
+  persist() {
+    const path = this.opts.statePath;
+    if (!path) return;
+    try {
+      if (this.runs.size === 0) {
+        if (existsSync6(path)) unlinkSync(path);
+        return;
+      }
+      mkdirSync3(dirname(path), { recursive: true });
+      writeFileSync5(path, JSON.stringify([...this.runs.values()], null, 2), "utf8");
+    } catch {
+    }
   }
   start() {
     if (this.timer) return;
@@ -1231,6 +1282,15 @@ var ConductorWatcher = class {
   }
   async check(run) {
     const res = await this.doFetch(`${this.base}/api/items/${run.itemId}/conductor`);
+    if (res.status === 404) {
+      this.runs.delete(run.sessionId);
+      this.reported.delete(run.sessionId);
+      this.persist();
+      this.log(
+        `${run.linearIdentifier}: no conductor run on the cockpit \u2014 dropped (was it reset?)`
+      );
+      return;
+    }
     if (!res.ok) throw new Error(`conductor state \u2192 ${res.status}`);
     const state = await res.json();
     if (!state.status || !TERMINAL.has(state.status)) {
@@ -1259,6 +1319,7 @@ var ConductorWatcher = class {
     const summary = success ? `DevPilot completed ${waves} wave${waves === 1 ? "" : "s"}` + (tasks ? ` covering ${tasks} task${tasks === 1 ? "" : "s"}.` : ".") : `DevPilot run failed: ${state.errors?.[state.errors.length - 1] ?? "unknown error"}`;
     this.runs.delete(run.sessionId);
     this.reported.delete(run.sessionId);
+    this.persist();
     await this.opts.client.reportSessionComplete(run.sessionId, {
       success,
       summary,
@@ -1352,13 +1413,25 @@ var connectCommand = new Command6("connect").description("Connect this machine t
   const conductorWatcher = options.plan ? new ConductorWatcher({
     client,
     cockpitUrl: options.cockpitUrl,
+    // Survives a restart. Without this, upgrading the CLI or closing a
+    // laptop lid orphaned every in-flight run: the cockpit kept working
+    // and Linear was never told how any of it ended.
+    statePath: join6(homedir2(), ".devpilot", "conductor-watch.json"),
     onLog: (line) => console.log(chalk7.blue(`   ${line}`)),
     onLost: (run) => console.log(
       chalk7.yellow(
-        `   ${run.linearIdentifier} was still running at shutdown \u2014 Linear will not be updated for it`
+        `   ${run.linearIdentifier} still running at shutdown \u2014 it will be picked up on the next start`
       )
     )
   }) : null;
+  const readopted = conductorWatcher?.restore() ?? 0;
+  if (readopted > 0) {
+    console.log(
+      chalk7.blue(
+        `   Resumed watching ${readopted} run${readopted === 1 ? "" : "s"} from a previous session`
+      )
+    );
+  }
   const loop = new DispatchLoop({
     client,
     orchestratorId: registration.orchestratorId,
@@ -1662,15 +1735,15 @@ import { resolve as resolve3 } from "path";
 // src/commands/session-runner/server.ts
 import { createServer } from "http";
 import { randomUUID } from "crypto";
-import { existsSync as existsSync6 } from "fs";
+import { existsSync as existsSync7 } from "fs";
 import { basename as basename2, isAbsolute, resolve as resolve2 } from "path";
 
 // src/commands/session-runner/claude-runner.ts
 import { spawn as spawn2, execFile } from "child_process";
 import { promisify } from "util";
-import { mkdtempSync, rmSync, writeFileSync as writeFileSync5 } from "fs";
+import { mkdtempSync, rmSync, writeFileSync as writeFileSync6 } from "fs";
 import { tmpdir } from "os";
-import { join as join6 } from "path";
+import { join as join7 } from "path";
 var execFileAsync = promisify(execFile);
 async function git(workdir, args) {
   const { stdout } = await execFileAsync("git", args, {
@@ -1728,9 +1801,9 @@ function parseEnvelope(stdout) {
   return null;
 }
 function writeSessionMcpConfig(sessionLink) {
-  const dir = mkdtempSync(join6(tmpdir(), "devpilot-mcp-"));
-  const file = join6(dir, "mcp.json");
-  writeFileSync5(
+  const dir = mkdtempSync(join7(tmpdir(), "devpilot-mcp-"));
+  const file = join7(dir, "mcp.json");
+  writeFileSync6(
     file,
     JSON.stringify(
       {
@@ -1938,10 +2011,10 @@ var SessionRunner = class {
   resolveWorkdir(repo) {
     const mapped = this.config.repoMap.get(repo);
     if (mapped) {
-      return existsSync6(mapped) ? { workdir: mapped } : { error: `Mapped path for '${repo}' does not exist: ${mapped}` };
+      return existsSync7(mapped) ? { workdir: mapped } : { error: `Mapped path for '${repo}' does not exist: ${mapped}` };
     }
     const candidate = isAbsolute(repo) ? repo : resolve2(this.config.workspace, basename2(repo));
-    if (!existsSync6(candidate)) {
+    if (!existsSync7(candidate)) {
       return {
         error: `No checkout for '${repo}'. Tried ${candidate}. Pass --repo ${repo}=/path/to/checkout, or set --workspace.`
       };
@@ -2391,26 +2464,26 @@ var updateCommand = new Command15("update").description("Update DevPilot CLI to 
 
 // src/commands/wiki.ts
 import { Command as Command16 } from "commander";
-import { existsSync as existsSync7, mkdirSync as mkdirSync3, readFileSync as readFileSync4, writeFileSync as writeFileSync6 } from "fs";
-import { join as join7 } from "path";
+import { existsSync as existsSync8, mkdirSync as mkdirSync4, readFileSync as readFileSync5, writeFileSync as writeFileSync7 } from "fs";
+import { join as join8 } from "path";
 import chalk15 from "chalk";
 import { resolveWikiModel } from "@devpilot.sh/core/wave-planner";
 var wikiCommand = new Command16("wiki").description("LLM-compiled knowledge base \u2014 institutional memory for your codebase");
 wikiCommand.command("init").description("Initialize the wiki system in the current repository").option("--wiki-dir <path>", "Wiki output directory", ".devpilot/wiki").action(async (options) => {
   const cwd = process.cwd();
-  const devpilotDir = join7(cwd, ".devpilot");
-  const wikiDir = join7(cwd, options.wikiDir);
-  if (!existsSync7(devpilotDir)) {
+  const devpilotDir = join8(cwd, ".devpilot");
+  const wikiDir = join8(cwd, options.wikiDir);
+  if (!existsSync8(devpilotDir)) {
     console.log(
       chalk15.yellow("\u26A0\uFE0F  DevPilot not initialized. Run `devpilot init` first.")
     );
     return;
   }
-  if (!existsSync7(wikiDir)) {
-    mkdirSync3(wikiDir, { recursive: true });
+  if (!existsSync8(wikiDir)) {
+    mkdirSync4(wikiDir, { recursive: true });
   }
-  const indexPath = join7(wikiDir, "index.md");
-  if (!existsSync7(indexPath)) {
+  const indexPath = join8(wikiDir, "index.md");
+  if (!existsSync8(indexPath)) {
     const initialIndex = `# Wiki Index
 
 > Auto-generated wiki \u2014 compiled from session logs, commits, specs, and decisions.
@@ -2425,11 +2498,11 @@ This wiki will grow automatically as you work with DevPilot:
 
 Run \`devpilot wiki ingest\` to manually add sources, or let the session hook capture knowledge automatically.
 `;
-    writeFileSync6(indexPath, initialIndex);
+    writeFileSync7(indexPath, initialIndex);
   }
-  const logPath = join7(wikiDir, "log.md");
-  if (!existsSync7(logPath)) {
-    writeFileSync6(
+  const logPath = join8(wikiDir, "log.md");
+  if (!existsSync8(logPath)) {
+    writeFileSync7(
       logPath,
       `# Wiki Activity Log
 
@@ -2439,9 +2512,9 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
 `
     );
   }
-  const gitignorePath = join7(cwd, ".gitignore");
-  if (existsSync7(gitignorePath)) {
-    const gitignore = readFileSync4(gitignorePath, "utf-8");
+  const gitignorePath = join8(cwd, ".gitignore");
+  if (existsSync8(gitignorePath)) {
+    const gitignore = readFileSync5(gitignorePath, "utf-8");
     if (!gitignore.includes(".devpilot/wiki")) {
     }
   }
@@ -2469,13 +2542,13 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
 wikiCommand.command("ingest").description("Ingest a source document into the wiki").requiredOption("--type <type>", "Source type: session_log, commit, spec, decision, manual").requiredOption("--title <title>", "Human-readable title for the source").option("--file <path>", "Path to source file").option("--stdin", "Read source from stdin").option("--origin <origin>", "Origin identifier (e.g. session ID, commit SHA)").action(async (options) => {
   let content;
   if (options.file) {
-    if (!existsSync7(options.file)) {
+    if (!existsSync8(options.file)) {
       console.log(chalk15.red(`\u274C File not found: ${options.file}`));
       return;
     }
-    content = readFileSync4(options.file, "utf-8");
+    content = readFileSync5(options.file, "utf-8");
   } else if (options.stdin) {
-    content = readFileSync4(0, "utf-8");
+    content = readFileSync5(0, "utf-8");
   } else {
     console.log(
       chalk15.red("\u274C Provide either --file <path> or --stdin")
@@ -2742,7 +2815,7 @@ function getWikiConfig() {
     model: resolveWikiModel(),
     maxTokens: parseInt(process.env.WIKI_MAX_TOKENS || "8192", 10),
     repo: getRepoName(cwd),
-    wikiDir: join7(cwd, ".devpilot", "wiki")
+    wikiDir: join8(cwd, ".devpilot", "wiki")
   };
 }
 function getRepoName(cwd) {

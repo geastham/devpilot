@@ -20,6 +20,18 @@ import { cn } from '@/lib/utils';
  * flourish into a hard outage. It fades on a timer and whatever is underneath
  * shows through — including an error state, which is exactly what someone
  * debugging a broken cockpit needs to see.
+ *
+ * DISMISSAL IS ALSO NOT TIED TO JAVASCRIPT. The timer used to live only in an
+ * effect, so the overlay depended on React hydrating — the same hard outage the
+ * paragraph above rejects, reached by a different route. Observed in dev: ~25
+ * seconds of "Cockpit online" on a cold load, every API answering 200, no
+ * console errors, because first-load compilation delayed hydration. A bundle
+ * that fails to load in production would leave it up forever.
+ *
+ * So the fade is a CSS animation with `forwards`, which runs whether or not any
+ * script does. The effect below still unmounts the node afterwards, but that is
+ * housekeeping now — if it never runs, the overlay is already invisible and
+ * click-through.
  */
 export function BootSequence({ durationMs = 1100 }: { durationMs?: number }) {
   const [phase, setPhase] = useState<'in' | 'out' | 'gone'>('in');
@@ -27,6 +39,7 @@ export function BootSequence({ durationMs = 1100 }: { durationMs?: number }) {
   useEffect(() => {
     // Honour reduced motion by skipping straight past the sequence — a person
     // who asked for less motion should not be shown a boot animation first.
+    // The CSS carries this too, for the case where this effect never runs.
     const reduced =
       typeof window !== 'undefined' &&
       window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -45,12 +58,22 @@ export function BootSequence({ durationMs = 1100 }: { durationMs?: number }) {
 
   if (phase === 'gone') return null;
 
+  // The 70% hold in `dp-boot-dismiss` is the opaque portion, so the total
+  // duration is sized to keep the visible hold at `durationMs`.
+  const dismissMs = Math.round(durationMs / 0.7);
+
   return (
     <div
       className={cn(
-        'fixed inset-0 z-[100] flex items-center justify-center bg-bg-base transition-opacity duration-[400ms]',
-        phase === 'out' ? 'pointer-events-none opacity-0' : 'opacity-100'
+        'dp-boot-overlay fixed inset-0 z-[100] flex items-center justify-center bg-bg-base',
+        phase === 'out' && 'pointer-events-none opacity-0'
       )}
+      style={{
+        animation: `dp-boot-dismiss ${dismissMs}ms linear forwards`,
+        // Belt and braces: once the animation has faded the overlay out, it must
+        // not keep swallowing clicks on the board underneath.
+        pointerEvents: phase === 'out' ? 'none' : undefined,
+      }}
       aria-hidden="true"
     >
       <div className="flex flex-col items-center gap-6">

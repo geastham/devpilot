@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 import { cn } from '@/lib/utils';
 import type { WavePlan, WaveTask, DependencyEdge } from '@devpilot.sh/core/db';
+import { plainText } from '@/lib/plan-text';
 
 // ============================================================================
 // Types
@@ -224,33 +225,17 @@ export function DAGVisualization({
       </div>
 
       {/* Legend */}
-      <div className="absolute top-4 left-4 z-10 bg-bg-surface rounded-lg border border-border-default p-3 shadow-lg">
-        <div className="text-xs text-text-secondary space-y-2">
-          <div className="font-semibold text-text-primary mb-2">Status</div>
-          <div className="flex items-center gap-2">
-            <div className="w-4 h-4 bg-gray-700 border border-gray-600 rounded"></div>
-            <span>Pending</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="w-4 h-4 bg-blue-700 border border-blue-600 rounded"></div>
-            <span>Running</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="w-4 h-4 bg-green-700 border border-green-600 rounded"></div>
-            <span>Complete</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="w-4 h-4 bg-red-700 border border-red-600 rounded"></div>
-            <span>Failed</span>
-          </div>
-          <div className="border-t border-border-default pt-2 mt-2">
-            <div className="flex items-center gap-2">
-              <div className="w-4 h-4 border-2 border-yellow-500 rounded"></div>
-              <span>Critical Path</span>
-            </div>
-          </div>
-        </div>
-      </div>
+      {/*
+        The floating status legend used to live here, pinned `absolute top-4
+        left-4` over the canvas — directly on top of the first task node, which
+        the layout also starts at PADDING from the top-left. Task 1.1 was
+        unreadable behind it on every plan.
+
+        It was also duplicated: `WaveProgressBar` already legends the same four
+        states above the canvas. Rather than move the occluder around, the
+        duplicate is gone and its one unique entry (Critical Path) moved up to
+        join the real legend. Nothing floats over the graph now.
+      */}
 
       {/* SVG Canvas */}
       <div className="w-full h-full overflow-auto">
@@ -383,9 +368,10 @@ export function DAGVisualization({
                     textAnchor="middle"
                     className="fill-gray-300 text-xs"
                   >
-                    {node.task.label.length > 20
-                      ? `${node.task.label.substring(0, 20)}...`
-                      : node.task.label}
+                    {(() => {
+                      const label = plainText(node.task.label);
+                      return label.length > 20 ? `${label.substring(0, 20)}...` : label;
+                    })()}
                   </text>
 
                   {/* Status indicator */}
@@ -416,10 +402,10 @@ export function DAGVisualization({
                 <div className="flex items-start justify-between">
                   <div>
                     <h3 className="text-sm font-semibold text-text-primary">
-                      {task.taskCode}: {task.label}
+                      {task.taskCode}: {plainText(task.label)}
                     </h3>
                     <p className="text-xs text-text-secondary mt-1">
-                      {task.description || 'No description available'}
+                      {task.description ? plainText(task.description) : 'No description available'}
                     </p>
                   </div>
                   <button
@@ -435,7 +421,11 @@ export function DAGVisualization({
                 <div className="grid grid-cols-2 gap-4 text-xs">
                   <div>
                     <span className="text-text-secondary">Wave:</span>{' '}
-                    <span className="text-text-primary">{task.waveIndex}</span>
+                    {/* waveIndex is 0-based internally; every other surface —
+                        "Wave 1 of 2" in the header, the wave headings — counts
+                        from 1. Showing the raw index here made a task in the
+                        first wave read as "Wave: 0". */}
+                    <span className="text-text-primary">{task.waveIndex + 1}</span>
                   </div>
                   <div>
                     <span className="text-text-secondary">Status:</span>{' '}

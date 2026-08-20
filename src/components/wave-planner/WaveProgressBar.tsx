@@ -127,6 +127,12 @@ export function WaveProgressBar({
           <div className="w-3 h-3 rounded-sm bg-accent-red" />
           <span>Failed</span>
         </div>
+        {/* Moved up from the DAG's own legend, which duplicated everything
+            above and covered the first task node to say it. */}
+        <div className="flex items-center gap-1.5">
+          <div className="w-3 h-3 rounded-sm border-2 border-yellow-500" />
+          <span>Critical path</span>
+        </div>
       </div>
 
       {/* Wave Stats */}

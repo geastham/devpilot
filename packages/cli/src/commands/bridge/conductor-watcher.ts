@@ -1,3 +1,5 @@
+import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync } from 'node:fs';
+import { dirname } from 'node:path';
 import type { BridgeClient } from '@devpilot.sh/bridge-client';
 
 /**
@@ -18,14 +20,21 @@ import type { BridgeClient } from '@devpilot.sh/bridge-client';
  * `POST /api/sessions/:id/complete` already calls `syncSessionCompletionToLinear`
  * hosted-side. This is the missing caller, not a new mechanism.
  *
- * ## What it deliberately does not do
+ * ## Surviving a restart
  *
- * It does not persist. A watcher lost to a process restart is a run whose
- * completion is never reported, and the honest fix for that is reconciliation on
- * startup against the bridge's own list of non-terminal sessions — a larger
- * change that belongs with the bridge client, not smuggled in here. Until then
- * `onLost` fires for anything still being watched at shutdown so the gap is
- * visible rather than silent.
+ * It used to hold runs in memory only, so a restarted bridge orphaned anything
+ * in flight: the run kept going in the cockpit, and Linear was never told how it
+ * ended. Observed on AVA-10 — the bridge was restarted to pick up a new CLI, the
+ * session was never re-claimed, and the ticket was left showing an error for a
+ * run that had not actually failed.
+ *
+ * The tracked set is now mirrored to disk. The bridge is the only party that
+ * can do this: the hosted plane records the session but never learns the cockpit
+ * item id, so it cannot reconstruct what to poll.
+ *
+ * Restored entries are treated as claims to verify, not as truth. A run whose
+ * item the cockpit no longer knows about is dropped rather than polled forever,
+ * because stale local state must not outlive the thing it describes.
  */
 
 export interface ConductorState {
@@ -89,6 +98,11 @@ export interface WatchedRun {
 export interface ConductorWatcherOptions {
   client: BridgeClient;
   cockpitUrl: string;
+  /**
+   * File the tracked set is mirrored to. Omit to keep the old in-memory-only
+   * behaviour, which is what the tests use unless they are testing persistence.
+   */
+  statePath?: string;
   /** How often to ask the cockpit for run state. Default 30s. */
   pollIntervalMs?: number;
   onLog?: (line: string) => void;
@@ -121,8 +135,64 @@ export class ConductorWatcher {
   watch(run: WatchedRun): void {
     if (this.runs.has(run.sessionId)) return;
     this.runs.set(run.sessionId, run);
+    this.persist();
     this.log(`watching ${run.linearIdentifier} (${this.runs.size} tracked)`);
     this.start();
+  }
+
+  /**
+   * Re-adopt runs left behind by a previous process.
+   *
+   * Restored runs are claims, not facts — `check` verifies each against the
+   * cockpit on the next sweep and drops any whose item has gone. Returns how
+   * many were adopted so the caller can say so.
+   */
+  restore(): number {
+    const path = this.opts.statePath;
+    if (!path || !existsSync(path)) return 0;
+
+    let entries: WatchedRun[] = [];
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+      // A corrupt or hand-edited file must not stop the bridge from starting;
+      // losing the watch list degrades write-back, refusing to boot loses
+      // everything.
+      if (Array.isArray(parsed)) {
+        entries = parsed.filter(
+          (e): e is WatchedRun =>
+            Boolean(e) &&
+            typeof (e as WatchedRun).sessionId === 'string' &&
+            typeof (e as WatchedRun).itemId === 'string'
+        );
+      }
+    } catch {
+      return 0;
+    }
+
+    let adopted = 0;
+    for (const run of entries) {
+      if (this.runs.has(run.sessionId)) continue;
+      this.runs.set(run.sessionId, run);
+      adopted++;
+    }
+    if (adopted > 0) this.start();
+    return adopted;
+  }
+
+  /** Mirror the tracked set to disk. Never throws — this is bookkeeping. */
+  private persist(): void {
+    const path = this.opts.statePath;
+    if (!path) return;
+    try {
+      if (this.runs.size === 0) {
+        if (existsSync(path)) unlinkSync(path);
+        return;
+      }
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, JSON.stringify([...this.runs.values()], null, 2), 'utf8');
+    } catch {
+      // A bridge that cannot write its watch list still works for this process.
+    }
   }
 
   private start(): void {
@@ -164,6 +234,27 @@ export class ConductorWatcher {
 
   private async check(run: WatchedRun): Promise<void> {
     const res = await this.doFetch(`${this.base}/api/items/${run.itemId}/conductor`);
+
+    if (res.status === 404) {
+      /**
+       * The cockpit has no run for this item. For a restored entry that means
+       * the item is gone — the database was reset, or the run was cleaned up
+       * while this bridge was down. Polling it forever would keep a dead
+       * session on the books and re-log the same failure every sweep.
+       *
+       * Drop it and say so. Reporting completion would be worse: we do not
+       * know how it ended, and inventing an outcome for a Linear ticket is
+       * exactly the kind of confident wrongness this write-back must not do.
+       */
+      this.runs.delete(run.sessionId);
+      this.reported.delete(run.sessionId);
+      this.persist();
+      this.log(
+        `${run.linearIdentifier}: no conductor run on the cockpit — dropped (was it reset?)`
+      );
+      return;
+    }
+
     if (!res.ok) throw new Error(`conductor state → ${res.status}`);
 
     const state = (await res.json()) as ConductorState;
@@ -223,6 +314,7 @@ export class ConductorWatcher {
     // cockpit would otherwise post the same comment repeatedly.
     this.runs.delete(run.sessionId);
     this.reported.delete(run.sessionId);
+    this.persist();
 
     await this.opts.client.reportSessionComplete(run.sessionId, {
       success,

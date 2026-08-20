@@ -1,5 +1,6 @@
 'use client';
 
+import { useRouter } from 'next/navigation';
 import { cn, formatCurrency } from '@/lib/utils';
 import { useHorizonStore, useUIStore } from '@/stores';
 import { Card, CardContent } from '@/components/ui/card';
@@ -12,6 +13,7 @@ interface RefiningCardProps {
 }
 
 export function RefiningCard({ item }: RefiningCardProps) {
+  const router = useRouter();
   const setSelectedItem = useHorizonStore((state) => state.setSelectedItem);
   const selectedItemId = useHorizonStore((state) => state.selectedItemId);
   const openConfidencePanel = useUIStore((state) => state.openConfidencePanel);
@@ -117,6 +119,22 @@ export function RefiningCard({ item }: RefiningCardProps) {
 
         {/* Actions */}
         <div className="flex justify-end gap-2">
+          {/* Once a plan is approved it has waves, and the wave view is the
+              thing that explains what the fleet is actually doing. There was no
+              route to it from here at all — the only way in was a global nav tab
+              that showed whichever plan happened to be first. */}
+          {conductor?.wavePlanId && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                router.push(`/waves?item=${item.id}`);
+              }}
+            >
+              Waves →
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="sm"

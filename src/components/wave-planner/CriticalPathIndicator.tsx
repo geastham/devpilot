@@ -4,6 +4,7 @@ import { useMemo } from 'react';
 import { cn } from '@/lib/utils';
 import { formatMinutes } from '@/lib/utils';
 import type { ParsedWavePlan, ParsedTask, CriticalPathResult, WaveProgress } from '@devpilot.sh/core/wave-planner';
+import { plainText, pluralize } from '@/lib/plan-text';
 
 // ============================================================================
 // Types
@@ -122,7 +123,7 @@ export function CriticalPathIndicator({
         <div className="space-y-1">
           <h3 className="text-sm font-medium text-text-primary">Critical Path</h3>
           <p className="text-xs text-text-secondary">
-            {completedTasks} of {totalTasks} tasks complete
+            {completedTasks} of {pluralize(totalTasks, 'task')} complete
           </p>
         </div>
         <div className="text-right space-y-1">
@@ -170,7 +171,11 @@ export function CriticalPathIndicator({
               </div>
 
               {/* Task Info */}
-              <div className="flex-1 pb-2">
+              {/* `min-w-0` is what makes the `truncate` below actually work: a
+                  flex child defaults to min-width:auto, so it refuses to shrink
+                  below its content and the text overflowed the panel instead of
+                  being clipped. */}
+              <div className="min-w-0 flex-1 pb-2">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
@@ -188,9 +193,9 @@ export function CriticalPathIndicator({
                         'text-sm mt-0.5 truncate',
                         task.status === 'complete' ? 'text-text-secondary line-through' : 'text-text-primary'
                       )}
-                      title={task.description}
+                      title={plainText(task.description)}
                     >
-                      {task.description}
+                      {plainText(task.description)}
                     </p>
                   </div>
                   <div className="text-xs text-text-tertiary whitespace-nowrap">
@@ -207,7 +212,8 @@ export function CriticalPathIndicator({
       <div className="pt-2 border-t border-border-default">
         <div className="flex items-center justify-between text-xs">
           <span className="text-text-secondary">
-            Critical path length: {criticalPath?.length ?? wavePlan.criticalPath.length} tasks
+            Critical path length:{' '}
+            {pluralize(criticalPath?.length ?? wavePlan.criticalPath.length, 'task')}
           </span>
           <span className="text-text-secondary">
             {activeTasks > 0 && (

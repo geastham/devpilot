@@ -271,3 +271,42 @@
     transform: none;
   }
 }
+
+/**
+ * Boot overlay dismissal, driven by CSS rather than JavaScript.
+ *
+ * `BootSequence` dismissed itself with setTimeout in an effect, which means it
+ * depended on React hydrating. Observed in dev: the overlay sat for ~25 seconds
+ * on a cold load — all APIs answering 200, no console errors — because the
+ * first-load module compile delayed hydration, and the timers had not run yet.
+ * A failed or blocked bundle in production would leave it up permanently: a
+ * blank cockpit that says "Cockpit online".
+ *
+ * The animation holds the overlay opaque for the boot duration, then fades it
+ * and takes it out of the hit-testing path. `forwards` keeps the end state, so
+ * the overlay is gone even if no JavaScript ever runs. React still unmounts it
+ * afterwards; that is now a cleanup, not the mechanism.
+ */
+@keyframes dp-boot-dismiss {
+  0%,
+  70% {
+    opacity: 1;
+    visibility: visible;
+  }
+  100% {
+    opacity: 0;
+    visibility: hidden;
+  }
+}
+
+/**
+ * Reduced motion: no boot sequence at all. This has to live in CSS too — the
+ * effect that used to check matchMedia is the very thing that may not run.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .dp-boot-overlay {
+    animation: none !important;
+    opacity: 0 !important;
+    visibility: hidden !important;
+  }
+}

@@ -1182,7 +1182,13 @@ function createConductorDispatchHandler(opts) {
   };
 }
 
+// src/commands/bridge/connect.ts
+var import_node_os = require("os");
+var import_node_path2 = require("path");
+
 // src/commands/bridge/conductor-watcher.ts
+var import_node_fs = require("fs");
+var import_node_path = require("path");
 function progressReport(state) {
   if (state.awaiting === "review") {
     const waves = state.review?.plan?.waves?.length ?? 0;
@@ -1225,8 +1231,53 @@ var ConductorWatcher = class {
   watch(run) {
     if (this.runs.has(run.sessionId)) return;
     this.runs.set(run.sessionId, run);
+    this.persist();
     this.log(`watching ${run.linearIdentifier} (${this.runs.size} tracked)`);
     this.start();
+  }
+  /**
+   * Re-adopt runs left behind by a previous process.
+   *
+   * Restored runs are claims, not facts — `check` verifies each against the
+   * cockpit on the next sweep and drops any whose item has gone. Returns how
+   * many were adopted so the caller can say so.
+   */
+  restore() {
+    const path = this.opts.statePath;
+    if (!path || !(0, import_node_fs.existsSync)(path)) return 0;
+    let entries = [];
+    try {
+      const parsed = JSON.parse((0, import_node_fs.readFileSync)(path, "utf8"));
+      if (Array.isArray(parsed)) {
+        entries = parsed.filter(
+          (e) => Boolean(e) && typeof e.sessionId === "string" && typeof e.itemId === "string"
+        );
+      }
+    } catch {
+      return 0;
+    }
+    let adopted = 0;
+    for (const run of entries) {
+      if (this.runs.has(run.sessionId)) continue;
+      this.runs.set(run.sessionId, run);
+      adopted++;
+    }
+    if (adopted > 0) this.start();
+    return adopted;
+  }
+  /** Mirror the tracked set to disk. Never throws — this is bookkeeping. */
+  persist() {
+    const path = this.opts.statePath;
+    if (!path) return;
+    try {
+      if (this.runs.size === 0) {
+        if ((0, import_node_fs.existsSync)(path)) (0, import_node_fs.unlinkSync)(path);
+        return;
+      }
+      (0, import_node_fs.mkdirSync)((0, import_node_path.dirname)(path), { recursive: true });
+      (0, import_node_fs.writeFileSync)(path, JSON.stringify([...this.runs.values()], null, 2), "utf8");
+    } catch {
+    }
   }
   start() {
     if (this.timer) return;
@@ -1259,6 +1310,15 @@ var ConductorWatcher = class {
   }
   async check(run) {
     const res = await this.doFetch(`${this.base}/api/items/${run.itemId}/conductor`);
+    if (res.status === 404) {
+      this.runs.delete(run.sessionId);
+      this.reported.delete(run.sessionId);
+      this.persist();
+      this.log(
+        `${run.linearIdentifier}: no conductor run on the cockpit \u2014 dropped (was it reset?)`
+      );
+      return;
+    }
     if (!res.ok) throw new Error(`conductor state \u2192 ${res.status}`);
     const state = await res.json();
     if (!state.status || !TERMINAL.has(state.status)) {
@@ -1287,6 +1347,7 @@ var ConductorWatcher = class {
     const summary = success ? `DevPilot completed ${waves} wave${waves === 1 ? "" : "s"}` + (tasks ? ` covering ${tasks} task${tasks === 1 ? "" : "s"}.` : ".") : `DevPilot run failed: ${state.errors?.[state.errors.length - 1] ?? "unknown error"}`;
     this.runs.delete(run.sessionId);
     this.reported.delete(run.sessionId);
+    this.persist();
     await this.opts.client.reportSessionComplete(run.sessionId, {
       success,
       summary,
@@ -1380,13 +1441,25 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
   const conductorWatcher = options.plan ? new ConductorWatcher({
     client,
     cockpitUrl: options.cockpitUrl,
+    // Survives a restart. Without this, upgrading the CLI or closing a
+    // laptop lid orphaned every in-flight run: the cockpit kept working
+    // and Linear was never told how any of it ended.
+    statePath: (0, import_node_path2.join)((0, import_node_os.homedir)(), ".devpilot", "conductor-watch.json"),
     onLog: (line) => console.log(import_chalk7.default.blue(`   ${line}`)),
     onLost: (run) => console.log(
       import_chalk7.default.yellow(
-        `   ${run.linearIdentifier} was still running at shutdown \u2014 Linear will not be updated for it`
+        `   ${run.linearIdentifier} still running at shutdown \u2014 it will be picked up on the next start`
       )
     )
   }) : null;
+  const readopted = conductorWatcher?.restore() ?? 0;
+  if (readopted > 0) {
+    console.log(
+      import_chalk7.default.blue(
+        `   Resumed watching ${readopted} run${readopted === 1 ? "" : "s"} from a previous session`
+      )
+    );
+  }
   const loop = new import_bridge_client.DispatchLoop({
     client,
     orchestratorId: registration.orchestratorId,

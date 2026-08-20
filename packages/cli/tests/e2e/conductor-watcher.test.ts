@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ConductorWatcher } from '../../src/commands/bridge/conductor-watcher';
 
 /**
@@ -253,5 +256,103 @@ describe('progress while the run is still going', () => {
     // A failed narration must never cost us the run: completion is the thing
     // that actually matters, and it is still owed.
     expect(w.tracked).toBe(1);
+  });
+});
+
+
+/**
+ * Surviving a restart.
+ *
+ * The watcher held runs in memory only, so restarting the bridge orphaned
+ * anything in flight — the run continued in the cockpit and Linear was never
+ * told how it ended. That is what happened to AVA-10: the bridge was restarted
+ * to pick up a new CLI, and the ticket was left showing an error for a run that
+ * had not failed.
+ */
+describe('restart survival', () => {
+  let dir: string;
+  let statePath: string;
+
+  beforeEach(() => {
+    completions = [];
+    statuses = [];
+    states = {};
+    failNext = 0;
+    dir = mkdtempSync(join(tmpdir(), 'dp-watch-'));
+    statePath = join(dir, 'nested', 'conductor-watch.json');
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  function persistentWatcher() {
+    return new ConductorWatcher({
+      client,
+      cockpitUrl: 'http://cockpit.test',
+      pollIntervalMs: 60_000,
+      statePath,
+      fetchImpl,
+    });
+  }
+
+  it('re-adopts an in-flight run in a fresh process', async () => {
+    states.i1 = { status: 'executing', currentWaveIndex: 0 };
+
+    const first = persistentWatcher();
+    first.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-10' });
+    expect(first.tracked).toBe(1);
+
+    // A new process — no shared memory with the one above.
+    const second = persistentWatcher();
+    expect(second.restore()).toBe(1);
+    expect(second.tracked).toBe(1);
+
+    // And it still reports completion, which is the whole point.
+    states.i1 = { status: 'complete', completedWaves: [0, 1] };
+    await second.sweep();
+    expect(completions).toHaveLength(1);
+    expect(completions[0].sessionId).toBe('s1');
+  });
+
+  it('forgets a run once it is reported, so it is not re-adopted', async () => {
+    states.i1 = { status: 'complete', completedWaves: [0] };
+
+    const first = persistentWatcher();
+    first.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-10' });
+    await first.sweep();
+    expect(completions).toHaveLength(1);
+
+    expect(persistentWatcher().restore()).toBe(0);
+  });
+
+  it('drops a restored run whose item the cockpit no longer has', async () => {
+    // No state registered for this item — the cockpit 404s, meaning the item
+    // is gone (database reset, or cleaned up while this bridge was down).
+    const w = persistentWatcher();
+    w.watch({ sessionId: 's1', itemId: 'gone', linearIdentifier: 'AVA-99' });
+    await w.sweep();
+
+    expect(w.tracked).toBe(0);
+    // Crucially it does NOT invent an outcome for the ticket.
+    expect(completions).toHaveLength(0);
+  });
+
+  it('starts anyway when the state file is corrupt', () => {
+    writeFileSync(join(dir, 'bad.json'), '{not json', 'utf8');
+    const w = new ConductorWatcher({
+      client,
+      cockpitUrl: 'http://cockpit.test',
+      pollIntervalMs: 60_000,
+      statePath: join(dir, 'bad.json'),
+      fetchImpl,
+    });
+    // Losing the watch list degrades write-back; refusing to boot loses
+    // everything.
+    expect(() => w.restore()).not.toThrow();
+    expect(w.restore()).toBe(0);
+  });
+
+  it('writes nothing when no statePath is configured', () => {
+    const w = watcher();
+    w.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-10' });
+    expect(existsSync(statePath)).toBe(false);
   });
 });

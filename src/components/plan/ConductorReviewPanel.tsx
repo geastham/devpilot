@@ -1,5 +1,7 @@
 'use client';
 
+import Link from 'next/link';
+
 import { useCallback, useEffect, useState } from 'react';
 import { X, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -237,6 +239,15 @@ export function ConductorReviewPanel() {
                 {state.lastDispatch?.queued ? `, ${state.lastDispatch.queued} queued` : ''}.
                 The run resumes itself when the wave completes.
               </p>
+              {/* This panel says a wave is running; the wave view shows what
+                  that means. Not linking them left the DAG unreachable from
+                  the one place a user is already asking about it. */}
+              <Link
+                href={`/waves?item=${itemId}`}
+                className="mt-2 inline-block text-xs text-accent-primary hover:underline"
+              >
+                Open the wave view →
+              </Link>
             </div>
           )}
 
