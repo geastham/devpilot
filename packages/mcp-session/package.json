@@ -1,7 +1,7 @@
 {
   "name": "@devpilot.sh/mcp-session",
-  "version": "0.1.0",
-  "description": "MCP server letting a local coding agent take part in a DevPilot shared session — end-to-end encrypted, key never leaves the machine",
+  "version": "0.2.0",
+  "description": "MCP server letting a local coding agent take part in a DevPilot shared session \u2014 end-to-end encrypted, key never leaves the machine",
   "license": "MIT",
   "author": "DevPilot Team",
   "repository": {
@@ -22,7 +22,11 @@
       "require": "./dist/index.js"
     }
   },
-  "files": ["dist", "bin", "README.md"],
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
@@ -36,7 +40,12 @@
   "engines": {
     "node": ">=18.0.0"
   },
-  "keywords": ["devpilot", "mcp", "claude-code", "shared-session"],
+  "keywords": [
+    "devpilot",
+    "mcp",
+    "claude-code",
+    "shared-session"
+  ],
   "dependencies": {
     "@devpilot.sh/bridge-client": "workspace:*",
     "@devpilot.sh/bridge-protocol": "workspace:*",

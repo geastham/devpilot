@@ -1,6 +1,6 @@
 {
   "name": "@devpilot.sh/benchmarks",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DevPilot Benchmark Suite - Compare baseline vs orchestrated AI coding performance",
   "license": "MIT",
   "author": "DevPilot Team",

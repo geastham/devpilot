@@ -1,7 +1,7 @@
 {
   "name": "@devpilot.sh/bridge-protocol",
-  "version": "0.1.0",
-  "description": "DevPilot bridge wire contract — message types, request/response schemas, and Linear formatting shared by the CLI and any conforming bridge implementation",
+  "version": "0.2.0",
+  "description": "DevPilot bridge wire contract \u2014 message types, request/response schemas, and Linear formatting shared by the CLI and any conforming bridge implementation",
   "license": "MIT",
   "author": "DevPilot Team",
   "repository": {
@@ -19,7 +19,10 @@
       "require": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
@@ -30,7 +33,12 @@
     "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
-  "keywords": ["devpilot", "bridge", "protocol", "linear"],
+  "keywords": [
+    "devpilot",
+    "bridge",
+    "protocol",
+    "linear"
+  ],
   "dependencies": {
     "zod": "^3.22.0"
   },
