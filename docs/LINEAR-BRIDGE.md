@@ -10,6 +10,11 @@ The Linear integration enables:
 - **Status Updates**: Progress synced in real-time
 - **Auto-Dispatch**: Assign to bot user → automatic agent spawn
 
+> Everything below describes work DevPilot **starts**. For the other direction —
+> agent sessions already running on your machine that DevPilot did not start,
+> discovered and placed on the board — see **[docs/ADOPTION.md](ADOPTION.md)**
+> and `spec/trd/21-FLEET-INTROSPECTION.md`.
+
 ## Architecture
 
 ```

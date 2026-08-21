@@ -362,6 +362,7 @@ to contribute something that matters.
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Current state and prioritized next work |
 | [docs/AO-INTEGRATION.md](docs/AO-INTEGRATION.md) | Wiring an agent orchestrator |
 | [docs/LINEAR-BRIDGE.md](docs/LINEAR-BRIDGE.md) | Linear sync via the hosted bridge |
+| [docs/ADOPTION.md](docs/ADOPTION.md) | Introspecting agent sessions DevPilot didn't start, and putting them on the board |
 | [spec/DESIGN.md](spec/DESIGN.md) | The full TRD — mental model, data model, every surface |
 | [spec/WAVE-PLANNER.md](spec/WAVE-PLANNER.md) | Wave planning algorithm and phases |
 | [spec/BENCHMARK-SUITE.md](spec/BENCHMARK-SUITE.md) | Benchmark methodology and scoring |
