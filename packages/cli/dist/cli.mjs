@@ -1353,6 +1353,57 @@ var ConductorWatcher = class {
     if (adopted > 0) this.start();
     return adopted;
   }
+  /**
+   * Read this run's live telemetry from the cockpit and send it up.
+   *
+   * The cockpit knows what each agent is doing because the session runner
+   * streams it there; the hosted plane knew none of it, so a session page could
+   * only ever show a title and a percentage. Adopted sessions — Claude Code
+   * sessions discovered already running — have no plan at all, which is why
+   * twenty-eight of them displayed 0%: no denominator, and no activity either.
+   */
+  async mirrorTelemetry(run) {
+    if (typeof this.opts.client.reportTelemetry !== "function") return;
+    try {
+      const res = await this.doFetch(`${this.base}/api/fleet/state`);
+      if (!res.ok) return;
+      const state = await res.json();
+      const sessions = state.sessions ?? [];
+      if (sessions.length === 0) return;
+      const files = /* @__PURE__ */ new Set();
+      let toolCalls = 0;
+      let costUsd = 0;
+      let estimated = false;
+      let elapsedMs = 0;
+      let idleMs = Number.MAX_SAFE_INTEGER;
+      let action;
+      for (const s of sessions) {
+        const t = s.telemetry;
+        if (!t) continue;
+        toolCalls += t.toolCalls ?? 0;
+        costUsd += t.costUsd ?? 0;
+        estimated = estimated || Boolean(t.costIsEstimate);
+        elapsedMs = Math.max(elapsedMs, t.elapsedMs ?? 0);
+        idleMs = Math.min(idleMs, t.idleMs ?? Number.MAX_SAFE_INTEGER);
+        for (const f of t.filesTouched ?? []) files.add(f);
+        if (!action && t.lastAction) {
+          const file = t.lastAction.path?.split("/").slice(-1)[0];
+          action = t.lastAction.tool === "Bash" ? (t.commands?.at(-1) ?? "shell").split(/\s+/).slice(0, 3).join(" ") : `${t.lastAction.tool.toLowerCase()}${file ? ` ${file}` : ""}`;
+        }
+      }
+      if (toolCalls === 0 && files.size === 0) return;
+      await this.opts.client.reportTelemetry(run.sessionId, {
+        toolCalls,
+        filesTouched: [...files],
+        currentAction: action,
+        costUsd: costUsd > 0 ? costUsd : void 0,
+        costEstimated: estimated,
+        elapsedMs: elapsedMs || void 0,
+        idleMs: idleMs === Number.MAX_SAFE_INTEGER ? void 0 : idleMs
+      });
+    } catch {
+    }
+  }
   /** Mirror the tracked set to disk. Never throws — this is bookkeeping. */
   persist() {
     const path = this.opts.statePath;
@@ -1434,6 +1485,7 @@ var ConductorWatcher = class {
           this.log(`${run.linearIdentifier}: plan mirrored to the hosted cockpit`);
         }
       }
+      void this.mirrorTelemetry(run);
       const progress = progressReport(state, {
         // Same guard as the handler: an older client has no `hostedUrl`, and a
         // missing link must never cost the progress report itself.

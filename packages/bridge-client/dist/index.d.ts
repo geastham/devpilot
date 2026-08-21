@@ -49,6 +49,25 @@ interface SessionCommandMessage {
     };
     createdAt?: string;
 }
+/**
+ * The instrument readings the hosted cockpit renders.
+ *
+ * Note what is absent: no assistant text, no tool inputs. That omission is the
+ * contract, not an oversight — see `reportTelemetry`.
+ */
+interface MirroredTelemetry {
+    toolCalls: number;
+    /** Repo-relative paths. */
+    filesTouched: string[];
+    currentAction?: string;
+    costUsd?: number;
+    costEstimated?: boolean;
+    tokensIn?: number;
+    tokensOut?: number;
+    turns?: number;
+    elapsedMs?: number;
+    idleMs?: number;
+}
 declare class BridgeClient {
     private readonly config;
     private readonly fetchImpl;
@@ -138,6 +157,18 @@ declare class BridgeClient {
      * traded the product for a display.
      */
     reportObservations(request: ObservationRequest): Promise<ObservationResponse | null>;
+    /**
+     * Mirror what an agent is doing to the hosted cockpit.
+     *
+     * Derived facts only. The caller is responsible for not passing prose or raw
+     * tool inputs — a Write tool's input IS the file contents — and the hosted
+     * schema has no column for either, so a mistake here is rejected rather than
+     * stored.
+     *
+     * Best-effort and never throws: this is an instrument reading, and losing a
+     * frame of it must never cost the run it describes.
+     */
+    reportTelemetry(sessionId: string, telemetry: MirroredTelemetry): Promise<boolean>;
     /** Fixes the `getOrchestatorId` typo from 0.1.x. */
     getOrchestratorId(): string | null;
     setOrchestratorId(id: string): void;
@@ -345,4 +376,4 @@ declare class PubSubSubscriber {
     constructor();
 }
 
-export { BridgeClient, type BridgeClientConfig, BridgeError, type DispatchHandler, DispatchLoop, type DispatchLoopConfig, type EntryStatus, type HeartbeatConfig, HeartbeatService, type MirroredPlan, PubSubSubscriber, RealtimeSubscriber, type RealtimeSubscriberConfig, type SessionCommandMessage, SharedSessionClient, type SharedSessionJoinOptions, type TranscriptEntry };
+export { BridgeClient, type BridgeClientConfig, BridgeError, type DispatchHandler, DispatchLoop, type DispatchLoopConfig, type EntryStatus, type HeartbeatConfig, HeartbeatService, type MirroredPlan, type MirroredTelemetry, PubSubSubscriber, RealtimeSubscriber, type RealtimeSubscriberConfig, type SessionCommandMessage, SharedSessionClient, type SharedSessionJoinOptions, type TranscriptEntry };

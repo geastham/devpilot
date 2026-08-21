@@ -270,6 +270,28 @@ var BridgeClient = class {
       return null;
     }
   }
+  /**
+   * Mirror what an agent is doing to the hosted cockpit.
+   *
+   * Derived facts only. The caller is responsible for not passing prose or raw
+   * tool inputs — a Write tool's input IS the file contents — and the hosted
+   * schema has no column for either, so a mistake here is rejected rather than
+   * stored.
+   *
+   * Best-effort and never throws: this is an instrument reading, and losing a
+   * frame of it must never cost the run it describes.
+   */
+  async reportTelemetry(sessionId, telemetry) {
+    try {
+      await this.request(`/api/sessions/${sessionId}/telemetry`, {
+        method: "POST",
+        body: JSON.stringify(telemetry)
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
   /** Fixes the `getOrchestatorId` typo from 0.1.x. */
   getOrchestratorId() {
     return this.orchestratorId;

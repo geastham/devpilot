@@ -72,6 +72,26 @@ export interface SessionCommandMessage {
   createdAt?: string;
 }
 
+/**
+ * The instrument readings the hosted cockpit renders.
+ *
+ * Note what is absent: no assistant text, no tool inputs. That omission is the
+ * contract, not an oversight — see `reportTelemetry`.
+ */
+export interface MirroredTelemetry {
+  toolCalls: number;
+  /** Repo-relative paths. */
+  filesTouched: string[];
+  currentAction?: string;
+  costUsd?: number;
+  costEstimated?: boolean;
+  tokensIn?: number;
+  tokensOut?: number;
+  turns?: number;
+  elapsedMs?: number;
+  idleMs?: number;
+}
+
 export class BridgeClient {
   private readonly fetchImpl: typeof fetch;
   private orchestratorId: string | null = null;
@@ -310,6 +330,29 @@ export class BridgeClient {
       return ObservationResponseSchema.parse(raw);
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Mirror what an agent is doing to the hosted cockpit.
+   *
+   * Derived facts only. The caller is responsible for not passing prose or raw
+   * tool inputs — a Write tool's input IS the file contents — and the hosted
+   * schema has no column for either, so a mistake here is rejected rather than
+   * stored.
+   *
+   * Best-effort and never throws: this is an instrument reading, and losing a
+   * frame of it must never cost the run it describes.
+   */
+  async reportTelemetry(sessionId: string, telemetry: MirroredTelemetry): Promise<boolean> {
+    try {
+      await this.request(`/api/sessions/${sessionId}/telemetry`, {
+        method: 'POST',
+        body: JSON.stringify(telemetry),
+      });
+      return true;
+    } catch {
+      return false;
     }
   }
 
