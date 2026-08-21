@@ -2,6 +2,7 @@
 
 import { ArrowLeft } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { SweepControl } from './SweepControl';
 
 /**
  * The Work Horizon is a queue that runs RIGHT TO LEFT — a thought captured at
@@ -44,8 +45,11 @@ export function HorizonFlowRail({ className }: { className?: string }) {
         aria-hidden
       />
 
-      <span className="shrink-0 text-xs text-text-secondary">
-        new ideas enter here
+      {/* Housekeeping sits at the end of the rail, next to where work leaves
+          the board — not in the topbar, which is for the fleet as a whole. */}
+      <span className="flex shrink-0 items-center gap-3">
+        <SweepControl />
+        <span className="text-xs text-text-secondary">new ideas enter here</span>
       </span>
     </div>
   );

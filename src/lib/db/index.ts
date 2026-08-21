@@ -6,7 +6,7 @@
  */
 
 import { getDatabase, initDatabase, resetDatabase } from '@devpilot.sh/core/db';
-import { eq, desc, asc, and, or, gt, lt, gte, lte, inArray, sql } from 'drizzle-orm';
+import { eq, desc, asc, and, or, gt, lt, gte, lte, inArray, isNull, sql } from 'drizzle-orm';
 import * as schema from '@devpilot.sh/core/db';
 
 // Initialize database on first import (for Next.js)
@@ -112,7 +112,7 @@ export type {
 } from '@devpilot.sh/core/db';
 
 // Re-export query operators for building queries
-export { eq, desc, asc, and, or, gt, lt, gte, lte, inArray, sql };
+export { eq, desc, asc, and, or, gt, lt, gte, lte, inArray, isNull, sql };
 
 // Export utilities
 export { initDatabase, resetDatabase };

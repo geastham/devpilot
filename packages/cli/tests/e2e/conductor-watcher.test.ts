@@ -224,7 +224,7 @@ describe('progress while the run is still going', () => {
     // Three sweeps, one message: Linear activities are not idempotent, and a
     // 30s poll would otherwise post the same line every 30 seconds forever.
     expect(statuses).toHaveLength(1);
-    expect(String(statuses[0].report.message)).toContain('wave 1');
+    expect(String(statuses[0].report.message)).toMatch(/wave 1/i);
     expect(String(statuses[0].report.message)).toContain('https://devpilot.test/sessions/s1');
   });
 
@@ -243,7 +243,7 @@ describe('progress while the run is still going', () => {
     await w.sweep();
 
     expect(statuses).toHaveLength(2);
-    expect(String(statuses[1].report.message)).toContain('wave 2');
+    expect(String(statuses[1].report.message)).toMatch(/wave 2/i);
   });
 
   it('keeps watching when a progress report fails', async () => {
@@ -498,6 +498,98 @@ describe('not repeating what the handler already said', () => {
     states.i1 = { status: 'executing', currentWaveIndex: 0, lastDispatch: { dispatched: 3, queued: 1 } };
     await w.sweep();
     expect(statuses).toHaveLength(1);
-    expect(String(statuses[0].report.message)).toContain('wave 1');
+    expect(String(statuses[0].report.message)).toMatch(/wave 1/i);
+  });
+});
+
+
+/**
+ * What Linear ends up recording.
+ *
+ * Linear is the source of record, and the record used to be "DevPilot completed
+ * 2 waves" — no files, no cost, no way to tell a run that wrote nine files from
+ * one that wrote none.
+ */
+describe('the summary a reviewer reads weeks later', () => {
+  beforeEach(() => {
+    completions = [];
+    statuses = [];
+    states = {};
+    failNext = 0;
+  });
+
+  it('names the files, the tasks and the money', async () => {
+    states.i1 = {
+      status: 'complete',
+      completedWaves: [0, 1],
+      outcome: {
+        tasksTotal: 6,
+        tasksComplete: 6,
+        wavesTotal: 2,
+        costUsd: 1.234,
+        filesChanged: ['src/lru.ts', 'src/lru.test.ts'],
+      },
+    };
+
+    const w = watcher();
+    w.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-13' });
+    await w.sweep();
+
+    const summary = String(completions[0].report.summary);
+    expect(summary).toContain('6 tasks');
+    expect(summary).toContain('$1.23');
+    expect(summary).toContain('src/lru.ts');
+    expect(summary).toContain('2 files changed');
+  });
+
+  it('says plainly when a successful run changed nothing', async () => {
+    states.i1 = {
+      status: 'complete',
+      outcome: { tasksTotal: 3, tasksComplete: 3, wavesTotal: 1, filesChanged: [] },
+    };
+    const w = watcher();
+    w.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-13' });
+    await w.sweep();
+
+    // The single most useful thing this message can carry.
+    expect(String(completions[0].report.summary)).toMatch(/no files were changed/i);
+  });
+
+  it('does not claim nothing changed when it was simply not told', async () => {
+    // An older cockpit returns no `outcome`. Absent data and an empty result
+    // are different facts.
+    states.i1 = {
+      status: 'complete',
+      completedWaves: [0],
+      review: { plan: { waves: [{ tasks: [1, 2, 3] }] } },
+    };
+    const w = watcher();
+    w.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-13' });
+    await w.sweep();
+
+    const summary = String(completions[0].report.summary);
+    expect(summary).not.toMatch(/no files were changed/i);
+    // And it falls back to the plan rather than reporting "0 tasks".
+    expect(summary).toContain('3 tasks');
+  });
+
+  it('names the failed tasks rather than sending someone to a log', async () => {
+    states.i1 = {
+      status: 'failed',
+      outcome: {
+        tasksTotal: 5,
+        tasksComplete: 2,
+        costUsd: 0.5,
+        failures: [{ taskCode: '2.3', error: 'tsc: cannot find name Clock' }],
+      },
+    };
+    const w = watcher();
+    w.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-13' });
+    await w.sweep();
+
+    const summary = String(completions[0].report.summary);
+    expect(summary).toContain('2.3');
+    expect(summary).toContain('cannot find name Clock');
+    expect(summary).toContain('2 of 5');
   });
 });

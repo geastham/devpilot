@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, horizonItems, activityEvents, eq, and, desc } from '@/lib/db';
+import { db, horizonItems, activityEvents, eq, and, desc, isNull } from '@/lib/db';
 import type { Zone, Complexity } from '@/lib/db';
 import { getConductorGraph, threadFor } from '@/lib/conductor-graph';
 import type { ConductorSummary } from '@/types';
@@ -68,6 +68,9 @@ export async function GET(request: NextRequest) {
 
     // Build where conditions
     const conditions = [];
+    // Archived items keep their zone and history; they just leave the board.
+    // Without this a sweep would appear to do nothing.
+    conditions.push(isNull(horizonItems.archivedAt));
     if (zone) conditions.push(eq(horizonItems.zone, zone));
     if (repo) conditions.push(eq(horizonItems.repo, repo));
     if (linearTicketId) conditions.push(eq(horizonItems.linearTicketId, linearTicketId));

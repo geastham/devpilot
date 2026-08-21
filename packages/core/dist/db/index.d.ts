@@ -26,6 +26,18 @@ declare const horizonItems: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
     name: "horizon_items";
     schema: undefined;
     columns: {
+        archivedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "archived_at";
+            tableName: "horizon_items";
+            dataType: "date";
+            columnType: "SQLiteTimestamp";
+            data: Date;
+            driverParam: number;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
         id: drizzle_orm_sqlite_core.SQLiteColumn<{
             name: "id";
             tableName: "horizon_items";

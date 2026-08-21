@@ -1316,6 +1316,19 @@ var import_sqlite_core = require("drizzle-orm/sqlite-core");
 var import_drizzle_orm = require("drizzle-orm");
 var import_cuid2 = require("@paralleldrive/cuid2");
 var horizonItems = (0, import_sqlite_core.sqliteTable)("horizon_items", {
+  /**
+   * When this item was swept off the board.
+   *
+   * A timestamp rather than an ARCHIVED zone: `zone` is a CHECK constraint in
+   * both sqlite and postgres, so widening it needs a coordinated migration —
+   * and archiving is orthogonal to which column something sits in. An archived
+   * item keeps its zone, which is what you want if you ever un-archive it.
+   *
+   * Null means live. Nothing auto-sets this; sweeping is something a person
+   * does, because a board that quietly removes work is worse than a cluttered
+   * one.
+   */
+  archivedAt: (0, import_sqlite_core.integer)("archived_at", { mode: "timestamp" }),
   id: (0, import_sqlite_core.text)("id").primaryKey().$defaultFn(() => (0, import_cuid2.createId)()),
   title: (0, import_sqlite_core.text)("title").notNull(),
   zone: (0, import_sqlite_core.text)("zone", { enum: zoneValues }).notNull().default("DIRECTIONAL"),

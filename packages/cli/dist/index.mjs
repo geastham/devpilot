@@ -11,7 +11,7 @@ import { Command as Command17 } from "commander";
 import updateNotifier from "update-notifier";
 
 // src/version.ts
-var VERSION = "0.3.1";
+var VERSION = "0.3.2";
 
 // src/commands/init.ts
 import { Command } from "commander";
@@ -1239,15 +1239,58 @@ function progressReport(state, links) {
     const done = state.completedWaves?.length ?? 0;
     const d = state.lastDispatch?.dispatched ?? 0;
     const q = state.lastDispatch?.queued ?? 0;
+    const o = state.outcome ?? {};
+    const complete = o.tasksComplete ?? 0;
+    const total = o.tasksTotal ?? 0;
+    const files = o.filesChanged?.length ?? 0;
+    const cost = typeof o.costUsd === "number" && o.costUsd > 0 ? `, $${o.costUsd.toFixed(2)} so far` : "";
+    const detail = total ? ` \u2014 ${complete}/${total} tasks done, ${files} file${files === 1 ? "" : "s"} touched${cost}` : d || q ? ` \u2014 ${d} agent${d === 1 ? "" : "s"} running, ${q} queued` : "";
     return {
-      signature: `wave:${wave}:${done}:${d}:${q}`,
-      message: `Dispatching wave ${wave + 1}` + (d || q ? ` \u2014 ${d} agent${d === 1 ? "" : "s"} running, ${q} queued` : "") + (links.hosted ? `. [Watch the waves](${links.hosted}/sessions/${links.sessionId}).` : "."),
+      signature: `wave:${wave}:${done}:${complete}:${files}`,
+      message: `Wave ${wave + 1}${total ? ` of ${o.wavesTotal ?? "?"}` : ""}${detail}` + (links.hosted ? `. [Watch the waves](${links.hosted}/sessions/${links.sessionId}).` : "."),
       percent: Math.min(60 + done * 15, 95)
     };
   }
   return null;
 }
 var TERMINAL = /* @__PURE__ */ new Set(["complete", "failed"]);
+var MAX_LISTED_FILES = 12;
+function successSummary(state) {
+  const o = state.outcome ?? {};
+  const waves = o.wavesTotal ?? state.completedWaves?.length ?? 0;
+  const planned = state.review?.plan?.waves?.reduce((n, w) => n + (w.tasks?.length ?? 0), 0) ?? 0;
+  const tasks = o.tasksComplete ?? planned;
+  const files = o.filesChanged ?? [];
+  const head = `DevPilot finished ${tasks} task${tasks === 1 ? "" : "s"} across ${waves} wave${waves === 1 ? "" : "s"}` + (typeof o.costUsd === "number" && o.costUsd > 0 ? ` for $${o.costUsd.toFixed(2)}` : "") + ".";
+  if (files.length === 0) {
+    return o.filesChanged ? `${head}
+
+**No files were changed.** Worth checking whether the plan matched the intent.` : head;
+  }
+  const shown = files.slice(0, MAX_LISTED_FILES).map((f) => `- \`${f}\``);
+  const more = files.length > MAX_LISTED_FILES ? `
+- \u2026and ${files.length - MAX_LISTED_FILES} more` : "";
+  return `${head}
+
+**${files.length} file${files.length === 1 ? "" : "s"} changed**
+${shown.join("\n")}${more}`;
+}
+function failureSummary(state) {
+  const o = state.outcome ?? {};
+  const failures = o.failures ?? [];
+  const last = state.errors?.[state.errors.length - 1];
+  const head = `DevPilot run failed after ${o.tasksComplete ?? 0} of ${o.tasksTotal ?? 0} tasks` + (typeof o.costUsd === "number" && o.costUsd > 0 ? ` ($${o.costUsd.toFixed(2)} spent)` : "") + ".";
+  if (failures.length > 0) {
+    const lines = failures.slice(0, 5).map((f) => `- **${f.taskCode}** \u2014 ${f.error}`);
+    return `${head}
+
+**Failed tasks**
+${lines.join("\n")}`;
+  }
+  return last ? `${head}
+
+${last}` : head;
+}
 var ConductorWatcher = class {
   constructor(opts) {
     this.opts = opts;
@@ -1426,7 +1469,7 @@ var ConductorWatcher = class {
     const success = state.status === "complete";
     const waves = state.completedWaves?.length ?? 0;
     const tasks = state.review?.plan?.waves?.reduce((n, w) => n + (w.tasks?.length ?? 0), 0) ?? 0;
-    const summary = success ? `DevPilot completed ${waves} wave${waves === 1 ? "" : "s"}` + (tasks ? ` covering ${tasks} task${tasks === 1 ? "" : "s"}.` : ".") : `DevPilot run failed: ${state.errors?.[state.errors.length - 1] ?? "unknown error"}`;
+    const summary = success ? successSummary(state) : failureSummary(state);
     this.runs.delete(run.sessionId);
     this.reported.delete(run.sessionId);
     this.mirroredPlans.delete(run.sessionId);

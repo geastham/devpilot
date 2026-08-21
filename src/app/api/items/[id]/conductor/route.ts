@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Command, type ReviewDecision } from '@devpilot.sh/conductor-agent';
-import { db, horizonItems, eq } from '@/lib/db';
+import { db, horizonItems, wavePlans, rufloSessions, eq, desc, inArray } from '@/lib/db';
 import { getConductorGraph, threadFor } from '@/lib/conductor-graph';
 import { recordRun } from '@/lib/conductor-memory';
 import { buildSpecContentForItem } from '@devpilot.sh/core/wave-planner';
@@ -142,6 +142,66 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   }
 }
 
+/**
+ * What the run has actually produced, for reporting back to Linear.
+ *
+ * The graph state knows where a run *is*; it does not know what it has *done* —
+ * which files changed, what it cost, how many tasks are finished. That lives in
+ * the wave plan and the sessions its tasks were dispatched to, and until now
+ * nothing joined the two. So Linear, the source of record, recorded that
+ * something happened and stopped there.
+ */
+async function outcomeFor(itemId: string) {
+  const plan = await db.query.wavePlans.findFirst({
+    where: eq(wavePlans.horizonItemId, itemId),
+    orderBy: desc(wavePlans.createdAt),
+    with: { waveTasks: true },
+  });
+  if (!plan) return null;
+
+  type OutcomeTask = {
+    status: string;
+    waveIndex: number;
+    taskCode: string;
+    assignedSessionId: string | null;
+    errorMessage: string | null;
+  };
+  const tasks = (plan.waveTasks ?? []) as OutcomeTask[];
+  const done = tasks.filter((t) => t.status === 'completed');
+  const failed = tasks.filter((t) => t.status === 'failed');
+
+  const sessionIds = tasks
+    .map((t) => t.assignedSessionId)
+    .filter((v): v is string => Boolean(v));
+
+  const sessions = sessionIds.length
+    ? await db.query.rufloSessions.findMany({ where: inArray(rufloSessions.id, sessionIds) })
+    : [];
+
+  // Union, not sum: three agents editing one file is one changed file, and a
+  // count that double-reports would overstate the blast radius of a run.
+  const files = new Set<string>();
+  let costUsd = 0;
+  for (const session of sessions) {
+    const t = session.telemetry as { filesTouched?: string[]; costUsd?: number } | null;
+    for (const f of t?.filesTouched ?? []) files.add(f);
+    costUsd += t?.costUsd ?? 0;
+  }
+
+  return {
+    tasksTotal: tasks.length,
+    tasksComplete: done.length,
+    tasksFailed: failed.length,
+    wavesTotal: new Set(tasks.map((t) => t.waveIndex)).size,
+    filesChanged: [...files].sort(),
+    costUsd,
+    failures: failed.map((t) => ({
+      taskCode: t.taskCode,
+      error: t.errorMessage ?? 'no error recorded',
+    })),
+  };
+}
+
 export async function GET(_request: NextRequest, { params }: RouteParams) {
   try {
     const { id } = await params;
@@ -157,6 +217,9 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
         ...(snapshot.values as Record<string, unknown>),
         __interrupt__: snapshot.tasks.flatMap((t) => t.interrupts ?? []),
       }),
+      // What the run produced, so the bridge can tell Linear something worth
+      // recording rather than "complete".
+      outcome: await outcomeFor(id),
       next: snapshot.next,
     });
   } catch (error) {

@@ -63,6 +63,16 @@ export interface ConductorState {
   currentWaveIndex?: number;
   score?: { parallelizationScore?: number } | null;
   lastDispatch?: { dispatched?: number; queued?: number } | null;
+  /** What the run has produced. See `outcomeFor` in the cockpit's conductor route. */
+  outcome?: {
+    tasksTotal?: number;
+    tasksComplete?: number;
+    tasksFailed?: number;
+    wavesTotal?: number;
+    filesChanged?: string[];
+    costUsd?: number;
+    failures?: { taskCode: string; error: string }[];
+  } | null;
 }
 
 /**
@@ -97,11 +107,33 @@ function progressReport(
     const done = state.completedWaves?.length ?? 0;
     const d = state.lastDispatch?.dispatched ?? 0;
     const q = state.lastDispatch?.queued ?? 0;
+    const o = state.outcome ?? {};
+
+    /**
+     * Progress that survives being read weeks later.
+     *
+     * "Dispatching wave 2" says the machinery moved. Adding tasks done, files
+     * touched so far and spend says what it *cost* and what it *changed* — the
+     * two questions anyone actually brings to a ticket. The signature includes
+     * the task count so a wave that is quietly making progress still updates,
+     * rather than going silent between dispatch boundaries.
+     */
+    const complete = o.tasksComplete ?? 0;
+    const total = o.tasksTotal ?? 0;
+    const files = o.filesChanged?.length ?? 0;
+    const cost =
+      typeof o.costUsd === 'number' && o.costUsd > 0 ? `, $${o.costUsd.toFixed(2)} so far` : '';
+
+    const detail = total
+      ? ` — ${complete}/${total} tasks done, ${files} file${files === 1 ? '' : 's'} touched${cost}`
+      : d || q
+        ? ` — ${d} agent${d === 1 ? '' : 's'} running, ${q} queued`
+        : '';
+
     return {
-      signature: `wave:${wave}:${done}:${d}:${q}`,
+      signature: `wave:${wave}:${done}:${complete}:${files}`,
       message:
-        `Dispatching wave ${wave + 1}` +
-        (d || q ? ` — ${d} agent${d === 1 ? '' : 's'} running, ${q} queued` : '') +
+        `Wave ${wave + 1}${total ? ` of ${o.wavesTotal ?? '?'}` : ''}${detail}` +
         (links.hosted
           ? `. [Watch the waves](${links.hosted}/sessions/${links.sessionId}).`
           : '.'),
@@ -138,6 +170,69 @@ export interface ConductorWatcherOptions {
 }
 
 const TERMINAL = new Set(['complete', 'failed']);
+
+/** Files are listed, not just counted — the count is the least useful part. */
+const MAX_LISTED_FILES = 12;
+
+function successSummary(state: ConductorState): string {
+  const o = state.outcome ?? {};
+  const waves = o.wavesTotal ?? state.completedWaves?.length ?? 0;
+
+  /**
+   * Fall back to the plan's own task count when no outcome is available.
+   *
+   * An older cockpit does not return `outcome`, and reading a missing value as
+   * zero made the summary say "finished 0 tasks" for a run that had just
+   * completed successfully — asserting nothing was done when the truth is that
+   * we do not know how much was.
+   */
+  const planned =
+    state.review?.plan?.waves?.reduce((n, w) => n + (w.tasks?.length ?? 0), 0) ?? 0;
+  const tasks = o.tasksComplete ?? planned;
+  const files = o.filesChanged ?? [];
+
+  const head =
+    `DevPilot finished ${tasks} task${tasks === 1 ? '' : 's'} across ` +
+    `${waves} wave${waves === 1 ? '' : 's'}` +
+    (typeof o.costUsd === 'number' && o.costUsd > 0 ? ` for $${o.costUsd.toFixed(2)}` : '') +
+    '.';
+
+  if (files.length === 0) {
+    // Only claim "nothing changed" when the cockpit actually told us. Absent
+    // data and an empty result are different facts, and reporting the first as
+    // the second would send a reviewer hunting a problem that may not exist.
+    return o.filesChanged
+      ? `${head}\n\n**No files were changed.** Worth checking whether the plan matched the intent.`
+      : head;
+  }
+
+  const shown = files.slice(0, MAX_LISTED_FILES).map((f) => `- \`${f}\``);
+  const more =
+    files.length > MAX_LISTED_FILES
+      ? `\n- …and ${files.length - MAX_LISTED_FILES} more`
+      : '';
+
+  return `${head}\n\n**${files.length} file${files.length === 1 ? '' : 's'} changed**\n${shown.join('\n')}${more}`;
+}
+
+function failureSummary(state: ConductorState): string {
+  const o = state.outcome ?? {};
+  const failures = o.failures ?? [];
+  const last = state.errors?.[state.errors.length - 1];
+
+  const head =
+    `DevPilot run failed after ${o.tasksComplete ?? 0} of ${o.tasksTotal ?? 0} tasks` +
+    (typeof o.costUsd === 'number' && o.costUsd > 0 ? ` ($${o.costUsd.toFixed(2)} spent)` : '') +
+    '.';
+
+  // Name the tasks that failed. "Run failed" sends someone to a log; a task
+  // code and its error sends them to the problem.
+  if (failures.length > 0) {
+    const lines = failures.slice(0, 5).map((f) => `- **${f.taskCode}** — ${f.error}`);
+    return `${head}\n\n**Failed tasks**\n${lines.join('\n')}`;
+  }
+  return last ? `${head}\n\n${last}` : head;
+}
 
 export class ConductorWatcher {
   private readonly runs = new Map<string, WatchedRun>();
@@ -412,10 +507,16 @@ export class ConductorWatcher {
     const tasks =
       state.review?.plan?.waves?.reduce((n, w) => n + (w.tasks?.length ?? 0), 0) ?? 0;
 
-    const summary = success
-      ? `DevPilot completed ${waves} wave${waves === 1 ? '' : 's'}` +
-        (tasks ? ` covering ${tasks} task${tasks === 1 ? '' : 's'}.` : '.')
-      : `DevPilot run failed: ${state.errors?.[state.errors.length - 1] ?? 'unknown error'}`;
+    /**
+     * A summary someone can act on.
+     *
+     * This used to say "DevPilot completed 2 waves" and nothing else. Linear is
+     * the source of record, and the record was that something happened — no
+     * files, no cost, no way to tell a run that wrote nine files from one that
+     * wrote none. Everything below already existed; it was simply never joined
+     * and never sent.
+     */
+    const summary = success ? successSummary(state) : failureSummary(state);
 
     // Remove BEFORE reporting: if the report throws, the run is not re-reported
     // on the next sweep. Linear comments are not idempotent, and a flapping

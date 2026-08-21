@@ -24,6 +24,19 @@ export function RufloSessionCard({ session }: RufloSessionCardProps) {
 
   const activity = describeAction(telemetry);
 
+  const [stopping, setStopping] = useState(false);
+  async function stop() {
+    setStopping(true);
+    try {
+      await fetch(`/api/fleet/sessions/${session.id}/stop`, { method: 'POST' });
+    } finally {
+      // Left true is fine: the card disappears on the next poll once the
+      // session leaves ACTIVE, and a button that re-enables itself invites a
+      // second click at a process that is already gone.
+      setStopping(false);
+    }
+  }
+
   const liveElapsedMinutes =
     typeof telemetry?.elapsedMs === 'number' && telemetry.elapsedMs > 0
       ? Math.round(telemetry.elapsedMs / 60_000)
@@ -156,6 +169,24 @@ export function RufloSessionCard({ session }: RufloSessionCardProps) {
             {session.progressPercent}%
           </span>
         </div>
+
+        {/* Stop. The cockpit could show an agent working and offer nothing to
+            do about it — a conductor watching a task grind against the wrong
+            file could wait twenty minutes or kill the whole runner. */}
+        {isActive && (
+          <div className="mb-2 flex justify-end">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                void stop();
+              }}
+              disabled={stopping}
+              className="text-[10px] text-text-muted transition-colors hover:text-accent-red disabled:opacity-50"
+            >
+              {stopping ? 'stopping…' : 'stop agent'}
+            </button>
+          </div>
+        )}
 
         {/* Footer */}
         <div className="flex items-center justify-between">
