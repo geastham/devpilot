@@ -1,6 +1,6 @@
 {
   "name": "@devpilot.sh/cockpit-ui",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "The DevPilot cockpit's plan-rendering surface, shared by the local cockpit and the hosted plane.",
   "license": "MIT",
   "main": "dist/index.js",
