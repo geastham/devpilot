@@ -1136,7 +1136,10 @@ function createConductorDispatchHandler(opts) {
             progressPercent: current.awaiting === "review" ? 40 : 60,
             message: summary2
           });
-          opts.watcher?.watch({ sessionId, itemId: item.id, linearIdentifier });
+          opts.watcher?.watch(
+            { sessionId, itemId: item.id, linearIdentifier },
+            current.awaiting === "review" ? "review" : void 0
+          );
           return;
         }
       } else {
@@ -1192,7 +1195,10 @@ function createConductorDispatchHandler(opts) {
         progressPercent: state.awaiting === "review" ? 40 : 60,
         message: summary
       });
-      opts.watcher?.watch({ sessionId, itemId: item.id, linearIdentifier });
+      opts.watcher?.watch(
+        { sessionId, itemId: item.id, linearIdentifier },
+        state.awaiting === "review" ? "review" : void 0
+      );
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       log(`${linearIdentifier} failed: ${reason}`);
@@ -1257,10 +1263,19 @@ var ConductorWatcher = class {
     });
     this.doFetch = opts.fetchImpl ?? fetch;
   }
-  /** Begin watching a run. Idempotent per bridge session. */
-  watch(run) {
+  /**
+   * Begin watching a run. Idempotent per bridge session.
+   *
+   * `alreadyReported` seeds the dedup signature with something the caller has
+   * just said. The dispatch handler announces the review gate itself, and
+   * without this the watcher's first sweep announced it again — AVA-13 carried
+   * two identical "Plan ready — 5 waves, 17 tasks, 71% parallel" activities
+   * seconds apart, which reads as the agent stuttering rather than working.
+   */
+  watch(run, alreadyReported) {
     if (this.runs.has(run.sessionId)) return;
     this.runs.set(run.sessionId, run);
+    if (alreadyReported) this.reported.set(run.sessionId, alreadyReported);
     this.persist();
     this.log(`watching ${run.linearIdentifier} (${this.runs.size} tracked)`);
     this.start();

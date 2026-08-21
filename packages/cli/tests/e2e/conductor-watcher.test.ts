@@ -439,3 +439,65 @@ describe('mirroring from the watcher', () => {
     expect(mirrors).toHaveLength(1);
   });
 });
+
+
+/**
+ * Saying it once.
+ *
+ * The dispatch handler announces the review gate, then hands the run to the
+ * watcher. Without a seeded signature the watcher announced it again on its
+ * first sweep — AVA-13 carried two identical "Plan ready — 5 waves, 17 tasks,
+ * 71% parallel" activities seconds apart, which reads as the agent stuttering.
+ */
+describe('not repeating what the handler already said', () => {
+  beforeEach(() => {
+    completions = [];
+    statuses = [];
+    states = {};
+    failNext = 0;
+  });
+
+  it('stays quiet when the review gate was already reported', async () => {
+    states.i1 = {
+      status: 'planning',
+      awaiting: 'review',
+      score: { parallelizationScore: 0.71 },
+      review: { plan: { waves: [{ tasks: [1] }] } },
+    };
+
+    const w = watcher();
+    w.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-13' }, 'review');
+    await w.sweep();
+
+    expect(statuses).toHaveLength(0);
+  });
+
+  it('still reports the gate when nobody announced it', async () => {
+    states.i1 = {
+      status: 'planning',
+      awaiting: 'review',
+      score: { parallelizationScore: 0.71 },
+      review: { plan: { waves: [{ tasks: [1] }] } },
+    };
+
+    const w = watcher();
+    w.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-13' });
+    await w.sweep();
+
+    expect(statuses).toHaveLength(1);
+  });
+
+  it('still reports the NEXT state change after a seeded gate', async () => {
+    states.i1 = { status: 'planning', awaiting: 'review', review: { plan: { waves: [{ tasks: [1] }] } } };
+    const w = watcher();
+    w.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-13' }, 'review');
+    await w.sweep();
+    expect(statuses).toHaveLength(0);
+
+    // Approved and dispatching: a genuinely new thing to say.
+    states.i1 = { status: 'executing', currentWaveIndex: 0, lastDispatch: { dispatched: 3, queued: 1 } };
+    await w.sweep();
+    expect(statuses).toHaveLength(1);
+    expect(String(statuses[0].report.message)).toContain('wave 1');
+  });
+});

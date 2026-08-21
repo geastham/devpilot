@@ -158,10 +158,19 @@ export class ConductorWatcher {
     this.doFetch = opts.fetchImpl ?? fetch;
   }
 
-  /** Begin watching a run. Idempotent per bridge session. */
-  watch(run: WatchedRun): void {
+  /**
+   * Begin watching a run. Idempotent per bridge session.
+   *
+   * `alreadyReported` seeds the dedup signature with something the caller has
+   * just said. The dispatch handler announces the review gate itself, and
+   * without this the watcher's first sweep announced it again — AVA-13 carried
+   * two identical "Plan ready — 5 waves, 17 tasks, 71% parallel" activities
+   * seconds apart, which reads as the agent stuttering rather than working.
+   */
+  watch(run: WatchedRun, alreadyReported?: 'review'): void {
     if (this.runs.has(run.sessionId)) return;
     this.runs.set(run.sessionId, run);
+    if (alreadyReported) this.reported.set(run.sessionId, alreadyReported);
     this.persist();
     this.log(`watching ${run.linearIdentifier} (${this.runs.size} tracked)`);
     this.start();

@@ -290,8 +290,13 @@ export function createConductorDispatchHandler(
           });
           // Still hand it to the watcher: this claim is a *new* bridge session
           // for a run that was already in flight, and its completion has to be
-          // reported against this session id or Linear never hears back.
-          opts.watcher?.watch({ sessionId, itemId: item.id, linearIdentifier });
+          // reported against this session id or Linear never hears back. The
+          // state was just reported above, so seed the dedup signature or the
+          // watcher's first sweep repeats it on the ticket.
+          opts.watcher?.watch(
+            { sessionId, itemId: item.id, linearIdentifier },
+            current.awaiting === 'review' ? 'review' : undefined
+          );
           return;
         }
       } else {
@@ -372,7 +377,12 @@ export function createConductorDispatchHandler(
       // The run continues under the cockpit after this returns, so completion
       // is the watcher's job — it is what eventually calls
       // reportSessionComplete and makes the hosted side write back to Linear.
-      opts.watcher?.watch({ sessionId, itemId: item.id, linearIdentifier });
+      // The review gate was just reported; seed it so the ticket does not carry
+      // the same "Plan ready" activity twice, seconds apart.
+      opts.watcher?.watch(
+        { sessionId, itemId: item.id, linearIdentifier },
+        state.awaiting === 'review' ? 'review' : undefined
+      );
 
       // Deliberately returns here. See the header: waiting for a human to
       // approve would strand the queue claim.
