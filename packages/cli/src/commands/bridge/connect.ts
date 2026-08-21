@@ -50,6 +50,8 @@ function stableMachineName(): string {
 }
 import { ConductorWatcher } from './conductor-watcher';
 import { CommandApplier } from './command-applier';
+import { AdoptionWatcher } from './adoption-watcher';
+import { runIntrospection } from './introspect';
 
 interface ConnectOptions {
   url?: string;
@@ -66,6 +68,9 @@ interface ConnectOptions {
   httpUrl?: string;
   aoProject?: string;
   aoPath?: string;
+  discover?: boolean;
+  adopt?: boolean;
+  adoptAllRepos?: boolean;
 }
 
 export const connectCommand = new Command('connect')
@@ -108,6 +113,26 @@ export const connectCommand = new Command('connect')
     '--cockpit-url <url>',
     'Local cockpit base URL for --plan',
     process.env.DEVPILOT_COCKPIT_URL || 'http://127.0.0.1:3000',
+  )
+  /**
+   * Introspection — TRD 21.
+   *
+   * Discovery is ON by default because it is inert: a filesystem walk and
+   * `git remote`, producing rows a member must accept before anything routes.
+   * Adoption is OFF by default because it creates issues on a shared board,
+   * and a flag someone set once should not keep writing to their team's Linear
+   * every time a laptop reconnects.
+   */
+  .option('--no-discover', 'Do not report which repos this machine has agent history for')
+  .option(
+    '--adopt',
+    'Also put agent sessions already running on this machine onto the board',
+    process.env.DEVPILOT_BRIDGE_ADOPT === 'true',
+  )
+  .option(
+    '--adopt-all-repos',
+    'With --adopt, include repos this machine does not route (names them first)',
+    false,
   )
   .action(async (options: ConnectOptions) => {
     if (!options.url) {
@@ -233,6 +258,43 @@ export const connectCommand = new Command('connect')
           `   Resumed watching ${readopted} run${readopted === 1 ? '' : 's'} from a previous session`,
         ),
       );
+    }
+
+    /**
+     * Look around this machine — TRD 21 §8.1.
+     *
+     * Runs on every connect, unless switched off. It is cheap by construction:
+     * no model call, no board write, no Linear API call, just a filesystem walk
+     * and `git remote`. Adoption, which creates issues, stays behind `--adopt`.
+     *
+     * This is also the answer to the warning printed a few lines above. A first
+     * connect used to say "no repos, nothing can route here" and stop; now it
+     * follows that with the repos it can see.
+     */
+    const adoptionWatcher = new AdoptionWatcher({
+      client,
+      statePath: join(homedir(), '.devpilot', 'adoption-watch.json'),
+      onLog: (line) => console.log(chalk.blue(`   ${line}`)),
+    });
+
+    const resumedAdoptions = adoptionWatcher.restore();
+    if (resumedAdoptions > 0) {
+      console.log(
+        chalk.blue(
+          `   Watching ${resumedAdoptions} adopted session${resumedAdoptions === 1 ? '' : 's'} from a previous run`,
+        ),
+      );
+    }
+
+    if (options.discover !== false) {
+      await runIntrospection({
+        client,
+        machineName: options.name ?? stableMachineName(),
+        repos,
+        adopt: Boolean(options.adopt),
+        allRepos: Boolean(options.adoptAllRepos),
+        watcher: adoptionWatcher,
+      });
     }
 
     const loop = new DispatchLoop({

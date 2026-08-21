@@ -1,4 +1,4 @@
-import { RegisterRequest, RegisterResponse, TaskDispatchMessage, SessionStatusUpdate, SessionComplete, SharedSession, SessionMessage, SessionMessageKind, SessionParticipant } from '@devpilot.sh/bridge-protocol';
+import { RegisterRequest, RegisterResponse, TaskDispatchMessage, SessionStatusUpdate, SessionComplete, AdoptionRequest, AdoptionResponse, DiscoveryRequest, DiscoveryResponse, SharedSession, SessionMessage, SessionMessageKind, SessionParticipant } from '@devpilot.sh/bridge-protocol';
 export { RegisterRequest, RegisterResponse, SessionComplete, SessionStatus, SessionStatusUpdate, TaskDispatchMessage } from '@devpilot.sh/bridge-protocol';
 
 interface BridgeClientConfig {
@@ -106,6 +106,26 @@ declare class BridgeClient {
     pollSessionCommands(): Promise<SessionCommandMessage[]>;
     /** Close out commands once applied. Never throws: see the caller. */
     acknowledgeCommands(commandIds: string[], status: 'applied' | 'failed', error?: string): Promise<boolean>;
+    /**
+     * Offer agent sessions found already running on this machine — TRD 21 §7.1.
+     *
+     * The reverse of `poll`: that asks the bridge for work, this tells the bridge
+     * about work it never sent. THROWS, unlike `mirrorSessionPlan`, because
+     * adoption is something a user explicitly asked for and a silent failure
+     * would leave them staring at a board that did not change.
+     *
+     * The request carries no transcript content and cannot: `AdoptionRequest` is
+     * a `.strict()` schema with no field for it (TRD 21 DECISION B).
+     */
+    adoptSessions(request: AdoptionRequest): Promise<AdoptionResponse>;
+    /**
+     * Report the repositories this machine has agent history for — TRD 21 §7.2.
+     *
+     * Best-effort, and NEVER throws: this rides `bridge connect`, and a machine
+     * failing to connect because an inventory upload was refused would trade the
+     * product for a nicety. Callers get null and decide whether to mention it.
+     */
+    reportDiscovery(request: DiscoveryRequest): Promise<DiscoveryResponse | null>;
     /** Fixes the `getOrchestatorId` typo from 0.1.x. */
     getOrchestratorId(): string | null;
     setOrchestratorId(id: string): void;

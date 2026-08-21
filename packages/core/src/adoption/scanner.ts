@@ -79,6 +79,17 @@ export interface ScanResult {
   projectDirCount: number;
   /** Observations that survived probing, before any filtering. */
   observedCount: number;
+  /**
+   * `adoptionKey → where that session lives on disk`. LOCAL ONLY.
+   *
+   * Exists so the summarizer can re-read the one transcript it needs without
+   * the scan holding every `headSample` in memory — and, more importantly,
+   * without `SessionObservation` (which carries transcript text) ever becoming
+   * part of the value that gets uploaded. The scan's return type is one
+   * careless `JSON.stringify` away from the network; keeping transcript samples
+   * out of it is structural, not stylistic.
+   */
+  transcriptPaths: Map<string, { transcriptPath: string; sessionUuid: string }>;
 }
 
 const DEFAULT_LIVE_WITHIN_MS = 15 * 60 * 1000;
@@ -204,6 +215,7 @@ export function scanSessions(options: ScanOptions): ScanResult {
 
   const candidates: AdoptionCandidate[] = [];
   const skipped: SkippedSession[] = [];
+  const transcriptPaths = new Map<string, { transcriptPath: string; sessionUuid: string }>();
   const inventory = new Map<
     string,
     DiscoveredRepo & { cwds: Set<string> }
@@ -227,6 +239,7 @@ export function scanSessions(options: ScanOptions): ScanResult {
       skipped: [],
       projectDirCount: 0,
       observedCount: 0,
+      transcriptPaths: new Map(),
     };
   }
 
@@ -319,8 +332,11 @@ export function scanSessions(options: ScanOptions): ScanResult {
         ? resolveTouchedPaths(observation.cwd, ADOPTION_LIMITS.MAX_TOUCHED_PATHS)
         : [];
 
+      const adoptionKey = adoptionKeyFor(options.machineName, sessionUuid);
+      transcriptPaths.set(adoptionKey, { transcriptPath, sessionUuid });
+
       candidates.push({
-        adoptionKey: adoptionKeyFor(options.machineName, sessionUuid),
+        adoptionKey,
         agent: 'claude-code',
         title: heuristicTitle(observation),
         repo: identity.repo,
@@ -350,6 +366,7 @@ export function scanSessions(options: ScanOptions): ScanResult {
     skipped,
     projectDirCount,
     observedCount,
+    transcriptPaths,
   };
 }
 

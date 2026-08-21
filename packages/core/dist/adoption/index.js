@@ -365,6 +365,7 @@ function scanSessions(options) {
   const routed = new Set((options.repos ?? []).map((r) => r.toLowerCase()));
   const candidates = [];
   const skipped = [];
+  const transcriptPaths = /* @__PURE__ */ new Map();
   const inventory = /* @__PURE__ */ new Map();
   let unmappedProjectCount = 0;
   let projectDirCount = 0;
@@ -379,7 +380,8 @@ function scanSessions(options) {
       unmappedProjectCount: 0,
       skipped: [],
       projectDirCount: 0,
-      observedCount: 0
+      observedCount: 0,
+      transcriptPaths: /* @__PURE__ */ new Map()
     };
   }
   for (const projectSlug of projectDirs) {
@@ -451,8 +453,10 @@ function scanSessions(options) {
       }
       const startedAt = observation.startedAt ?? observation.lastActivityAt;
       const touchedPaths = includePaths ? resolveTouchedPaths(observation.cwd, import_bridge_protocol.ADOPTION_LIMITS.MAX_TOUCHED_PATHS) : [];
+      const adoptionKey = adoptionKeyFor(options.machineName, sessionUuid);
+      transcriptPaths.set(adoptionKey, { transcriptPath, sessionUuid });
       candidates.push({
-        adoptionKey: adoptionKeyFor(options.machineName, sessionUuid),
+        adoptionKey,
         agent: "claude-code",
         title: heuristicTitle(observation),
         repo: identity.repo,
@@ -474,7 +478,8 @@ function scanSessions(options) {
     unmappedProjectCount,
     skipped,
     projectDirCount,
-    observedCount
+    observedCount,
+    transcriptPaths
   };
 }
 function groupByOwner(repos) {

@@ -248,6 +248,20 @@ interface ScanResult {
     projectDirCount: number;
     /** Observations that survived probing, before any filtering. */
     observedCount: number;
+    /**
+     * `adoptionKey → where that session lives on disk`. LOCAL ONLY.
+     *
+     * Exists so the summarizer can re-read the one transcript it needs without
+     * the scan holding every `headSample` in memory — and, more importantly,
+     * without `SessionObservation` (which carries transcript text) ever becoming
+     * part of the value that gets uploaded. The scan's return type is one
+     * careless `JSON.stringify` away from the network; keeping transcript samples
+     * out of it is structural, not stylistic.
+     */
+    transcriptPaths: Map<string, {
+        transcriptPath: string;
+        sessionUuid: string;
+    }>;
 }
 declare function defaultProjectsRoot(): string;
 /**

@@ -35,7 +35,7 @@ __export(cli_exports, {
   runCli: () => runCli
 });
 module.exports = __toCommonJS(cli_exports);
-var import_commander17 = require("commander");
+var import_commander18 = require("commander");
 var import_update_notifier = __toESM(require("update-notifier"));
 
 // src/version.ts
@@ -276,8 +276,8 @@ var linearCommand = new import_commander4.Command("linear").description("Configu
     }
     console.log(import_chalk4.default.cyan("Testing Linear connection..."));
     try {
-      const client = import_core.linear.initLinearClient({ apiKey, teamId });
-      const team = await client.getTeam();
+      const client2 = import_core.linear.initLinearClient({ apiKey, teamId });
+      const team = await client2.getTeam();
       console.log(import_chalk4.default.green(`Connected to Linear team: ${team.name} (${team.key})`));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
@@ -922,7 +922,7 @@ var import_commander9 = require("commander");
 // src/commands/bridge/connect.ts
 var import_os2 = __toESM(require("os"));
 var import_commander6 = require("commander");
-var import_chalk7 = __toESM(require("chalk"));
+var import_chalk9 = __toESM(require("chalk"));
 var import_bridge_client = require("@devpilot.sh/bridge-client");
 
 // src/commands/bridge/dispatch-handler.ts
@@ -1108,8 +1108,8 @@ async function existingItem(cockpitUrl, linearTicketId, timeoutMs) {
 function sessionLink(hosted, sessionId) {
   return `${hosted}/sessions/${sessionId}`;
 }
-function hostedBase(client) {
-  return typeof client.hostedUrl === "function" ? client.hostedUrl() : "";
+function hostedBase(client2) {
+  return typeof client2.hostedUrl === "function" ? client2.hostedUrl() : "";
 }
 function linkOrText(hosted, sessionId, text) {
   return hosted ? `[${text}](${sessionLink(hosted, sessionId)})` : text;
@@ -1244,9 +1244,9 @@ function createConductorDispatchHandler(opts) {
 }
 
 // src/commands/bridge/connect.ts
-var import_node_os = require("os");
-var import_node_path2 = require("path");
-var import_node_fs2 = require("fs");
+var import_node_os2 = require("os");
+var import_node_path4 = require("path");
+var import_node_fs3 = require("fs");
 
 // src/commands/bridge/conductor-watcher.ts
 var import_node_fs = require("fs");
@@ -1589,20 +1589,393 @@ var CommandApplier = class {
   }
 };
 
+// src/commands/bridge/adoption-watcher.ts
+var import_node_fs2 = require("fs");
+var import_node_path2 = require("path");
+var DEFAULT_SETTLE_MS = 30 * 60 * 1e3;
+var DEFAULT_TICK_MS = 6e4;
+var AdoptionWatcher = class {
+  constructor(config) {
+    this.config = config;
+    this.entries = /* @__PURE__ */ new Map();
+    this.timer = null;
+    this.settleAfterMs = config.settleAfterMs ?? DEFAULT_SETTLE_MS;
+    this.tickMs = config.tickMs ?? DEFAULT_TICK_MS;
+  }
+  /** Begin watching a freshly adopted session. */
+  track(entry) {
+    this.entries.set(entry.adoptionKey, entry);
+    this.persist();
+    this.start();
+  }
+  /**
+   * Re-adopt entries left behind by a previous process.
+   *
+   * Entries whose transcript no longer exists are dropped rather than polled
+   * forever: stale local state must not outlive the thing it describes.
+   */
+  restore() {
+    try {
+      if (!(0, import_node_fs2.existsSync)(this.config.statePath)) return 0;
+      const parsed = JSON.parse((0, import_node_fs2.readFileSync)(this.config.statePath, "utf8"));
+      if (parsed?.version !== 1 || !parsed.entries) return 0;
+      let restored = 0;
+      for (const entry of Object.values(parsed.entries)) {
+        if (entry.settled) continue;
+        if (!(0, import_node_fs2.existsSync)(entry.transcriptPath)) continue;
+        this.entries.set(entry.adoptionKey, entry);
+        restored++;
+      }
+      if (restored > 0) this.start();
+      return restored;
+    } catch {
+      return 0;
+    }
+  }
+  size() {
+    return [...this.entries.values()].filter((e) => !e.settled).length;
+  }
+  start() {
+    if (this.timer) return;
+    this.timer = setInterval(() => void this.sweep(), this.tickMs);
+    this.timer.unref?.();
+  }
+  stop() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    this.persist();
+  }
+  /** One pass. Never throws: a reporting failure is retried on the next tick. */
+  async sweep(now = Date.now()) {
+    for (const entry of [...this.entries.values()]) {
+      if (entry.settled) continue;
+      let mtimeMs;
+      try {
+        mtimeMs = (0, import_node_fs2.statSync)(entry.transcriptPath).mtimeMs;
+      } catch {
+        this.entries.delete(entry.adoptionKey);
+        this.persist();
+        continue;
+      }
+      if (mtimeMs > entry.lastMtimeMs) {
+        entry.lastMtimeMs = mtimeMs;
+        entry.lastReportedAt = new Date(now).toISOString();
+        this.persist();
+        try {
+          await this.config.client.reportSessionStatus(entry.sessionId, {
+            status: "running",
+            progressPercent: 0,
+            message: `Still running on this machine \u2014 ${elapsed(entry.startedAt, now)} so far`
+          });
+        } catch (err) {
+          this.config.onLog?.(
+            `could not report ${entry.identifier}: ${err instanceof Error ? err.message : err}`
+          );
+        }
+        continue;
+      }
+      if (now - mtimeMs < this.settleAfterMs) continue;
+      try {
+        await this.config.client.reportSessionComplete(entry.sessionId, {
+          success: true,
+          summary: `The session stopped writing after ${elapsed(entry.startedAt, mtimeMs)}. DevPilot observed it rather than running it, so whether the work is finished is not something it can say.`
+        });
+        entry.settled = true;
+        this.persist();
+        this.config.onLog?.(`${entry.identifier} went quiet \u2014 reported, ticket left as it was`);
+      } catch (err) {
+        this.config.onLog?.(
+          `could not settle ${entry.identifier}: ${err instanceof Error ? err.message : err}`
+        );
+      }
+    }
+    if (this.size() === 0) this.stop();
+  }
+  persist() {
+    try {
+      (0, import_node_fs2.mkdirSync)((0, import_node_path2.dirname)(this.config.statePath), { recursive: true });
+      const ledger = { version: 1, entries: Object.fromEntries(this.entries) };
+      (0, import_node_fs2.writeFileSync)(this.config.statePath, JSON.stringify(ledger, null, 2), "utf8");
+    } catch {
+    }
+  }
+};
+function elapsed(startedAt, endMs) {
+  const ms = endMs - Date.parse(startedAt);
+  if (!Number.isFinite(ms) || ms < 0) return "an unknown time";
+  const minutes = Math.round(ms / 6e4);
+  if (minutes < 1) return "under a minute";
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0 ? `${hours} hour${hours === 1 ? "" : "s"}` : `${hours}h ${rest}m`;
+}
+
+// src/commands/bridge/introspect.ts
+var import_chalk8 = __toESM(require("chalk"));
+var import_core5 = require("@devpilot.sh/core");
+
+// src/commands/sessions/scan-pipeline.ts
+var import_node_os = require("os");
+var import_node_path3 = require("path");
+var import_chalk7 = __toESM(require("chalk"));
+var import_core4 = require("@devpilot.sh/core");
+function parseDuration(input, fallbackMs) {
+  const match = /^(\d+)\s*([smhdw])?$/i.exec(input.trim());
+  if (!match) return fallbackMs;
+  const value = Number(match[1]);
+  const unit = (match[2] ?? "h").toLowerCase();
+  const scale = {
+    s: 1e3,
+    m: 6e4,
+    h: 36e5,
+    d: 864e5,
+    w: 6048e5
+  };
+  return value * (scale[unit] ?? scale.h);
+}
+async function runScanPipeline(options) {
+  const repos = options.onlyRepo ? [options.onlyRepo] : options.repos;
+  const scan = import_core4.adoption.scanSessions({
+    machineName: options.machineName,
+    repos,
+    // `--repo x` is an explicit narrowing, so it must not be widened by
+    // `--all-repos` arriving from a config file or an alias.
+    allRepos: options.onlyRepo ? false : options.allRepos,
+    sinceMs: options.sinceMs,
+    includePaths: options.includePaths,
+    excludeSessionUuids: import_core4.adoption.loadOwnedSessionIds(
+      (0, import_node_path3.join)((0, import_node_os.homedir)(), ".devpilot", "owned-sessions.json")
+    )
+  });
+  let modelTitles = 0;
+  if (options.summarize && scan.candidates.length > 0 && process.env.ANTHROPIC_API_KEY) {
+    const jobs = scan.candidates.map((candidate) => {
+      const observation = observationFor(candidate, scan);
+      return observation ? { candidate, observation } : null;
+    }).filter((j) => j !== null);
+    const summaries = await import_core4.adoption.summarizeSessions(
+      jobs.map((j) => ({
+        observation: j.observation,
+        touchedPaths: j.candidate.touchedPaths ?? []
+      })),
+      { maxSummaries: options.maxSummaries, onWarn: options.onWarn }
+    );
+    summaries.forEach((summary, i) => {
+      const candidate = jobs[i].candidate;
+      candidate.title = summary.title;
+      if (summary.summary) candidate.summary = summary.summary;
+      if (summary.source === "model") modelTitles++;
+    });
+  }
+  return {
+    candidates: scan.candidates,
+    discovered: scan.discovered,
+    unmappedProjectCount: scan.unmappedProjectCount,
+    skipped: scan.skipped,
+    projectDirCount: scan.projectDirCount,
+    withheldOwners: import_core4.adoption.withheldOwners(scan.skipped),
+    modelTitles,
+    transcriptPaths: scan.transcriptPaths
+  };
+}
+function observationFor(candidate, scan) {
+  const path = scan.transcriptPaths?.get(candidate.adoptionKey);
+  if (!path) return null;
+  return import_core4.adoption.probeTranscript(path.transcriptPath, path.sessionUuid);
+}
+function relativeAge(iso, now = Date.now()) {
+  const ms = now - Date.parse(iso);
+  if (!Number.isFinite(ms) || ms < 0) return "\u2014";
+  const minutes = Math.round(ms / 6e4);
+  if (minutes < 1) return "now";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h`;
+  return `${Math.round(hours / 24)}d`;
+}
+function pad(value, width) {
+  return value.length > width ? `${value.slice(0, width - 1)}\u2026` : value.padEnd(width);
+}
+function renderPreview(rows, result) {
+  const lines = [];
+  lines.push(
+    import_chalk7.default.gray(
+      `  Scanned ${result.projectDirCount} project director${result.projectDirCount === 1 ? "y" : "ies"} \xB7 ${result.candidates.length} session${result.candidates.length === 1 ? "" : "s"} in scope`
+    )
+  );
+  lines.push("");
+  if (rows.length > 0) {
+    lines.push(
+      import_chalk7.default.gray(`  ${pad("REPO", 30)} ${pad("SESSION", 44)} ${pad("LAST", 6)} \u2192 BOARD`)
+    );
+    for (const row of rows) {
+      lines.push(
+        `  ${import_chalk7.default.cyan(pad(row.repo, 30))} ${pad(row.title, 44)} ${row.live ? import_chalk7.default.green(pad(relativeAge(row.lastActivityAt), 5)) + "\u25CF" : import_chalk7.default.gray(pad(relativeAge(row.lastActivityAt), 6))} \u2192 ${row.destination}`
+      );
+    }
+    lines.push("");
+  }
+  const reasons = /* @__PURE__ */ new Map();
+  for (const skip of result.skipped) {
+    reasons.set(skip.reason, (reasons.get(skip.reason) ?? 0) + 1);
+  }
+  const parts = [];
+  const label = {
+    "not-routed": "not routed",
+    "devpilot-owned": "DevPilot-owned",
+    "too-old": "outside the window",
+    "no-repo": "no git remote",
+    sidechain: "subagent transcripts",
+    empty: "empty",
+    unreadable: "unreadable"
+  };
+  for (const [reason, count] of reasons) {
+    if (reason === "not-routed" && result.withheldOwners.length > 0) {
+      parts.push(`${count} not routed (${result.withheldOwners.join(", ")})`);
+    } else {
+      parts.push(`${count} ${label[reason] ?? reason}`);
+    }
+  }
+  if (parts.length > 0) {
+    lines.push(import_chalk7.default.gray(`  Skipped: ${parts.join(", ")}`));
+    if (reasons.has("not-routed")) {
+      lines.push(import_chalk7.default.gray("           Run with --all-repos to include the others."));
+    }
+  }
+  return lines.join("\n");
+}
+
+// src/commands/bridge/introspect.ts
+async function runIntrospection(options) {
+  let result;
+  try {
+    result = await runScanPipeline({
+      machineName: options.machineName,
+      repos: options.repos,
+      allRepos: options.allRepos,
+      sinceMs: 24 * 60 * 60 * 1e3,
+      includePaths: true,
+      maxSummaries: 25,
+      // Only pay for titles when they are about to be written somewhere.
+      summarize: options.adopt,
+      onWarn: (line) => console.log(import_chalk8.default.gray(`   ${line}`))
+    });
+  } catch (err) {
+    console.log(import_chalk8.default.gray(`   Could not look around this machine: ${describe2(err)}`));
+    return;
+  }
+  if (result.projectDirCount === 0) {
+    return;
+  }
+  const live = result.discovered.reduce((n, r) => n + r.liveSessionCount, 0);
+  const owners = import_core5.adoption.groupByOwner(result.discovered);
+  console.log(
+    import_chalk8.default.cyan(
+      `   Looked around this machine: ${result.projectDirCount} projects, ${owners.size} owner${owners.size === 1 ? "" : "s"}, ${result.discovered.reduce((n, r) => n + r.sessionCount, 0)} sessions`
+    )
+  );
+  console.log("");
+  const sorted = [...owners.entries()].sort(
+    (a, b) => b[1].reduce((n, r) => n + r.sessionCount, 0) - a[1].reduce((n, r) => n + r.sessionCount, 0)
+  );
+  for (const [owner, repos] of sorted.slice(0, 8)) {
+    const sessions = repos.reduce((n, r) => n + r.sessionCount, 0);
+    const liveHere = repos.reduce((n, r) => n + r.liveSessionCount, 0);
+    console.log(
+      `     ${import_chalk8.default.bold(owner.padEnd(18))} ${String(repos.length).padStart(2)} repo${repos.length === 1 ? " " : "s"}   ${String(sessions).padStart(4)} session${sessions === 1 ? " " : "s"}` + (liveHere > 0 ? import_chalk8.default.green(`   \u25CF ${liveHere} live`) : "")
+    );
+  }
+  if (sorted.length > 8) {
+    console.log(import_chalk8.default.gray(`     \u2026 and ${sorted.length - 8} more`));
+  }
+  console.log("");
+  const discovery = await options.client.reportDiscovery({
+    machineName: options.machineName,
+    repos: result.discovered,
+    unmappedProjectCount: result.unmappedProjectCount
+  });
+  if (discovery && discovery.proposed > 0) {
+    console.log(
+      import_chalk8.default.gray(
+        `     ${discovery.proposed} repo${discovery.proposed === 1 ? "" : "s"} not yet routed \u2014 review at ${options.client.hostedUrl()}/fleet/discovered`
+      )
+    );
+    console.log("");
+  } else if (!discovery) {
+    console.log(import_chalk8.default.gray("     (could not report the inventory \u2014 the bridge is still fine)"));
+    console.log("");
+  }
+  if (live > 0 && !options.adopt) {
+    console.log(
+      import_chalk8.default.gray(
+        `     ${live} of these are running right now. \`devpilot sessions scan\` shows what putting them on the board would do.`
+      )
+    );
+    console.log("");
+  }
+  if (!options.adopt || result.candidates.length === 0) return;
+  try {
+    const response = await options.client.adoptSessions({
+      machineName: options.machineName,
+      candidates: result.candidates,
+      dryRun: false
+    });
+    console.log(
+      import_chalk8.default.green(
+        `   \u2713 Adopted ${response.adopted}, attached ${response.attached}, ${response.duplicates} already tracked, ${response.skipped} skipped`
+      )
+    );
+    const byKey = new Map(result.candidates.map((c) => [c.adoptionKey, c]));
+    for (const outcome of response.outcomes) {
+      if (outcome.status !== "adopted" && outcome.status !== "attached") continue;
+      if (!outcome.sessionId || !outcome.linearIdentifier) continue;
+      const candidate = byKey.get(outcome.adoptionKey);
+      const location = result.transcriptPaths?.get(outcome.adoptionKey);
+      if (!candidate?.live || !location) continue;
+      options.watcher.track({
+        adoptionKey: outcome.adoptionKey,
+        sessionId: outcome.sessionId,
+        identifier: outcome.linearIdentifier,
+        transcriptPath: location.transcriptPath,
+        repo: candidate.repo,
+        startedAt: candidate.startedAt,
+        lastMtimeMs: Date.parse(candidate.lastActivityAt),
+        lastReportedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        settled: false
+      });
+    }
+    if (options.watcher.size() > 0) {
+      console.log(
+        import_chalk8.default.gray(
+          `     Watching ${options.watcher.size()} of them. They are observed, not dispatched \u2014 no ticket will be moved.`
+        )
+      );
+    }
+    console.log("");
+  } catch (err) {
+    console.log(import_chalk8.default.yellow(`   Could not adopt: ${describe2(err)}`));
+    console.log("");
+  }
+}
+function describe2(err) {
+  return err instanceof Error ? err.message : String(err);
+}
+
 // src/commands/bridge/connect.ts
 function stableMachineName() {
-  const path = (0, import_node_path2.join)((0, import_node_os.homedir)(), ".devpilot", "machine.json");
+  const path = (0, import_node_path4.join)((0, import_node_os2.homedir)(), ".devpilot", "machine.json");
   try {
-    if ((0, import_node_fs2.existsSync)(path)) {
-      const saved = JSON.parse((0, import_node_fs2.readFileSync)(path, "utf8"));
+    if ((0, import_node_fs3.existsSync)(path)) {
+      const saved = JSON.parse((0, import_node_fs3.readFileSync)(path, "utf8"));
       if (saved.name) return saved.name;
     }
   } catch {
   }
   const name = import_os2.default.hostname();
   try {
-    (0, import_node_fs2.mkdirSync)((0, import_node_path2.dirname)(path), { recursive: true });
-    (0, import_node_fs2.writeFileSync)(path, JSON.stringify({ name }, null, 2), "utf8");
+    (0, import_node_fs3.mkdirSync)((0, import_node_path4.dirname)(path), { recursive: true });
+    (0, import_node_fs3.writeFileSync)(path, JSON.stringify({ name }, null, 2), "utf8");
   } catch {
   }
   return name;
@@ -1627,82 +2000,90 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
   "--cockpit-url <url>",
   "Local cockpit base URL for --plan",
   process.env.DEVPILOT_COCKPIT_URL || "http://127.0.0.1:3000"
+).option("--no-discover", "Do not report which repos this machine has agent history for").option(
+  "--adopt",
+  "Also put agent sessions already running on this machine onto the board",
+  process.env.DEVPILOT_BRIDGE_ADOPT === "true"
+).option(
+  "--adopt-all-repos",
+  "With --adopt, include repos this machine does not route (names them first)",
+  false
 ).action(async (options) => {
   if (!options.url) {
-    console.error(import_chalk7.default.red("\u2717 Bridge URL required (--url or DEVPILOT_BRIDGE_URL)"));
+    console.error(import_chalk9.default.red("\u2717 Bridge URL required (--url or DEVPILOT_BRIDGE_URL)"));
     process.exit(1);
   }
   if (!options.token) {
-    console.error(import_chalk7.default.red("\u2717 Token required (--token or DEVPILOT_BRIDGE_TOKEN)"));
-    console.error(import_chalk7.default.gray("  Mint one in the dashboard under Settings \u2192 Tokens."));
+    console.error(import_chalk9.default.red("\u2717 Token required (--token or DEVPILOT_BRIDGE_TOKEN)"));
+    console.error(import_chalk9.default.gray("  Mint one in the dashboard under Settings \u2192 Tokens."));
     process.exit(1);
   }
   const repos = options.repos?.split(",").map((r) => r.trim()).filter(Boolean) ?? [];
   const maxConcurrentJobs = Math.max(1, parseInt(options.maxJobs, 10) || 4);
-  console.log(import_chalk7.default.cyan("\u{1F309} DevPilot bridge"));
-  console.log(import_chalk7.default.gray(`   ${options.url}`));
-  console.log(import_chalk7.default.gray(`   machine: ${options.name}`));
+  console.log(import_chalk9.default.cyan("\u{1F309} DevPilot bridge"));
+  console.log(import_chalk9.default.gray(`   ${options.url}`));
+  console.log(import_chalk9.default.gray(`   machine: ${options.name}`));
   console.log("");
   const usesLocalOrchestrator = !options.plan;
   if (usesLocalOrchestrator && options.mode === "ao-cli") {
-    console.error(import_chalk7.default.red("\u2717 --mode ao-cli is deprecated and non-functional."));
-    console.error(import_chalk7.default.gray("  `ao` is now a daemon on 127.0.0.1:3001; point http mode at it:"));
-    console.error(import_chalk7.default.gray("    devpilot bridge connect --mode http --http-url http://127.0.0.1:3001"));
+    console.error(import_chalk9.default.red("\u2717 --mode ao-cli is deprecated and non-functional."));
+    console.error(import_chalk9.default.gray("  `ao` is now a daemon on 127.0.0.1:3001; point http mode at it:"));
+    console.error(import_chalk9.default.gray("    devpilot bridge connect --mode http --http-url http://127.0.0.1:3001"));
     process.exit(1);
   }
   if (usesLocalOrchestrator && options.mode === "http" && !options.httpUrl) {
-    console.error(import_chalk7.default.red("\u2717 --mode http requires --http-url"));
-    console.error(import_chalk7.default.gray("  For the ao daemon: --http-url http://127.0.0.1:3001"));
+    console.error(import_chalk9.default.red("\u2717 --mode http requires --http-url"));
+    console.error(import_chalk9.default.gray("  For the ao daemon: --http-url http://127.0.0.1:3001"));
     process.exit(1);
   }
   if (usesLocalOrchestrator && options.mode === "claude-session" && !options.sessionApiUrl) {
-    console.error(import_chalk7.default.red("\u2717 --mode claude-session requires --session-api-url"));
-    console.error(import_chalk7.default.gray("  Start the runner, then point at it:"));
-    console.error(import_chalk7.default.gray("    devpilot session-runner --port 3900 --token <t>"));
-    console.error(import_chalk7.default.gray("    \u2026 --session-api-url http://127.0.0.1:3900 --session-api-key <t>"));
+    console.error(import_chalk9.default.red("\u2717 --mode claude-session requires --session-api-url"));
+    console.error(import_chalk9.default.gray("  Start the runner, then point at it:"));
+    console.error(import_chalk9.default.gray("    devpilot session-runner --port 3900 --token <t>"));
+    console.error(import_chalk9.default.gray("    \u2026 --session-api-url http://127.0.0.1:3900 --session-api-key <t>"));
     process.exit(1);
   }
-  const client = new import_bridge_client.BridgeClient({ bridgeUrl: options.url, token: options.token });
+  const client2 = new import_bridge_client.BridgeClient({ bridgeUrl: options.url, token: options.token });
   let registration;
   try {
     const machineName = options.name ?? stableMachineName();
-    registration = await client.register({ name: machineName, repos, maxConcurrentJobs });
+    registration = await client2.register({ name: machineName, repos, maxConcurrentJobs });
   } catch (err) {
-    console.error(import_chalk7.default.red("\u2717 Registration failed"));
-    console.error(import_chalk7.default.red(`   ${err instanceof Error ? err.message : err}`));
+    console.error(import_chalk9.default.red("\u2717 Registration failed"));
+    console.error(import_chalk9.default.red(`   ${err instanceof Error ? err.message : err}`));
     process.exit(1);
   }
-  console.log(import_chalk7.default.green("\u2713 Registered"));
-  console.log(import_chalk7.default.gray(`   orchestrator: ${registration.orchestratorId}`));
-  console.log(import_chalk7.default.gray(`   repos: ${repos.join(", ") || "(none)"}`));
+  console.log(import_chalk9.default.green("\u2713 Registered"));
+  console.log(import_chalk9.default.gray(`   orchestrator: ${registration.orchestratorId}`));
+  console.log(import_chalk9.default.gray(`   repos: ${repos.join(", ") || "(none)"}`));
   if (repos.length === 0) {
-    console.log(import_chalk7.default.yellow("   \u26A0 No repos specified \u2014 nothing can route to this machine."));
-    console.log(import_chalk7.default.gray("     Re-run with --repos owner/name to receive dispatches."));
+    console.log(import_chalk9.default.yellow("   \u26A0 No repos specified \u2014 nothing can route to this machine."));
+    console.log(import_chalk9.default.gray("     Re-run with --repos owner/name to receive dispatches."));
   }
   console.log("");
   const useRealtime = options.transport !== "poll" && registration.realtime !== null;
   if (options.transport !== "poll" && !registration.realtime) {
-    console.log(import_chalk7.default.yellow("   Realtime unavailable from this bridge \u2014 polling instead."));
+    console.log(import_chalk9.default.yellow("   Realtime unavailable from this bridge \u2014 polling instead."));
   }
   const conductorWatcher = options.plan ? new ConductorWatcher({
-    client,
+    client: client2,
     cockpitUrl: options.cockpitUrl,
     // Survives a restart. Without this, upgrading the CLI or closing a
     // laptop lid orphaned every in-flight run: the cockpit kept working
     // and Linear was never told how any of it ended.
-    statePath: (0, import_node_path2.join)((0, import_node_os.homedir)(), ".devpilot", "conductor-watch.json"),
-    onLog: (line) => console.log(import_chalk7.default.blue(`   ${line}`)),
+    statePath: (0, import_node_path4.join)((0, import_node_os2.homedir)(), ".devpilot", "conductor-watch.json"),
+    onLog: (line) => console.log(import_chalk9.default.blue(`   ${line}`)),
     onLost: (run) => console.log(
-      import_chalk7.default.yellow(
+      import_chalk9.default.yellow(
         `   ${run.linearIdentifier} still running at shutdown \u2014 it will be picked up on the next start`
       )
     )
   }) : null;
   const commandApplier = options.plan && conductorWatcher ? new CommandApplier({
-    client,
+    client: client2,
     cockpitUrl: options.cockpitUrl,
     resolveItemId: (sessionId) => conductorWatcher.itemFor(sessionId),
-    onLog: (line) => console.log(import_chalk7.default.blue(`   ${line}`))
+    onLog: (line) => console.log(import_chalk9.default.blue(`   ${line}`))
   }) : null;
   if (commandApplier) {
     const tick = () => void commandApplier.sweep();
@@ -1712,13 +2093,36 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
   const readopted = conductorWatcher?.restore() ?? 0;
   if (readopted > 0) {
     console.log(
-      import_chalk7.default.blue(
+      import_chalk9.default.blue(
         `   Resumed watching ${readopted} run${readopted === 1 ? "" : "s"} from a previous session`
       )
     );
   }
+  const adoptionWatcher = new AdoptionWatcher({
+    client: client2,
+    statePath: (0, import_node_path4.join)((0, import_node_os2.homedir)(), ".devpilot", "adoption-watch.json"),
+    onLog: (line) => console.log(import_chalk9.default.blue(`   ${line}`))
+  });
+  const resumedAdoptions = adoptionWatcher.restore();
+  if (resumedAdoptions > 0) {
+    console.log(
+      import_chalk9.default.blue(
+        `   Watching ${resumedAdoptions} adopted session${resumedAdoptions === 1 ? "" : "s"} from a previous run`
+      )
+    );
+  }
+  if (options.discover !== false) {
+    await runIntrospection({
+      client: client2,
+      machineName: options.name ?? stableMachineName(),
+      repos,
+      adopt: Boolean(options.adopt),
+      allRepos: Boolean(options.adoptAllRepos),
+      watcher: adoptionWatcher
+    });
+  }
   const loop = new import_bridge_client.DispatchLoop({
-    client,
+    client: client2,
     orchestratorId: registration.orchestratorId,
     realtime: useRealtime && registration.realtime ? {
       supabaseUrl: registration.realtime.supabaseUrl,
@@ -1727,43 +2131,43 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
     } : null,
     maxConcurrent: maxConcurrentJobs,
     handler: options.plan ? createConductorDispatchHandler({
-      client,
+      client: client2,
       cockpitUrl: options.cockpitUrl,
       watcher: conductorWatcher,
-      onLog: (line) => console.log(import_chalk7.default.blue(`   ${line}`))
+      onLog: (line) => console.log(import_chalk9.default.blue(`   ${line}`))
     }) : createBridgeDispatchHandler({
-      client,
+      client: client2,
       orchestratorMode: options.mode,
       httpUrl: options.httpUrl,
       sessionApiUrl: options.sessionApiUrl,
       sessionApiKey: options.sessionApiKey,
       aoProjectName: options.aoProject,
       aoPath: options.aoPath,
-      onLog: (line) => console.log(import_chalk7.default.blue(`   ${line}`))
+      onLog: (line) => console.log(import_chalk9.default.blue(`   ${line}`))
     }),
-    onLog: (line) => console.log(import_chalk7.default.gray(`   ${line}`)),
-    onError: (e) => console.log(import_chalk7.default.yellow(`   ${e.message}`))
+    onLog: (line) => console.log(import_chalk9.default.gray(`   ${line}`)),
+    onError: (e) => console.log(import_chalk9.default.yellow(`   ${e.message}`))
   });
   const heartbeat = new import_bridge_client.HeartbeatService({
-    client,
+    client: client2,
     activeJobs: () => loop.activeJobs,
-    onError: (e) => console.log(import_chalk7.default.gray(`   heartbeat: ${e.message}`))
+    onError: (e) => console.log(import_chalk9.default.gray(`   heartbeat: ${e.message}`))
   });
   await loop.start();
   heartbeat.start();
-  console.log(import_chalk7.default.green(`\u2713 Listening (${useRealtime ? "realtime" : "poll"})`));
-  console.log(import_chalk7.default.gray("   Agents run on THIS machine. Ctrl+C to disconnect."));
+  console.log(import_chalk9.default.green(`\u2713 Listening (${useRealtime ? "realtime" : "poll"})`));
+  console.log(import_chalk9.default.gray("   Agents run on THIS machine. Ctrl+C to disconnect."));
   console.log("");
   let shuttingDown = false;
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log("");
-    console.log(import_chalk7.default.yellow("Disconnecting\u2026"));
+    console.log(import_chalk9.default.yellow("Disconnecting\u2026"));
     heartbeat.stop();
     conductorWatcher?.stop();
     await loop.stop();
-    console.log(import_chalk7.default.green("\u2713 Disconnected"));
+    console.log(import_chalk9.default.green("\u2713 Disconnected"));
     process.exit(0);
   };
   process.on("SIGINT", () => void shutdown());
@@ -1774,17 +2178,17 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
 
 // src/commands/bridge/disconnect.ts
 var import_commander7 = require("commander");
-var import_chalk8 = __toESM(require("chalk"));
+var import_chalk10 = __toESM(require("chalk"));
 var disconnectCommand = new import_commander7.Command("disconnect").description("Disconnect from DevPilot cloud bridge").option("-u, --bridge-url <url>", "Bridge service URL", process.env.DEVPILOT_BRIDGE_URL).option("-k, --api-key <key>", "API key", process.env.DEVPILOT_BRIDGE_API_KEY).option("-i, --orchestrator-id <id>", "Orchestrator ID to disconnect").action(async (options) => {
   if (!options.bridgeUrl || !options.orchestratorId) {
-    console.error(import_chalk8.default.red("\u2717 Error: Bridge URL and orchestrator ID required"));
-    console.error(import_chalk8.default.gray("   Use: devpilot bridge disconnect -u <url> -i <orchestrator-id>"));
+    console.error(import_chalk10.default.red("\u2717 Error: Bridge URL and orchestrator ID required"));
+    console.error(import_chalk10.default.gray("   Use: devpilot bridge disconnect -u <url> -i <orchestrator-id>"));
     process.exit(1);
   }
-  console.log(import_chalk8.default.cyan("\u{1F309} Disconnecting from DevPilot Bridge"));
+  console.log(import_chalk10.default.cyan("\u{1F309} Disconnecting from DevPilot Bridge"));
   console.log("");
-  console.log(import_chalk8.default.gray(`   Bridge URL: ${options.bridgeUrl}`));
-  console.log(import_chalk8.default.gray(`   Orchestrator ID: ${options.orchestratorId}`));
+  console.log(import_chalk10.default.gray(`   Bridge URL: ${options.bridgeUrl}`));
+  console.log(import_chalk10.default.gray(`   Orchestrator ID: ${options.orchestratorId}`));
   console.log("");
   try {
     const response = await fetch(
@@ -1797,39 +2201,39 @@ var disconnectCommand = new import_commander7.Command("disconnect").description(
       }
     );
     if (response.ok) {
-      console.log(import_chalk8.default.green("\u2713 Successfully disconnected from bridge"));
+      console.log(import_chalk10.default.green("\u2713 Successfully disconnected from bridge"));
     } else {
       const errorText = await response.text();
-      console.error(import_chalk8.default.red("\u2717 Failed to disconnect:"));
-      console.error(import_chalk8.default.red(`   ${errorText}`));
+      console.error(import_chalk10.default.red("\u2717 Failed to disconnect:"));
+      console.error(import_chalk10.default.red(`   ${errorText}`));
       process.exit(1);
     }
   } catch (error) {
-    console.error(import_chalk8.default.red("\u2717 Error disconnecting:"));
-    console.error(import_chalk8.default.red(`   ${error instanceof Error ? error.message : error}`));
+    console.error(import_chalk10.default.red("\u2717 Error disconnecting:"));
+    console.error(import_chalk10.default.red(`   ${error instanceof Error ? error.message : error}`));
     process.exit(1);
   }
 });
 
 // src/commands/bridge/status.ts
 var import_commander8 = require("commander");
-var import_chalk9 = __toESM(require("chalk"));
+var import_chalk11 = __toESM(require("chalk"));
 var statusCommand2 = new import_commander8.Command("status").description("Check bridge connection status").option("-u, --bridge-url <url>", "Bridge service URL", process.env.DEVPILOT_BRIDGE_URL).option("-i, --orchestrator-id <id>", "Orchestrator ID").option("-k, --api-key <key>", "API key", process.env.DEVPILOT_BRIDGE_API_KEY).action(async (options) => {
   if (!options.bridgeUrl) {
-    console.error(import_chalk9.default.red("\u2717 Error: Bridge URL required"));
-    console.error(import_chalk9.default.gray("   Use: devpilot bridge status -u <url>"));
+    console.error(import_chalk11.default.red("\u2717 Error: Bridge URL required"));
+    console.error(import_chalk11.default.gray("   Use: devpilot bridge status -u <url>"));
     process.exit(1);
   }
-  console.log(import_chalk9.default.cyan("\u{1F309} DevPilot Bridge Status"));
+  console.log(import_chalk11.default.cyan("\u{1F309} DevPilot Bridge Status"));
   console.log("");
   try {
     const healthRes = await fetch(`${options.bridgeUrl}/health`);
     const health = await healthRes.json();
-    console.log(import_chalk9.default.white("Bridge Status:"));
+    console.log(import_chalk11.default.white("Bridge Status:"));
     if (health.status === "ok") {
-      console.log(import_chalk9.default.gray("  Status: ") + import_chalk9.default.green("\u2713 Online"));
+      console.log(import_chalk11.default.gray("  Status: ") + import_chalk11.default.green("\u2713 Online"));
     } else {
-      console.log(import_chalk9.default.gray("  Status: ") + import_chalk9.default.red("\u2717 Offline"));
+      console.log(import_chalk11.default.gray("  Status: ") + import_chalk11.default.red("\u2717 Offline"));
     }
     console.log("");
     if (options.orchestratorId) {
@@ -1843,25 +2247,25 @@ var statusCommand2 = new import_commander8.Command("status").description("Check 
       );
       if (orchRes.ok) {
         const orch = await orchRes.json();
-        console.log(import_chalk9.default.white("Orchestrator Status:"));
-        console.log(import_chalk9.default.gray("  ID: ") + import_chalk9.default.cyan(orch.id));
-        console.log(import_chalk9.default.gray("  Name: ") + import_chalk9.default.white(orch.name));
+        console.log(import_chalk11.default.white("Orchestrator Status:"));
+        console.log(import_chalk11.default.gray("  ID: ") + import_chalk11.default.cyan(orch.id));
+        console.log(import_chalk11.default.gray("  Name: ") + import_chalk11.default.white(orch.name));
         if (orch.isOnline) {
-          console.log(import_chalk9.default.gray("  Online: ") + import_chalk9.default.green("\u2713"));
+          console.log(import_chalk11.default.gray("  Online: ") + import_chalk11.default.green("\u2713"));
         } else {
-          console.log(import_chalk9.default.gray("  Online: ") + import_chalk9.default.red("\u2717"));
+          console.log(import_chalk11.default.gray("  Online: ") + import_chalk11.default.red("\u2717"));
         }
-        console.log(import_chalk9.default.gray("  Active Jobs: ") + import_chalk9.default.yellow(orch.activeJobs));
-        console.log(import_chalk9.default.gray("  Last Heartbeat: ") + import_chalk9.default.white(orch.lastHeartbeat || "Never"));
-        console.log(import_chalk9.default.gray("  Repos: ") + import_chalk9.default.cyan(orch.repos?.join(", ") || "None"));
+        console.log(import_chalk11.default.gray("  Active Jobs: ") + import_chalk11.default.yellow(orch.activeJobs));
+        console.log(import_chalk11.default.gray("  Last Heartbeat: ") + import_chalk11.default.white(orch.lastHeartbeat || "Never"));
+        console.log(import_chalk11.default.gray("  Repos: ") + import_chalk11.default.cyan(orch.repos?.join(", ") || "None"));
       } else {
-        console.log(import_chalk9.default.white("Orchestrator Status:"));
-        console.log(import_chalk9.default.gray("  ") + import_chalk9.default.red("Not found or unauthorized"));
+        console.log(import_chalk11.default.white("Orchestrator Status:"));
+        console.log(import_chalk11.default.gray("  ") + import_chalk11.default.red("Not found or unauthorized"));
       }
     }
   } catch (error) {
-    console.error(import_chalk9.default.red("\u2717 Error checking status:"));
-    console.error(import_chalk9.default.red(`   ${error instanceof Error ? error.message : error}`));
+    console.error(import_chalk11.default.red("\u2717 Error checking status:"));
+    console.error(import_chalk11.default.red(`   ${error instanceof Error ? error.message : error}`));
     process.exit(1);
   }
 });
@@ -1874,17 +2278,17 @@ var import_commander13 = require("commander");
 
 // src/commands/session/new.ts
 var import_commander10 = require("commander");
-var import_chalk10 = __toESM(require("chalk"));
+var import_chalk12 = __toESM(require("chalk"));
 var import_bridge_protocol = require("@devpilot.sh/bridge-protocol");
 var newCommand = new import_commander10.Command("new").description("Create a shared session and print its join link").argument("<title>", "What this session is about (stored in plaintext \u2014 no secrets)").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-o, --org <orgId>", "Organization id that will own the session").option("--issue <identifier>", "Linear issue identifier to attach, e.g. ENG-394").action(async (title, options) => {
   if (!options.url || !options.token) {
-    console.error(import_chalk10.default.red("\u2717 Bridge URL and token required"));
-    console.error(import_chalk10.default.gray("  --url / DEVPILOT_BRIDGE_URL, --token / DEVPILOT_BRIDGE_TOKEN"));
+    console.error(import_chalk12.default.red("\u2717 Bridge URL and token required"));
+    console.error(import_chalk12.default.gray("  --url / DEVPILOT_BRIDGE_URL, --token / DEVPILOT_BRIDGE_TOKEN"));
     process.exit(1);
   }
   if (!options.org) {
-    console.error(import_chalk10.default.red("\u2717 --org <orgId> is required"));
-    console.error(import_chalk10.default.gray("  The token is bound to one org; this must be that org."));
+    console.error(import_chalk12.default.red("\u2717 --org <orgId> is required"));
+    console.error(import_chalk12.default.gray("  The token is bound to one org; this must be that org."));
     process.exit(1);
   }
   const key = import_bridge_protocol.sessionCrypto.generateKey();
@@ -1902,52 +2306,52 @@ var newCommand = new import_commander10.Command("new").description("Create a sha
   });
   if (!res.ok) {
     const body = await res.json().catch(() => null);
-    console.error(import_chalk10.default.red(`\u2717 Could not create session (${res.status})`));
-    console.error(import_chalk10.default.gray(`  ${(0, import_bridge_protocol.formatApiError)(body, res.statusText)}`));
+    console.error(import_chalk12.default.red(`\u2717 Could not create session (${res.status})`));
+    console.error(import_chalk12.default.gray(`  ${(0, import_bridge_protocol.formatApiError)(body, res.statusText)}`));
     process.exit(1);
   }
   const { session } = await res.json();
   const link = (0, import_bridge_protocol.buildJoinLink)(base, session.id, key);
   console.log("");
-  console.log(import_chalk10.default.cyan(`  ${session.title}`));
-  console.log(import_chalk10.default.bold(`  ${link}`));
+  console.log(import_chalk12.default.cyan(`  ${session.title}`));
+  console.log(import_chalk12.default.bold(`  ${link}`));
   console.log("");
-  console.log(import_chalk10.default.yellow("  Anyone with this link can read the whole transcript."));
-  console.log(import_chalk10.default.gray("  It carries the encryption key after the #, which never reaches"));
-  console.log(import_chalk10.default.gray("  devpilot.sh. Send it the way you would send a password \u2014 not to"));
-  console.log(import_chalk10.default.gray("  a public channel. To revoke it, re-key the session; that ends"));
-  console.log(import_chalk10.default.gray("  access for this link but cannot un-send what was already read."));
+  console.log(import_chalk12.default.yellow("  Anyone with this link can read the whole transcript."));
+  console.log(import_chalk12.default.gray("  It carries the encryption key after the #, which never reaches"));
+  console.log(import_chalk12.default.gray("  devpilot.sh. Send it the way you would send a password \u2014 not to"));
+  console.log(import_chalk12.default.gray("  a public channel. To revoke it, re-key the session; that ends"));
+  console.log(import_chalk12.default.gray("  access for this link but cannot un-send what was already read."));
   console.log("");
-  console.log(import_chalk10.default.gray(`  Others join with:  devpilot session join "${import_chalk10.default.italic("<link>")}"`));
+  console.log(import_chalk12.default.gray(`  Others join with:  devpilot session join "${import_chalk12.default.italic("<link>")}"`));
   console.log("");
 });
 
 // src/commands/session/join.ts
 var import_os3 = __toESM(require("os"));
 var import_commander11 = require("commander");
-var import_chalk11 = __toESM(require("chalk"));
+var import_chalk13 = __toESM(require("chalk"));
 var import_bridge_client2 = require("@devpilot.sh/bridge-client");
 var joinCommand = new import_commander11.Command("join").description("Join a shared session by link and post a message").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", import_os3.default.hostname()).option("-m, --message <text>", "Post this message after joining").action(async (url, options) => {
   try {
-    const client = await import_bridge_client2.SharedSessionClient.join({ link: url, displayName: options.name });
-    const s = client.session;
-    console.log(import_chalk11.default.cyan(`
+    const client2 = await import_bridge_client2.SharedSessionClient.join({ link: url, displayName: options.name });
+    const s = client2.session;
+    console.log(import_chalk13.default.cyan(`
   ${s.title}`));
-    console.log(import_chalk11.default.gray(`  mode: ${s.mode}  \xB7  messages: ${s.lastSeq ?? 0}
+    console.log(import_chalk13.default.gray(`  mode: ${s.mode}  \xB7  messages: ${s.lastSeq ?? 0}
 `));
     if (options.message) {
-      const posted = await client.post(options.message);
-      console.log(import_chalk11.default.green(`  posted #${posted.seq}
+      const posted = await client2.post(options.message);
+      console.log(import_chalk13.default.green(`  posted #${posted.seq}
 `));
     }
-    const participants = await client.who();
+    const participants = await client2.who();
     for (const p of participants) {
-      const agent = p.agentKind ? import_chalk11.default.gray(` [${p.agentKind}]`) : "";
-      console.log(`  \xB7 ${p.displayName}${agent}${p.leftAt ? import_chalk11.default.gray(" (left)") : ""}`);
+      const agent = p.agentKind ? import_chalk13.default.gray(` [${p.agentKind}]`) : "";
+      console.log(`  \xB7 ${p.displayName}${agent}${p.leftAt ? import_chalk13.default.gray(" (left)") : ""}`);
     }
     console.log("");
   } catch (err) {
-    console.error(import_chalk11.default.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
+    console.error(import_chalk13.default.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
   }
 });
@@ -1955,66 +2359,293 @@ var joinCommand = new import_commander11.Command("join").description("Join a sha
 // src/commands/session/tail.ts
 var import_os4 = __toESM(require("os"));
 var import_commander12 = require("commander");
-var import_chalk12 = __toESM(require("chalk"));
+var import_chalk14 = __toESM(require("chalk"));
 var import_bridge_client3 = require("@devpilot.sh/bridge-client");
 var tailCommand = new import_commander12.Command("tail").description("Follow a shared session transcript in the terminal").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", import_os4.default.hostname()).option("-i, --interval <seconds>", "Poll interval", "3").action(async (url, options) => {
   const intervalMs = Math.max(1, parseInt(options.interval, 10) || 3) * 1e3;
-  let client;
+  let client2;
   try {
-    client = await import_bridge_client3.SharedSessionClient.join({ link: url, displayName: options.name });
+    client2 = await import_bridge_client3.SharedSessionClient.join({ link: url, displayName: options.name });
   } catch (err) {
-    console.error(import_chalk12.default.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
+    console.error(import_chalk14.default.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
     return;
   }
   const names = /* @__PURE__ */ new Map();
-  for (const p of await client.who()) names.set(p.id, p.displayName);
-  console.log(import_chalk12.default.cyan(`
-  ${client.session.title}`));
-  console.log(import_chalk12.default.gray(`  following \xB7 ctrl-c to stop
+  for (const p of await client2.who()) names.set(p.id, p.displayName);
+  console.log(import_chalk14.default.cyan(`
+  ${client2.session.title}`));
+  console.log(import_chalk14.default.gray(`  following \xB7 ctrl-c to stop
 `));
   let cursor = 0;
   let stopped = false;
   process.on("SIGINT", () => {
     stopped = true;
-    console.log(import_chalk12.default.gray("\n  stopped\n"));
+    console.log(import_chalk14.default.gray("\n  stopped\n"));
     process.exit(0);
   });
   while (!stopped) {
     try {
-      const { entries, latestSeq } = await client.read(cursor);
+      const { entries, latestSeq } = await client2.read(cursor);
       if (entries.length > 0) {
         if (entries.some((e) => e.participantId && !names.has(e.participantId))) {
-          for (const p of await client.who()) names.set(p.id, p.displayName);
+          for (const p of await client2.who()) names.set(p.id, p.displayName);
         }
         for (const e of entries) console.log(format(e, names));
         cursor = latestSeq;
       }
     } catch (err) {
-      console.error(import_chalk12.default.gray(`  \u2026 ${err instanceof Error ? err.message : String(err)}`));
+      console.error(import_chalk14.default.gray(`  \u2026 ${err instanceof Error ? err.message : String(err)}`));
     }
     await new Promise((r) => setTimeout(r, intervalMs));
   }
 });
 function format(e, names) {
   const who = e.participantId ? names.get(e.participantId) ?? e.participantId : "system";
-  const seq = import_chalk12.default.gray(`#${String(e.seq).padStart(3)}`);
+  const seq = import_chalk14.default.gray(`#${String(e.seq).padStart(3)}`);
   if (e.status === "system") {
     const reason = e.systemNotice?.reason ? ` (${e.systemNotice.reason})` : "";
-    return `  ${seq} ${import_chalk12.default.yellow(`\u2699 ${e.systemNotice?.type ?? e.text}${reason}`)}`;
+    return `  ${seq} ${import_chalk14.default.yellow(`\u2699 ${e.systemNotice?.type ?? e.text}${reason}`)}`;
   }
   if (e.status === "undecryptable") {
-    return `  ${seq} ${import_chalk12.default.gray(`${who}: <sealed under an earlier key \u2014 not readable with this link>`)}`;
+    return `  ${seq} ${import_chalk14.default.gray(`${who}: <sealed under an earlier key \u2014 not readable with this link>`)}`;
   }
-  return `  ${seq} ${import_chalk12.default.bold(who)}: ${e.text}`;
+  return `  ${seq} ${import_chalk14.default.bold(who)}: ${e.text}`;
 }
 
 // src/commands/session.ts
 var sessionCommand = new import_commander13.Command("session").description("Shared, end-to-end encrypted sessions across machines").addCommand(newCommand).addCommand(joinCommand).addCommand(tailCommand);
 
-// src/commands/session-runner/index.ts
+// src/commands/sessions/index.ts
+var import_os5 = __toESM(require("os"));
+var import_node_os3 = require("os");
+var import_node_path5 = require("path");
+var import_node_fs4 = require("fs");
 var import_commander14 = require("commander");
-var import_chalk13 = __toESM(require("chalk"));
+var import_chalk15 = __toESM(require("chalk"));
+var import_inquirer = __toESM(require("inquirer"));
+var import_bridge_client4 = require("@devpilot.sh/bridge-client");
+function stableMachineName2() {
+  const path = (0, import_node_path5.join)((0, import_node_os3.homedir)(), ".devpilot", "machine.json");
+  try {
+    if ((0, import_node_fs4.existsSync)(path)) {
+      const saved = JSON.parse((0, import_node_fs4.readFileSync)(path, "utf8"));
+      if (saved.name) return saved.name;
+    }
+  } catch {
+  }
+  const name = import_os5.default.hostname();
+  try {
+    (0, import_node_fs4.mkdirSync)((0, import_node_path5.dirname)(path), { recursive: true });
+    (0, import_node_fs4.writeFileSync)(path, JSON.stringify({ name }, null, 2), "utf8");
+  } catch {
+  }
+  return name;
+}
+function withCommonOptions(command) {
+  return command.option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-n, --name <name>", "Machine name (defaults to this machine\u2019s stable name)").option("-r, --repos <repos>", "Comma-separated repos this machine handles").option(
+    "--all-repos",
+    "Include every repo found on this machine, not only the ones it routes",
+    false
+  ).option("--repo <owner/name>", "Restrict to a single repo").option("--since <duration>", "How far back to look (e.g. 24h, 3d)", "24h").option("--no-paths", "Do not send the paths of changed files").option("--max-summaries <n>", "Cap on model-written titles", "25").option("--json", "Machine-readable output");
+}
+async function pipeline(options) {
+  const machineName = options.name ?? stableMachineName2();
+  const result = await runScanPipeline({
+    machineName,
+    repos: options.repos?.split(",").map((r) => r.trim()).filter(Boolean) ?? [],
+    allRepos: Boolean(options.allRepos),
+    onlyRepo: options.repo,
+    sinceMs: parseDuration(options.since, 24 * 60 * 60 * 1e3),
+    includePaths: options.paths !== false,
+    maxSummaries: Math.max(0, parseInt(options.maxSummaries, 10) || 25),
+    summarize: true,
+    onWarn: (message) => {
+      if (!options.json) console.log(import_chalk15.default.gray(`   ${message}`));
+    }
+  });
+  return { machineName, result };
+}
+function destinationFor(outcome) {
+  if (!outcome) return import_chalk15.default.gray("\u2014");
+  switch (outcome.status) {
+    case "duplicate":
+      return import_chalk15.default.gray(`${outcome.linearIdentifier ?? "already adopted"} (tracked)`);
+    case "attached":
+      return import_chalk15.default.green(`${outcome.linearIdentifier} (${outcome.matchedBy})`);
+    case "adopted":
+      return outcome.linearIdentifier ? import_chalk15.default.green(outcome.linearIdentifier) : import_chalk15.default.yellow("create");
+    case "skipped":
+      return import_chalk15.default.yellow(outcome.reason ? `skip \u2014 ${outcome.reason.slice(0, 60)}` : "skip");
+  }
+}
+function rowsFrom(result, outcomes) {
+  const byKey = new Map(outcomes.map((o) => [o.adoptionKey, o]));
+  return result.candidates.map((candidate) => ({
+    repo: candidate.repo,
+    title: candidate.title,
+    lastActivityAt: candidate.lastActivityAt,
+    live: candidate.live,
+    destination: destinationFor(byKey.get(candidate.adoptionKey))
+  }));
+}
+function client(options) {
+  if (!options.url || !options.token) return null;
+  return new import_bridge_client4.BridgeClient({ bridgeUrl: options.url, token: options.token });
+}
+var scanCommand = withCommonOptions(
+  new import_commander14.Command("scan").description(
+    "List agent sessions on this machine and what adopting them would do. Writes nothing."
+  )
+).action(async (options) => {
+  const { machineName, result } = await pipeline(options);
+  let outcomes = [];
+  const bridge = client(options);
+  if (bridge && result.candidates.length > 0) {
+    try {
+      const response = await bridge.adoptSessions({
+        machineName,
+        candidates: result.candidates,
+        dryRun: true
+      });
+      outcomes = response.outcomes;
+    } catch (err) {
+      if (!options.json) {
+        console.log(import_chalk15.default.yellow(`   Could not preview against the bridge: ${describe3(err)}`));
+        console.log(import_chalk15.default.gray("   Showing the local scan only."));
+      }
+    }
+  }
+  if (options.json) {
+    console.log(
+      JSON.stringify(
+        {
+          machineName,
+          candidates: result.candidates,
+          discovered: result.discovered,
+          outcomes,
+          skipped: result.skipped,
+          unmappedProjectCount: result.unmappedProjectCount
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
+  console.log("");
+  console.log(renderPreview(rowsFrom(result, outcomes), result));
+  console.log("");
+  if (!bridge) {
+    console.log(
+      import_chalk15.default.gray(
+        "  No bridge credentials, so this is a local listing only. Pass --url and --token"
+      )
+    );
+    console.log(import_chalk15.default.gray("  to see which Linear issues these would attach to."));
+  } else if (result.candidates.length > 0) {
+    console.log(import_chalk15.default.gray("  Nothing was written. Run `devpilot sessions adopt` to act on this."));
+  }
+  console.log("");
+});
+var adoptCommand = withCommonOptions(
+  new import_commander14.Command("adopt").description("Put agent sessions running on this machine onto the board")
+).option("-y, --yes", "Skip the confirmation").action(async (options) => {
+  const bridge = client(options);
+  if (!bridge) {
+    console.error(import_chalk15.default.red("\u2717 Bridge URL and token required (--url / --token)"));
+    console.error(import_chalk15.default.gray("  Mint a token in the dashboard under Settings \u2192 Tokens."));
+    process.exit(1);
+  }
+  const { machineName, result } = await pipeline(options);
+  if (result.candidates.length === 0) {
+    console.log("");
+    console.log(renderPreview([], result));
+    console.log("");
+    console.log(import_chalk15.default.gray("  No sessions to adopt."));
+    console.log("");
+    return;
+  }
+  let preview;
+  try {
+    preview = await bridge.adoptSessions({
+      machineName,
+      candidates: result.candidates,
+      dryRun: true
+    });
+  } catch (err) {
+    console.error(import_chalk15.default.red(`\u2717 ${describe3(err)}`));
+    process.exit(1);
+  }
+  console.log("");
+  console.log(renderPreview(rowsFrom(result, preview.outcomes), result));
+  console.log("");
+  const willCreate = preview.outcomes.filter((o) => o.status === "adopted").length;
+  const willAttach = preview.outcomes.filter((o) => o.status === "attached").length;
+  if (willCreate === 0 && willAttach === 0) {
+    console.log(import_chalk15.default.gray("  Nothing new to adopt \u2014 everything here is already tracked."));
+    console.log("");
+    return;
+  }
+  console.log(
+    `  This creates ${import_chalk15.default.bold(String(willCreate))} Linear issue${willCreate === 1 ? "" : "s"} and attaches ${import_chalk15.default.bold(String(willAttach))} existing.`
+  );
+  console.log("");
+  if (!options.yes) {
+    const { proceed } = await import_inquirer.default.prompt([
+      { type: "confirm", name: "proceed", message: "Continue?", default: false }
+    ]);
+    if (!proceed) {
+      console.log(import_chalk15.default.gray("  Nothing was written."));
+      return;
+    }
+  }
+  let response;
+  try {
+    response = await bridge.adoptSessions({
+      machineName,
+      candidates: result.candidates,
+      dryRun: false
+    });
+  } catch (err) {
+    console.error(import_chalk15.default.red(`\u2717 ${describe3(err)}`));
+    process.exit(1);
+  }
+  console.log("");
+  for (const outcome of response.outcomes) {
+    if (outcome.status === "skipped") {
+      console.log(import_chalk15.default.yellow(`   \u25CB skipped \u2014 ${outcome.reason ?? "no reason given"}`));
+    } else if (outcome.status === "duplicate") {
+      console.log(import_chalk15.default.gray(`   \xB7 ${outcome.linearIdentifier ?? "?"} already tracked`));
+    } else {
+      console.log(
+        import_chalk15.default.green(
+          `   \u2713 ${outcome.linearIdentifier}${outcome.status === "attached" ? ` (attached, ${outcome.matchedBy})` : ""}`
+        )
+      );
+    }
+  }
+  console.log("");
+  console.log(
+    import_chalk15.default.green(
+      `\u2713 ${response.adopted} adopted, ${response.attached} attached, ${response.duplicates} already tracked, ${response.skipped} skipped`
+    )
+  );
+  console.log(
+    import_chalk15.default.gray(
+      "  These are observed, not dispatched: DevPilot is watching them and will not move a ticket."
+    )
+  );
+  console.log("");
+});
+function describe3(err) {
+  return err instanceof Error ? err.message : String(err);
+}
+var sessionsCommand = new import_commander14.Command("sessions").description("Agent sessions running on this machine").addCommand(scanCommand).addCommand(adoptCommand);
+
+// src/commands/session-runner/index.ts
+var import_commander15 = require("commander");
+var import_chalk16 = __toESM(require("chalk"));
 var import_path8 = require("path");
 
 // src/commands/session-runner/server.ts
@@ -2027,7 +2658,7 @@ var import_path7 = require("path");
 var import_child_process3 = require("child_process");
 var import_util = require("util");
 var import_fs6 = require("fs");
-var import_os5 = require("os");
+var import_os6 = require("os");
 var import_path6 = require("path");
 
 // src/commands/session-runner/stream-events.ts
@@ -2174,6 +2805,26 @@ function describeActivity(telemetry) {
 
 // src/commands/session-runner/claude-runner.ts
 var execFileAsync = (0, import_util.promisify)(import_child_process3.execFile);
+var OWNED_SESSION_LIMIT = 5e3;
+function recordOwnedSession(sessionId) {
+  try {
+    const dir = (0, import_path6.join)((0, import_os6.homedir)(), ".devpilot");
+    const path = (0, import_path6.join)(dir, "owned-sessions.json");
+    let ids = [];
+    if ((0, import_fs6.existsSync)(path)) {
+      const parsed = JSON.parse((0, import_fs6.readFileSync)(path, "utf8"));
+      if (Array.isArray(parsed.sessionIds)) {
+        ids = parsed.sessionIds.filter((v) => typeof v === "string");
+      }
+    }
+    if (ids.includes(sessionId)) return;
+    ids.push(sessionId);
+    if (ids.length > OWNED_SESSION_LIMIT) ids = ids.slice(-OWNED_SESSION_LIMIT);
+    (0, import_fs6.mkdirSync)(dir, { recursive: true });
+    (0, import_fs6.writeFileSync)(path, JSON.stringify({ version: 1, sessionIds: ids }, null, 2), "utf8");
+  } catch {
+  }
+}
 async function git(workdir, args) {
   const { stdout } = await execFileAsync("git", args, {
     cwd: workdir,
@@ -2230,7 +2881,7 @@ function parseEnvelope(stdout) {
   return null;
 }
 function writeSessionMcpConfig(sessionLink2) {
-  const dir = (0, import_fs6.mkdtempSync)((0, import_path6.join)((0, import_os5.tmpdir)(), "devpilot-mcp-"));
+  const dir = (0, import_fs6.mkdtempSync)((0, import_path6.join)((0, import_os6.tmpdir)(), "devpilot-mcp-"));
   const file = (0, import_path6.join)(dir, "mcp.json");
   (0, import_fs6.writeFileSync)(
     file,
@@ -2347,6 +2998,7 @@ ${error2.message}`, timedOut, killed });
   const usage = envelope?.usage ?? {};
   const tokensUsed = (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
   const durationMs = envelope?.duration_ms ?? Date.now() - startedAt;
+  if (envelope?.session_id) recordOwnedSession(envelope.session_id);
   const processOk = outcome.code === 0 && !outcome.timedOut && !outcome.killed;
   const envelopeOk = envelope ? envelope.is_error !== true : false;
   const success = processOk && envelopeOk;
@@ -2734,7 +3386,7 @@ function parseRepoMap(values) {
   }
   return map;
 }
-var sessionRunnerCommand = new import_commander14.Command("session-runner").description("Run Claude Code sessions dispatched by DevPilot (claude-session mode)").option("-p, --port <port>", "Port to listen on", "3900").option("--host <host>", "Interface to bind", "127.0.0.1").option("--token <token>", "Bearer token the dispatcher must present").option("-w, --workspace <dir>", "Directory containing repo checkouts", process.cwd()).option(
+var sessionRunnerCommand = new import_commander15.Command("session-runner").description("Run Claude Code sessions dispatched by DevPilot (claude-session mode)").option("-p, --port <port>", "Port to listen on", "3900").option("--host <host>", "Interface to bind", "127.0.0.1").option("--token <token>", "Bearer token the dispatcher must present").option("-w, --workspace <dir>", "Directory containing repo checkouts", process.cwd()).option(
   "--repo <mapping>",
   "Explicit repo mapping, <owner/name>=<path> (repeatable)",
   (value, previous) => [...previous, value],
@@ -2748,7 +3400,7 @@ var sessionRunnerCommand = new import_commander14.Command("session-runner").desc
   try {
     repoMap = parseRepoMap(options.repo ?? []);
   } catch (error) {
-    console.error(import_chalk13.default.red(error instanceof Error ? error.message : String(error)));
+    console.error(import_chalk16.default.red(error instanceof Error ? error.message : String(error)));
     process.exitCode = 1;
     return;
   }
@@ -2762,38 +3414,38 @@ var sessionRunnerCommand = new import_commander14.Command("session-runner").desc
     permissionMode: options.permissionMode,
     maxConcurrent: parseInt(options.maxConcurrent, 10),
     timeoutMs: parseInt(options.timeout, 10) * 6e4,
-    log: (line) => console.log(import_chalk13.default.dim(`[runner] ${line}`))
+    log: (line) => console.log(import_chalk16.default.dim(`[runner] ${line}`))
   };
   const runner = new SessionRunner(config);
   try {
     await runner.start();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(import_chalk13.default.red(`Failed to start session runner: ${message}`));
+    console.error(import_chalk16.default.red(`Failed to start session runner: ${message}`));
     process.exitCode = 1;
     return;
   }
   const base = `http://${config.host}:${config.port}`;
-  console.log(import_chalk13.default.bold("\n  DevPilot session runner\n"));
-  console.log(`  ${import_chalk13.default.dim("listening")}   ${base}`);
-  console.log(`  ${import_chalk13.default.dim("workspace")}   ${config.workspace}`);
-  console.log(`  ${import_chalk13.default.dim("claude")}      ${config.claudePath} (${config.permissionMode})`);
-  console.log(`  ${import_chalk13.default.dim("concurrency")} ${config.maxConcurrent}`);
+  console.log(import_chalk16.default.bold("\n  DevPilot session runner\n"));
+  console.log(`  ${import_chalk16.default.dim("listening")}   ${base}`);
+  console.log(`  ${import_chalk16.default.dim("workspace")}   ${config.workspace}`);
+  console.log(`  ${import_chalk16.default.dim("claude")}      ${config.claudePath} (${config.permissionMode})`);
+  console.log(`  ${import_chalk16.default.dim("concurrency")} ${config.maxConcurrent}`);
   if (repoMap.size > 0) {
-    for (const [repo, path] of repoMap) console.log(`  ${import_chalk13.default.dim("repo")}        ${repo} \u2192 ${path}`);
+    for (const [repo, path] of repoMap) console.log(`  ${import_chalk16.default.dim("repo")}        ${repo} \u2192 ${path}`);
   }
   if (!config.apiKey) {
-    console.log(import_chalk13.default.yellow("\n  No --token set: the dispatcher API is unauthenticated."));
+    console.log(import_chalk16.default.yellow("\n  No --token set: the dispatcher API is unauthenticated."));
   }
-  console.log(import_chalk13.default.dim("\n  Point DevPilot at it:"));
+  console.log(import_chalk16.default.dim("\n  Point DevPilot at it:"));
   console.log(
-    import_chalk13.default.dim(
+    import_chalk16.default.dim(
       `    DEVPILOT_ORCHESTRATOR_MODE=claude-session DEVPILOT_SESSION_API_URL=${base} devpilot serve
 `
     )
   );
   const shutdown = async () => {
-    console.log(import_chalk13.default.dim("\n[runner] shutting down\u2026"));
+    console.log(import_chalk16.default.dim("\n[runner] shutting down\u2026"));
     await runner.stop();
     process.exit(0);
   };
@@ -2802,9 +3454,9 @@ var sessionRunnerCommand = new import_commander14.Command("session-runner").desc
 });
 
 // src/commands/update.ts
-var import_commander15 = require("commander");
+var import_commander16 = require("commander");
 var import_child_process4 = require("child_process");
-var import_chalk14 = __toESM(require("chalk"));
+var import_chalk17 = __toESM(require("chalk"));
 async function getLatestVersion() {
   try {
     const result = (0, import_child_process4.execSync)("npm view @devpilot.sh/cli version", {
@@ -2863,35 +3515,35 @@ function getUpdateCommand(pm) {
       return "npm install -g @devpilot.sh/cli@latest";
   }
 }
-var updateCommand = new import_commander15.Command("update").description("Update DevPilot CLI to the latest version").option("-c, --check", "Only check for updates without installing").option("--force", "Force update even if already on latest version").action(async (options) => {
-  console.log(import_chalk14.default.cyan("Checking for updates..."));
+var updateCommand = new import_commander16.Command("update").description("Update DevPilot CLI to the latest version").option("-c, --check", "Only check for updates without installing").option("--force", "Force update even if already on latest version").action(async (options) => {
+  console.log(import_chalk17.default.cyan("Checking for updates..."));
   const latestVersion = await getLatestVersion();
   if (!latestVersion) {
-    console.log(import_chalk14.default.yellow("Could not check for updates. Please check your network connection."));
-    console.log(import_chalk14.default.gray("You can manually update with: npm install -g @devpilot.sh/cli@latest"));
+    console.log(import_chalk17.default.yellow("Could not check for updates. Please check your network connection."));
+    console.log(import_chalk17.default.gray("You can manually update with: npm install -g @devpilot.sh/cli@latest"));
     return;
   }
   const comparison = compareVersions(latestVersion, VERSION);
   if (comparison === 0 && !options.force) {
-    console.log(import_chalk14.default.green(`You're already on the latest version (${VERSION})`));
+    console.log(import_chalk17.default.green(`You're already on the latest version (${VERSION})`));
     return;
   }
   if (comparison === -1 && !options.force) {
-    console.log(import_chalk14.default.yellow(`You're on a newer version (${VERSION}) than the latest release (${latestVersion})`));
-    console.log(import_chalk14.default.gray("This might be a pre-release or development version."));
+    console.log(import_chalk17.default.yellow(`You're on a newer version (${VERSION}) than the latest release (${latestVersion})`));
+    console.log(import_chalk17.default.gray("This might be a pre-release or development version."));
     return;
   }
   if (options.check) {
     if (comparison === 1) {
-      console.log(import_chalk14.default.yellow(`Update available: ${VERSION} \u2192 ${latestVersion}`));
-      console.log(import_chalk14.default.gray('Run "devpilot update" to install the latest version.'));
+      console.log(import_chalk17.default.yellow(`Update available: ${VERSION} \u2192 ${latestVersion}`));
+      console.log(import_chalk17.default.gray('Run "devpilot update" to install the latest version.'));
     }
     return;
   }
   const pm = detectPackageManager();
   const updateCmd = getUpdateCommand(pm);
-  console.log(import_chalk14.default.cyan(`Updating from ${VERSION} to ${latestVersion}...`));
-  console.log(import_chalk14.default.gray(`Using: ${updateCmd}`));
+  console.log(import_chalk17.default.cyan(`Updating from ${VERSION} to ${latestVersion}...`));
+  console.log(import_chalk17.default.gray(`Using: ${updateCmd}`));
   console.log("");
   try {
     const [cmd, ...args] = updateCmd.split(" ");
@@ -2902,41 +3554,41 @@ var updateCommand = new import_commander15.Command("update").description("Update
     child.on("close", (code) => {
       if (code === 0) {
         console.log("");
-        console.log(import_chalk14.default.green(`Successfully updated to ${latestVersion}`));
-        console.log(import_chalk14.default.gray('Run "devpilot --version" to verify.'));
+        console.log(import_chalk17.default.green(`Successfully updated to ${latestVersion}`));
+        console.log(import_chalk17.default.gray('Run "devpilot --version" to verify.'));
       } else {
         console.log("");
-        console.log(import_chalk14.default.red("Update failed. Please try manually:"));
-        console.log(import_chalk14.default.cyan(`  ${updateCmd}`));
+        console.log(import_chalk17.default.red("Update failed. Please try manually:"));
+        console.log(import_chalk17.default.cyan(`  ${updateCmd}`));
       }
     });
     child.on("error", (err) => {
-      console.log(import_chalk14.default.red(`Update failed: ${err.message}`));
-      console.log(import_chalk14.default.gray("Please try manually:"));
-      console.log(import_chalk14.default.cyan(`  ${updateCmd}`));
+      console.log(import_chalk17.default.red(`Update failed: ${err.message}`));
+      console.log(import_chalk17.default.gray("Please try manually:"));
+      console.log(import_chalk17.default.cyan(`  ${updateCmd}`));
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    console.log(import_chalk14.default.red(`Update failed: ${message}`));
-    console.log(import_chalk14.default.gray("Please try manually:"));
-    console.log(import_chalk14.default.cyan(`  ${updateCmd}`));
+    console.log(import_chalk17.default.red(`Update failed: ${message}`));
+    console.log(import_chalk17.default.gray("Please try manually:"));
+    console.log(import_chalk17.default.cyan(`  ${updateCmd}`));
   }
 });
 
 // src/commands/wiki.ts
-var import_commander16 = require("commander");
+var import_commander17 = require("commander");
 var import_fs8 = require("fs");
 var import_path9 = require("path");
-var import_chalk15 = __toESM(require("chalk"));
+var import_chalk18 = __toESM(require("chalk"));
 var import_wave_planner = require("@devpilot.sh/core/wave-planner");
-var wikiCommand = new import_commander16.Command("wiki").description("LLM-compiled knowledge base \u2014 institutional memory for your codebase");
+var wikiCommand = new import_commander17.Command("wiki").description("LLM-compiled knowledge base \u2014 institutional memory for your codebase");
 wikiCommand.command("init").description("Initialize the wiki system in the current repository").option("--wiki-dir <path>", "Wiki output directory", ".devpilot/wiki").action(async (options) => {
   const cwd = process.cwd();
   const devpilotDir = (0, import_path9.join)(cwd, ".devpilot");
   const wikiDir = (0, import_path9.join)(cwd, options.wikiDir);
   if (!(0, import_fs8.existsSync)(devpilotDir)) {
     console.log(
-      import_chalk15.default.yellow("\u26A0\uFE0F  DevPilot not initialized. Run `devpilot init` first.")
+      import_chalk18.default.yellow("\u26A0\uFE0F  DevPilot not initialized. Run `devpilot init` first.")
     );
     return;
   }
@@ -2979,23 +3631,23 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
     if (!gitignore.includes(".devpilot/wiki")) {
     }
   }
-  console.log(import_chalk15.default.green("\u2705 Wiki initialized!"));
+  console.log(import_chalk18.default.green("\u2705 Wiki initialized!"));
   console.log("");
-  console.log(import_chalk15.default.white("Wiki directory: ") + import_chalk15.default.cyan(wikiDir));
+  console.log(import_chalk18.default.white("Wiki directory: ") + import_chalk18.default.cyan(wikiDir));
   console.log("");
-  console.log(import_chalk15.default.white("Next steps:"));
+  console.log(import_chalk18.default.white("Next steps:"));
   console.log(
-    import_chalk15.default.gray("  1. ") + import_chalk15.default.cyan("devpilot wiki ingest --file <path>") + import_chalk15.default.gray(" to add source material")
+    import_chalk18.default.gray("  1. ") + import_chalk18.default.cyan("devpilot wiki ingest --file <path>") + import_chalk18.default.gray(" to add source material")
   );
   console.log(
-    import_chalk15.default.gray("  2. ") + import_chalk15.default.cyan('devpilot wiki query "How does auth work?"') + import_chalk15.default.gray(" to ask questions")
+    import_chalk18.default.gray("  2. ") + import_chalk18.default.cyan('devpilot wiki query "How does auth work?"') + import_chalk18.default.gray(" to ask questions")
   );
   console.log(
-    import_chalk15.default.gray("  3. ") + import_chalk15.default.cyan("devpilot wiki status") + import_chalk15.default.gray(" to check wiki health")
+    import_chalk18.default.gray("  3. ") + import_chalk18.default.cyan("devpilot wiki status") + import_chalk18.default.gray(" to check wiki health")
   );
   console.log("");
   console.log(
-    import_chalk15.default.gray(
+    import_chalk18.default.gray(
       "The wiki will grow automatically as agents work \u2014 each session compounds the knowledge base."
     )
   );
@@ -3004,7 +3656,7 @@ wikiCommand.command("ingest").description("Ingest a source document into the wik
   let content;
   if (options.file) {
     if (!(0, import_fs8.existsSync)(options.file)) {
-      console.log(import_chalk15.default.red(`\u274C File not found: ${options.file}`));
+      console.log(import_chalk18.default.red(`\u274C File not found: ${options.file}`));
       return;
     }
     content = (0, import_fs8.readFileSync)(options.file, "utf-8");
@@ -3012,20 +3664,20 @@ wikiCommand.command("ingest").description("Ingest a source document into the wik
     content = (0, import_fs8.readFileSync)(0, "utf-8");
   } else {
     console.log(
-      import_chalk15.default.red("\u274C Provide either --file <path> or --stdin")
+      import_chalk18.default.red("\u274C Provide either --file <path> or --stdin")
     );
     return;
   }
   const validTypes = ["session_log", "commit", "spec", "decision", "manual"];
   if (!validTypes.includes(options.type)) {
     console.log(
-      import_chalk15.default.red(
+      import_chalk18.default.red(
         `\u274C Invalid type "${options.type}". Must be one of: ${validTypes.join(", ")}`
       )
     );
     return;
   }
-  console.log(import_chalk15.default.gray(`Ingesting ${options.type}: "${options.title}"...`));
+  console.log(import_chalk18.default.gray(`Ingesting ${options.type}: "${options.title}"...`));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
@@ -3036,75 +3688,75 @@ wikiCommand.command("ingest").description("Ingest a source document into the wik
       options.title,
       options.origin
     );
-    console.log(import_chalk15.default.green("\u2705 Ingested successfully!"));
+    console.log(import_chalk18.default.green("\u2705 Ingested successfully!"));
     console.log(
-      import_chalk15.default.gray(`   Source ID: ${result.sourceId}`)
+      import_chalk18.default.gray(`   Source ID: ${result.sourceId}`)
     );
     if (result.articlesCreated.length > 0) {
       console.log(
-        import_chalk15.default.white(`   Articles created: `) + import_chalk15.default.cyan(result.articlesCreated.join(", "))
+        import_chalk18.default.white(`   Articles created: `) + import_chalk18.default.cyan(result.articlesCreated.join(", "))
       );
     }
     if (result.articlesUpdated.length > 0) {
       console.log(
-        import_chalk15.default.white(`   Articles updated: `) + import_chalk15.default.yellow(result.articlesUpdated.join(", "))
+        import_chalk18.default.white(`   Articles updated: `) + import_chalk18.default.yellow(result.articlesUpdated.join(", "))
       );
     }
     console.log(
-      import_chalk15.default.gray(`   Tokens used: ${result.tokensUsed}`)
+      import_chalk18.default.gray(`   Tokens used: ${result.tokensUsed}`)
     );
   } catch (error) {
     console.log(
-      import_chalk15.default.red(
+      import_chalk18.default.red(
         `\u274C Ingest failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
   }
 });
 wikiCommand.command("query <question>").description("Ask a question against the wiki").action(async (question) => {
-  console.log(import_chalk15.default.gray(`Searching wiki for: "${question}"...`));
+  console.log(import_chalk18.default.gray(`Searching wiki for: "${question}"...`));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const result = await compiler.query(question);
     console.log("");
-    console.log(import_chalk15.default.white(result.answer));
+    console.log(import_chalk18.default.white(result.answer));
     console.log("");
     if (result.citedArticles.length > 0) {
       console.log(
-        import_chalk15.default.gray("Cited: ") + import_chalk15.default.cyan(result.citedArticles.map((s) => `[[${s}]]`).join(", "))
+        import_chalk18.default.gray("Cited: ") + import_chalk18.default.cyan(result.citedArticles.map((s) => `[[${s}]]`).join(", "))
       );
     }
     if (result.newArticleSlug) {
       console.log(
-        import_chalk15.default.green(
+        import_chalk18.default.green(
           `\u{1F4DD} New article created from this query: [[${result.newArticleSlug}]]`
         )
       );
     }
-    console.log(import_chalk15.default.gray(`Tokens used: ${result.tokensUsed}`));
+    console.log(import_chalk18.default.gray(`Tokens used: ${result.tokensUsed}`));
   } catch (error) {
     console.log(
-      import_chalk15.default.red(
+      import_chalk18.default.red(
         `\u274C Query failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
   }
 });
 wikiCommand.command("lint").description("Check wiki health \u2014 find stale content, orphans, and gaps").action(async () => {
-  console.log(import_chalk15.default.gray("Linting wiki..."));
+  console.log(import_chalk18.default.gray("Linting wiki..."));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const result = await compiler.lint();
     if (result.findings.length === 0) {
-      console.log(import_chalk15.default.green("\u2705 Wiki is healthy \u2014 no issues found!"));
+      console.log(import_chalk18.default.green("\u2705 Wiki is healthy \u2014 no issues found!"));
       return;
     }
     console.log(
-      import_chalk15.default.yellow(`\u26A0\uFE0F  Found ${result.findings.length} issue(s):
+      import_chalk18.default.yellow(`\u26A0\uFE0F  Found ${result.findings.length} issue(s):
 `)
     );
     for (const finding of result.findings) {
@@ -3116,23 +3768,23 @@ wikiCommand.command("lint").description("Check wiki health \u2014 find stale con
         broken_link: "\u{1F494}"
       }[finding.type];
       console.log(
-        `  ${icon} ${import_chalk15.default.white(`[${finding.type}]`)} ${import_chalk15.default.cyan(`[[${finding.articleSlug}]]`)}`
+        `  ${icon} ${import_chalk18.default.white(`[${finding.type}]`)} ${import_chalk18.default.cyan(`[[${finding.articleSlug}]]`)}`
       );
-      console.log(import_chalk15.default.gray(`     ${finding.description}`));
-      console.log(import_chalk15.default.gray(`     \u2192 ${finding.suggestion}`));
+      console.log(import_chalk18.default.gray(`     ${finding.description}`));
+      console.log(import_chalk18.default.gray(`     \u2192 ${finding.suggestion}`));
       console.log("");
     }
     if (result.articlesMarkedStale.length > 0) {
       console.log(
-        import_chalk15.default.yellow(
+        import_chalk18.default.yellow(
           `Marked ${result.articlesMarkedStale.length} article(s) as stale.`
         )
       );
     }
-    console.log(import_chalk15.default.gray(`Tokens used: ${result.tokensUsed}`));
+    console.log(import_chalk18.default.gray(`Tokens used: ${result.tokensUsed}`));
   } catch (error) {
     console.log(
-      import_chalk15.default.red(
+      import_chalk18.default.red(
         `\u274C Lint failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -3144,46 +3796,46 @@ wikiCommand.command("status").description("Show wiki statistics").action(async (
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const status = await compiler.getStatus();
-    console.log(import_chalk15.default.white.bold("\n\u{1F4DA} Wiki Status\n"));
+    console.log(import_chalk18.default.white.bold("\n\u{1F4DA} Wiki Status\n"));
     console.log(
-      import_chalk15.default.gray("  Sources:    ") + import_chalk15.default.white(String(status.totalSources))
+      import_chalk18.default.gray("  Sources:    ") + import_chalk18.default.white(String(status.totalSources))
     );
     console.log(
-      import_chalk15.default.gray("  Articles:   ") + import_chalk15.default.white(String(status.totalArticles)) + import_chalk15.default.gray(" (") + import_chalk15.default.green(`${status.activeArticles} active`) + (status.staleArticles > 0 ? import_chalk15.default.yellow(`, ${status.staleArticles} stale`) : "") + (status.archivedArticles > 0 ? import_chalk15.default.gray(`, ${status.archivedArticles} archived`) : "") + import_chalk15.default.gray(")")
+      import_chalk18.default.gray("  Articles:   ") + import_chalk18.default.white(String(status.totalArticles)) + import_chalk18.default.gray(" (") + import_chalk18.default.green(`${status.activeArticles} active`) + (status.staleArticles > 0 ? import_chalk18.default.yellow(`, ${status.staleArticles} stale`) : "") + (status.archivedArticles > 0 ? import_chalk18.default.gray(`, ${status.archivedArticles} archived`) : "") + import_chalk18.default.gray(")")
     );
     if (Object.keys(status.categories).length > 0) {
-      console.log(import_chalk15.default.gray("\n  Categories:"));
+      console.log(import_chalk18.default.gray("\n  Categories:"));
       for (const [category, count] of Object.entries(status.categories).sort()) {
         console.log(
-          import_chalk15.default.gray("    ") + import_chalk15.default.cyan(category) + import_chalk15.default.gray(": ") + import_chalk15.default.white(String(count))
+          import_chalk18.default.gray("    ") + import_chalk18.default.cyan(category) + import_chalk18.default.gray(": ") + import_chalk18.default.white(String(count))
         );
       }
     }
     if (status.lastActivity) {
       console.log(
-        import_chalk15.default.gray("\n  Last activity: ") + import_chalk15.default.white(status.lastActivity.toISOString().split("T")[0])
+        import_chalk18.default.gray("\n  Last activity: ") + import_chalk18.default.white(status.lastActivity.toISOString().split("T")[0])
       );
     }
     console.log("");
   } catch (error) {
     console.log(
-      import_chalk15.default.red(
+      import_chalk18.default.red(
         `\u274C Status failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
   }
 });
 wikiCommand.command("flush").description("Export wiki to disk as markdown files").action(async () => {
-  console.log(import_chalk15.default.gray("Flushing wiki to disk..."));
+  console.log(import_chalk18.default.gray("Flushing wiki to disk..."));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const result = await compiler.flushToDisk();
-    console.log(import_chalk15.default.green(`\u2705 Wrote ${result.filesWritten} files to ${result.wikiDir}`));
+    console.log(import_chalk18.default.green(`\u2705 Wrote ${result.filesWritten} files to ${result.wikiDir}`));
   } catch (error) {
     console.log(
-      import_chalk15.default.red(
+      import_chalk18.default.red(
         `\u274C Flush failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -3199,7 +3851,7 @@ wikiCommand.command("index").description("Show the wiki table of contents").opti
       index = index.filter((e) => e.category === options.category);
     }
     if (index.length === 0) {
-      console.log(import_chalk15.default.gray("Wiki is empty. Run `devpilot wiki ingest` to add sources."));
+      console.log(import_chalk18.default.gray("Wiki is empty. Run `devpilot wiki ingest` to add sources."));
       return;
     }
     const byCategory = {};
@@ -3209,25 +3861,25 @@ wikiCommand.command("index").description("Show the wiki table of contents").opti
       }
       byCategory[entry.category].push(entry);
     }
-    console.log(import_chalk15.default.white.bold("\n\u{1F4D6} Wiki Index\n"));
+    console.log(import_chalk18.default.white.bold("\n\u{1F4D6} Wiki Index\n"));
     for (const [category, entries] of Object.entries(byCategory).sort()) {
       console.log(
-        import_chalk15.default.cyan.bold(
+        import_chalk18.default.cyan.bold(
           `  ${category.charAt(0).toUpperCase() + category.slice(1)}`
         )
       );
       for (const entry of entries) {
-        const statusColor = entry.status === "active" ? import_chalk15.default.green : entry.status === "stale" ? import_chalk15.default.yellow : import_chalk15.default.gray;
+        const statusColor = entry.status === "active" ? import_chalk18.default.green : entry.status === "stale" ? import_chalk18.default.yellow : import_chalk18.default.gray;
         const badge = statusColor(`[${entry.status}]`);
         console.log(
-          `    ${badge} ${import_chalk15.default.white(entry.title)} ${import_chalk15.default.gray(`[[${entry.slug}]]`)}`
+          `    ${badge} ${import_chalk18.default.white(entry.title)} ${import_chalk18.default.gray(`[[${entry.slug}]]`)}`
         );
       }
       console.log("");
     }
   } catch (error) {
     console.log(
-      import_chalk15.default.red(
+      import_chalk18.default.red(
         `\u274C Index failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -3240,30 +3892,30 @@ wikiCommand.command("read <slug>").description("Read a specific wiki article").a
     const compiler = createWikiCompiler(config);
     const article = await compiler.getArticle(slug);
     if (!article) {
-      console.log(import_chalk15.default.red(`\u274C Article not found: [[${slug}]]`));
+      console.log(import_chalk18.default.red(`\u274C Article not found: [[${slug}]]`));
       return;
     }
-    console.log(import_chalk15.default.white.bold(`
+    console.log(import_chalk18.default.white.bold(`
 # ${article.title}
 `));
     console.log(
-      import_chalk15.default.gray(
+      import_chalk18.default.gray(
         `Category: ${article.category} | Status: ${article.status} | v${article.version}`
       )
     );
     if (article.backlinks.length > 0) {
       console.log(
-        import_chalk15.default.gray(
+        import_chalk18.default.gray(
           `Related: ${article.backlinks.map((b) => `[[${b}]]`).join(", ")}`
         )
       );
     }
-    console.log(import_chalk15.default.gray("\u2500".repeat(60)));
+    console.log(import_chalk18.default.gray("\u2500".repeat(60)));
     console.log(article.content);
     console.log("");
   } catch (error) {
     console.log(
-      import_chalk15.default.red(
+      import_chalk18.default.red(
         `\u274C Read failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -3299,7 +3951,7 @@ var pkg = {
   name: "@devpilot.sh/cli",
   version: VERSION
 };
-var cli = new import_commander17.Command();
+var cli = new import_commander18.Command();
 cli.name("devpilot").description("DevPilot CLI - Manage your AI coding agent fleet").version(VERSION);
 cli.addCommand(initCommand);
 cli.addCommand(setupCommand);
@@ -3308,6 +3960,7 @@ cli.addCommand(statusCommand);
 cli.addCommand(configCommand);
 cli.addCommand(bridgeCommand);
 cli.addCommand(sessionCommand);
+cli.addCommand(sessionsCommand);
 cli.addCommand(sessionRunnerCommand);
 cli.addCommand(updateCommand);
 cli.addCommand(wikiCommand);

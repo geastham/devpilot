@@ -1,7 +1,7 @@
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
-import { tmpdir } from 'os';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, mkdirSync } from 'fs';
+import { tmpdir, homedir } from 'os';
 import { join } from 'path';
 import { TelemetryCollector, type SessionTelemetry } from './stream-events';
 
@@ -53,6 +53,44 @@ export interface ClaudeRunOutcome {
 
 /** `path -> two-letter porcelain code`, e.g. `src/a.ts -> ' M'`. */
 type GitState = Map<string, string>;
+
+/** How many owned session ids to keep. Older ones fall outside any scan window. */
+const OWNED_SESSION_LIMIT = 5_000;
+
+/**
+ * Append a session id to `~/.devpilot/owned-sessions.json`.
+ *
+ * Best-effort and never throwing: failing to record one means the adoption
+ * scanner falls back to the prompt-marker check for it, which is a slightly
+ * weaker exclusion — not a reason to fail a completed agent run.
+ *
+ * Read-modify-write is safe enough here. Concurrent runners can lose an id in a
+ * race, and losing one costs a duplicate offer in a preview a human confirms.
+ * Locking for that would be a mechanism the failure does not justify.
+ */
+function recordOwnedSession(sessionId: string): void {
+  try {
+    const dir = join(homedir(), '.devpilot');
+    const path = join(dir, 'owned-sessions.json');
+
+    let ids: string[] = [];
+    if (existsSync(path)) {
+      const parsed = JSON.parse(readFileSync(path, 'utf8')) as { sessionIds?: unknown };
+      if (Array.isArray(parsed.sessionIds)) {
+        ids = parsed.sessionIds.filter((v): v is string => typeof v === 'string');
+      }
+    }
+    if (ids.includes(sessionId)) return;
+
+    ids.push(sessionId);
+    if (ids.length > OWNED_SESSION_LIMIT) ids = ids.slice(-OWNED_SESSION_LIMIT);
+
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path, JSON.stringify({ version: 1, sessionIds: ids }, null, 2), 'utf8');
+  } catch {
+    // See above.
+  }
+}
 
 async function git(workdir: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', args, {
@@ -366,6 +404,20 @@ export async function runClaudeSession(
     (usage.cache_creation_input_tokens ?? 0);
 
   const durationMs = envelope?.duration_ms ?? Date.now() - startedAt;
+
+  /**
+   * Write this session down as DevPilot's own — TRD 21 §4.4, mechanism 1.
+   *
+   * Sessions the runner starts leave a transcript in `~/.claude/projects` like
+   * any other, so without this the adoption scanner would offer to put work
+   * already on the board back onto the board a second time.
+   *
+   * `session_id` comes from `claude`'s own JSON envelope, which is the exact
+   * value the scanner reads off the transcript filename — so this is an exact
+   * match, not a heuristic. The prompt-marker check in `transcript.ts` is the
+   * fallback for sessions that predate this ledger.
+   */
+  if (envelope?.session_id) recordOwnedSession(envelope.session_id);
 
   // Success needs BOTH the process and the envelope to agree. `claude` exits 0
   // on an in-band error (`is_error: true`), so exit code alone would report a

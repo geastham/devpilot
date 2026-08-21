@@ -209,6 +209,44 @@ var BridgeClient = class {
       return false;
     }
   }
+  /**
+   * Offer agent sessions found already running on this machine — TRD 21 §7.1.
+   *
+   * The reverse of `poll`: that asks the bridge for work, this tells the bridge
+   * about work it never sent. THROWS, unlike `mirrorSessionPlan`, because
+   * adoption is something a user explicitly asked for and a silent failure
+   * would leave them staring at a board that did not change.
+   *
+   * The request carries no transcript content and cannot: `AdoptionRequest` is
+   * a `.strict()` schema with no field for it (TRD 21 DECISION B).
+   */
+  async adoptSessions(request) {
+    const body = import_bridge_protocol.AdoptionRequestSchema.parse(request);
+    const raw = await this.request("/api/adoptions", {
+      method: "POST",
+      body: JSON.stringify(body)
+    });
+    return import_bridge_protocol.AdoptionResponseSchema.parse(raw);
+  }
+  /**
+   * Report the repositories this machine has agent history for — TRD 21 §7.2.
+   *
+   * Best-effort, and NEVER throws: this rides `bridge connect`, and a machine
+   * failing to connect because an inventory upload was refused would trade the
+   * product for a nicety. Callers get null and decide whether to mention it.
+   */
+  async reportDiscovery(request) {
+    try {
+      const body = import_bridge_protocol.DiscoveryRequestSchema.parse(request);
+      const raw = await this.request("/api/discovery", {
+        method: "POST",
+        body: JSON.stringify(body)
+      });
+      return import_bridge_protocol.DiscoveryResponseSchema.parse(raw);
+    } catch {
+      return null;
+    }
+  }
   /** Fixes the `getOrchestatorId` typo from 0.1.x. */
   getOrchestratorId() {
     return this.orchestratorId;
