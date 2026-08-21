@@ -64,6 +64,14 @@ interface SessionObservation {
     gitBranch: string | null;
     /** The client's own session title, when it set one. The best title available. */
     customTitle: string | null;
+    /**
+     * Where this session is being driven — `https://claude.ai/code/session_…`.
+     *
+     * Present only for sessions that were remote-controlled; a purely local
+     * terminal session has no such place and correctly reports null. On the
+     * reference machine 19 of the 25 most recent sessions carry one.
+     */
+    webUrl: string | null;
     /** First prompt with a human origin, flattened to text. */
     firstHumanPrompt: string | null;
     /** Earliest timestamp in the head sample. */

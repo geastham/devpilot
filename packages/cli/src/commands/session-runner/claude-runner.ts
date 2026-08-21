@@ -336,7 +336,8 @@ export async function runClaudeSession(
     let stderr = '';
     /** Partial trailing line between chunks; NDJSON does not respect chunk boundaries. */
     let pending = '';
-    const collector = new TelemetryCollector();
+    // Paths come back relative to the repo, not to whoever's laptop this is.
+    const collector = new TelemetryCollector(Date.now, workdir);
     let timedOut = false;
     let killed = false;
 

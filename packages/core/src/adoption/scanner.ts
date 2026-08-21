@@ -347,6 +347,7 @@ export function scanSessions(options: ScanOptions): ScanResult {
         messageCount: observation.messageCount,
         live,
         ...(touchedPaths.length > 0 ? { touchedPaths } : {}),
+        ...(observation.webUrl ? { webUrl: observation.webUrl } : {}),
       });
     }
   }

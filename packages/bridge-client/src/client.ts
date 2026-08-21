@@ -3,6 +3,8 @@ import {
   AdoptionResponseSchema,
   DiscoveryRequestSchema,
   DiscoveryResponseSchema,
+  ObservationRequestSchema,
+  ObservationResponseSchema,
   RegisterRequestSchema,
   RegisterResponseSchema,
   formatApiError,
@@ -10,6 +12,8 @@ import {
   type AdoptionResponse,
   type DiscoveryRequest,
   type DiscoveryResponse,
+  type ObservationRequest,
+  type ObservationResponse,
   type RegisterRequest,
   type RegisterResponse,
   type SessionComplete,
@@ -280,6 +284,30 @@ export class BridgeClient {
         body: JSON.stringify(body),
       });
       return DiscoveryResponseSchema.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Report the agent sessions running on this machine — TRD 22 §7.
+   *
+   * The sweep behind a live cockpit. Unlike `adoptSessions` this needs no Linear
+   * workspace, no team and no route, so it is safe to run continuously from the
+   * moment a bridge connects.
+   *
+   * NEVER THROWS. This rides the bridge's own loop, and a machine that stopped
+   * running dispatched work because an observation upload failed would have
+   * traded the product for a display.
+   */
+  async reportObservations(request: ObservationRequest): Promise<ObservationResponse | null> {
+    try {
+      const body = ObservationRequestSchema.parse(request);
+      const raw = await this.request<unknown>('/api/observations', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      return ObservationResponseSchema.parse(raw);
     } catch {
       return null;
     }

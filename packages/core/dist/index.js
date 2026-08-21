@@ -9394,6 +9394,7 @@ function probeTranscript(transcriptPath, sessionUuid, options = {}) {
   let cwd = null;
   let gitBranch = null;
   let customTitle = null;
+  let webUrl = null;
   let firstHumanPrompt = null;
   let startedAt = null;
   let parsedEntries = 0;
@@ -9427,6 +9428,15 @@ function probeTranscript(transcriptPath, sessionUuid, options = {}) {
     }
     if (entry.type === "custom-title" && typeof entry.customTitle === "string") {
       customTitle = entry.customTitle.trim() || null;
+    }
+    if (!webUrl && typeof entry.url === "string" && entry.url.startsWith("https://claude.ai/")) {
+      webUrl = entry.url;
+    }
+    if (!webUrl && typeof entry.bridgeSessionId === "string") {
+      const id = entry.bridgeSessionId.replace(/^cse_/, "");
+      if (/^[A-Za-z0-9]{8,64}$/.test(id)) {
+        webUrl = `https://claude.ai/code/session_${id}`;
+      }
     }
     if (!startedAt && typeof entry.timestamp === "string") startedAt = entry.timestamp;
     if (!firstHumanPrompt && isHumanPrompt(entry)) {
@@ -9464,6 +9474,7 @@ function probeTranscript(transcriptPath, sessionUuid, options = {}) {
     cwd,
     gitBranch,
     customTitle,
+    webUrl,
     firstHumanPrompt,
     startedAt,
     lastActivityAt: new Date(mtimeMs).toISOString(),
@@ -9736,7 +9747,8 @@ function scanSessions(options) {
         lastActivityAt: observation.lastActivityAt,
         messageCount: observation.messageCount,
         live,
-        ...touchedPaths.length > 0 ? { touchedPaths } : {}
+        ...touchedPaths.length > 0 ? { touchedPaths } : {},
+        ...observation.webUrl ? { webUrl: observation.webUrl } : {}
       });
     }
   }

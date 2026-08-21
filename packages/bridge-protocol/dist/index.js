@@ -45,6 +45,8 @@ __export(index_exports, {
   JOIN_PROOF_HEADER: () => JOIN_PROOF_HEADER,
   JoinSessionRequestSchema: () => JoinSessionRequestSchema,
   JoinSessionResponseSchema: () => JoinSessionResponseSchema,
+  ObservationRequestSchema: () => ObservationRequestSchema,
+  ObservationResponseSchema: () => ObservationResponseSchema,
   PARTICIPANT_KINDS: () => PARTICIPANT_KINDS,
   ParticipantKindSchema: () => ParticipantKindSchema,
   PostSessionMessageRequestSchema: () => PostSessionMessageRequestSchema,
@@ -743,7 +745,21 @@ var AdoptionCandidateSchema = import_zod5.z.object({
    * This is what makes `getAvoidFiles` correct for a session DevPilot did not
    * start: without it, an adopted agent holds files nothing knows about.
    */
-  touchedPaths: import_zod5.z.array(import_zod5.z.string().min(1).max(400)).max(ADOPTION_LIMITS.MAX_TOUCHED_PATHS).optional()
+  touchedPaths: import_zod5.z.array(import_zod5.z.string().min(1).max(400)).max(ADOPTION_LIMITS.MAX_TOUCHED_PATHS).optional(),
+  /**
+   * Where this session is actually being driven — TRD 22 §6.3.
+   *
+   * DevPilot cannot steer a session it did not spawn, and pretending
+   * otherwise would be worse than not offering it. But that reasoning
+   * assumed the options were *steer* or *nothing*; there is a third, which
+   * is to take the person to the place that already can.
+   *
+   * Constrained to `https://claude.ai/…` rather than any URL: this value
+   * comes from a transcript, it is rendered as a link in a shared portal,
+   * and an open redirect sourced from attacker-influenced local files is not
+   * a trade worth making for flexibility nobody asked for.
+   */
+  webUrl: import_zod5.z.string().url().max(500).refine((u) => u.startsWith("https://claude.ai/"), "webUrl must be a claude.ai link").optional()
 }).strict();
 var AdoptionRequestSchema = import_zod5.z.object({
   machineName: import_zod5.z.string().min(1).max(255),
@@ -778,6 +794,26 @@ var AdoptionResponseSchema = import_zod5.z.object({
   skipped: import_zod5.z.number().int().nonnegative(),
   /** Echoed so a client cannot mistake a preview for a write. */
   dryRun: import_zod5.z.boolean()
+});
+var ObservationRequestSchema = import_zod5.z.object({
+  machineName: import_zod5.z.string().min(1).max(255),
+  sessions: import_zod5.z.array(AdoptionCandidateSchema).max(ADOPTION_LIMITS.MAX_CANDIDATES),
+  /**
+   * Adoption keys this machine no longer sees as live.
+   *
+   * Without this a session that ends between two sweeps stays `running` in the
+   * cockpit forever — the board would fill with agents that finished hours
+   * ago, which is worse than showing nothing.
+   */
+  endedKeys: import_zod5.z.array(import_zod5.z.string().regex(/^[0-9a-f]{64}$/)).max(ADOPTION_LIMITS.MAX_CANDIDATES).default([])
+}).strict();
+var ObservationResponseSchema = import_zod5.z.object({
+  observed: import_zod5.z.number().int().nonnegative(),
+  created: import_zod5.z.number().int().nonnegative(),
+  updated: import_zod5.z.number().int().nonnegative(),
+  ended: import_zod5.z.number().int().nonnegative(),
+  /** Projects auto-created for repos this org had not seen before. */
+  projectsCreated: import_zod5.z.number().int().nonnegative()
 });
 var DiscoveredRepoSchema = import_zod5.z.object({
   repo: RepoSlugSchema,
@@ -912,6 +948,8 @@ function linearIdentifierFromBranch(branch) {
   JOIN_PROOF_HEADER,
   JoinSessionRequestSchema,
   JoinSessionResponseSchema,
+  ObservationRequestSchema,
+  ObservationResponseSchema,
   PARTICIPANT_KINDS,
   ParticipantKindSchema,
   PostSessionMessageRequestSchema,

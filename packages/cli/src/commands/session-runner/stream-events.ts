@@ -130,6 +130,32 @@ const MAX_ACTIONS = 200;
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 const READ_TOOLS = new Set(['Read', 'Glob', 'Grep']);
 
+/**
+ * Make a path readable to a human who knows the repository.
+ *
+ * Claude reports `file_path` as an absolute path, so every surface that showed
+ * a file showed
+ * `/private/tmp/claude-501/-Users-…/scratchpad/fleet-a/src/lru.ts`. On a Linear
+ * ticket that is unreadable, and it publishes the directory layout of whoever
+ * happened to run the agent to everyone who can see the issue.
+ *
+ * Stripped here rather than at each display site: the cockpit HUD, the graph
+ * node labels and the Linear summary all read the same field, and three
+ * independent trimmings would drift.
+ */
+function relativize(path: string, workdir?: string): string {
+  if (!workdir) return path;
+  const root = workdir.endsWith('/') ? workdir : `${workdir}/`;
+  if (path.startsWith(root)) return path.slice(root.length);
+
+  // Symlinked temp dirs mean the agent may report /private/var/… for a workdir
+  // given as /var/…, and vice versa. Compare both ways before giving up.
+  const alt = root.startsWith('/private/') ? root.slice('/private'.length) : `/private${root}`;
+  if (path.startsWith(alt)) return path.slice(alt.length);
+
+  return path;
+}
+
 export class TelemetryCollector {
   private readonly startedAt: number;
   private lastEventAt: number;
@@ -146,13 +172,16 @@ export class TelemetryCollector {
   private lastText?: string;
   private lastAction?: AgentAction;
 
-  constructor(now: () => number = Date.now) {
+  constructor(now: () => number = Date.now, workdir?: string) {
     this.now = now;
+    this.workdir = workdir;
     this.startedAt = now();
     this.lastEventAt = this.startedAt;
   }
 
   private readonly now: () => number;
+  /** The repo root, so reported paths are relative to it. */
+  private readonly workdir?: string;
 
   /**
    * Feed one raw line. Malformed lines are ignored rather than thrown:
@@ -208,12 +237,13 @@ export class TelemetryCollector {
   private recordTool(tool: string, input: Record<string, unknown>): void {
     this.toolCalls++;
 
-    const path =
+    const raw =
       typeof input.file_path === 'string'
         ? input.file_path
         : typeof input.path === 'string'
           ? input.path
           : undefined;
+    const path = raw ? relativize(raw, this.workdir) : undefined;
 
     if (path) {
       const list = WRITE_TOOLS.has(tool) ? this.touched : READ_TOOLS.has(tool) ? this.read : null;

@@ -1228,6 +1228,20 @@ declare const AdoptionCandidateSchema: z.ZodObject<{
      * start: without it, an adopted agent holds files nothing knows about.
      */
     touchedPaths: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+    /**
+     * Where this session is actually being driven — TRD 22 §6.3.
+     *
+     * DevPilot cannot steer a session it did not spawn, and pretending
+     * otherwise would be worse than not offering it. But that reasoning
+     * assumed the options were *steer* or *nothing*; there is a third, which
+     * is to take the person to the place that already can.
+     *
+     * Constrained to `https://claude.ai/…` rather than any URL: this value
+     * comes from a transcript, it is rendered as a link in a shared portal,
+     * and an open redirect sourced from attacker-influenced local files is not
+     * a trade worth making for flexibility nobody asked for.
+     */
+    webUrl: z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>;
 }, "strict", z.ZodTypeAny, {
     title: string;
     repo: string;
@@ -1240,6 +1254,7 @@ declare const AdoptionCandidateSchema: z.ZodObject<{
     branch?: string | undefined;
     messageCount?: number | undefined;
     touchedPaths?: string[] | undefined;
+    webUrl?: string | undefined;
 }, {
     title: string;
     repo: string;
@@ -1252,6 +1267,7 @@ declare const AdoptionCandidateSchema: z.ZodObject<{
     branch?: string | undefined;
     messageCount?: number | undefined;
     touchedPaths?: string[] | undefined;
+    webUrl?: string | undefined;
 }>;
 type AdoptionCandidate = z.infer<typeof AdoptionCandidateSchema>;
 declare const AdoptionRequestSchema: z.ZodObject<{
@@ -1286,6 +1302,20 @@ declare const AdoptionRequestSchema: z.ZodObject<{
          * start: without it, an adopted agent holds files nothing knows about.
          */
         touchedPaths: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+        /**
+         * Where this session is actually being driven — TRD 22 §6.3.
+         *
+         * DevPilot cannot steer a session it did not spawn, and pretending
+         * otherwise would be worse than not offering it. But that reasoning
+         * assumed the options were *steer* or *nothing*; there is a third, which
+         * is to take the person to the place that already can.
+         *
+         * Constrained to `https://claude.ai/…` rather than any URL: this value
+         * comes from a transcript, it is rendered as a link in a shared portal,
+         * and an open redirect sourced from attacker-influenced local files is not
+         * a trade worth making for flexibility nobody asked for.
+         */
+        webUrl: z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>;
     }, "strict", z.ZodTypeAny, {
         title: string;
         repo: string;
@@ -1298,6 +1328,7 @@ declare const AdoptionRequestSchema: z.ZodObject<{
         branch?: string | undefined;
         messageCount?: number | undefined;
         touchedPaths?: string[] | undefined;
+        webUrl?: string | undefined;
     }, {
         title: string;
         repo: string;
@@ -1310,6 +1341,7 @@ declare const AdoptionRequestSchema: z.ZodObject<{
         branch?: string | undefined;
         messageCount?: number | undefined;
         touchedPaths?: string[] | undefined;
+        webUrl?: string | undefined;
     }>, "many">;
     /**
      * Preview. Every read runs — routing, duplicate detection, branch and title
@@ -1335,6 +1367,7 @@ declare const AdoptionRequestSchema: z.ZodObject<{
         branch?: string | undefined;
         messageCount?: number | undefined;
         touchedPaths?: string[] | undefined;
+        webUrl?: string | undefined;
     }[];
     dryRun: boolean;
 }, {
@@ -1351,6 +1384,7 @@ declare const AdoptionRequestSchema: z.ZodObject<{
         branch?: string | undefined;
         messageCount?: number | undefined;
         touchedPaths?: string[] | undefined;
+        webUrl?: string | undefined;
     }[];
     dryRun?: boolean | undefined;
 }>;
@@ -1456,6 +1490,156 @@ type AdoptionResponse = z.infer<typeof AdoptionResponseSchema>;
  * call, writes to no board, and calls no Linear API, which is what makes it
  * safe to run on every connect. Adoption creates issues, so it does not.
  */
+/**
+ * Observation — TRD 22 §7.
+ *
+ * The half of adoption that needs no Linear workspace, no team, and no route.
+ * Same candidate shape; different verb. `POST /api/observations` records these
+ * so they are visible in the cockpit, and `POST /api/adoptions` is the separate,
+ * deliberate step that puts one on a board.
+ *
+ * Split rather than a flag on AdoptionRequest because the two have genuinely
+ * different preconditions and different failure modes: observation cannot fail
+ * for want of configuration, and placement can.
+ */
+declare const ObservationRequestSchema: z.ZodObject<{
+    machineName: z.ZodString;
+    sessions: z.ZodArray<z.ZodObject<{
+        /**
+         * `sha256(machineName + ':' + sessionUuid)`, hex.
+         *
+         * Opaque on the wire and used only for idempotence. The machine name is in
+         * the hash because two laptops share a session UUID only if someone copied
+         * a `~/.claude` directory between them — and if they did, those genuinely
+         * are two observations of two different machines.
+         */
+        adoptionKey: z.ZodString;
+        agent: z.ZodEnum<["claude-code"]>;
+        /** One line. From the client's own session title where it has one. */
+        title: z.ZodString;
+        /** Derived locally. Never a quotation from the transcript. */
+        summary: z.ZodOptional<z.ZodString>;
+        repo: z.ZodString;
+        branch: z.ZodOptional<z.ZodString>;
+        startedAt: z.ZodString;
+        lastActivityAt: z.ZodString;
+        /** Approximate — see the probe's note on why it is not paid for exactly. */
+        messageCount: z.ZodOptional<z.ZodNumber>;
+        /** Still running at scan time. */
+        live: z.ZodBoolean;
+        /**
+         * Changed file PATHS. Not contents, not diffs.
+         *
+         * This is what makes `getAvoidFiles` correct for a session DevPilot did not
+         * start: without it, an adopted agent holds files nothing knows about.
+         */
+        touchedPaths: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+        /**
+         * Where this session is actually being driven — TRD 22 §6.3.
+         *
+         * DevPilot cannot steer a session it did not spawn, and pretending
+         * otherwise would be worse than not offering it. But that reasoning
+         * assumed the options were *steer* or *nothing*; there is a third, which
+         * is to take the person to the place that already can.
+         *
+         * Constrained to `https://claude.ai/…` rather than any URL: this value
+         * comes from a transcript, it is rendered as a link in a shared portal,
+         * and an open redirect sourced from attacker-influenced local files is not
+         * a trade worth making for flexibility nobody asked for.
+         */
+        webUrl: z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>;
+    }, "strict", z.ZodTypeAny, {
+        title: string;
+        repo: string;
+        agent: "claude-code";
+        adoptionKey: string;
+        startedAt: string;
+        lastActivityAt: string;
+        live: boolean;
+        summary?: string | undefined;
+        branch?: string | undefined;
+        messageCount?: number | undefined;
+        touchedPaths?: string[] | undefined;
+        webUrl?: string | undefined;
+    }, {
+        title: string;
+        repo: string;
+        agent: "claude-code";
+        adoptionKey: string;
+        startedAt: string;
+        lastActivityAt: string;
+        live: boolean;
+        summary?: string | undefined;
+        branch?: string | undefined;
+        messageCount?: number | undefined;
+        touchedPaths?: string[] | undefined;
+        webUrl?: string | undefined;
+    }>, "many">;
+    /**
+     * Adoption keys this machine no longer sees as live.
+     *
+     * Without this a session that ends between two sweeps stays `running` in the
+     * cockpit forever — the board would fill with agents that finished hours
+     * ago, which is worse than showing nothing.
+     */
+    endedKeys: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+}, "strict", z.ZodTypeAny, {
+    machineName: string;
+    sessions: {
+        title: string;
+        repo: string;
+        agent: "claude-code";
+        adoptionKey: string;
+        startedAt: string;
+        lastActivityAt: string;
+        live: boolean;
+        summary?: string | undefined;
+        branch?: string | undefined;
+        messageCount?: number | undefined;
+        touchedPaths?: string[] | undefined;
+        webUrl?: string | undefined;
+    }[];
+    endedKeys: string[];
+}, {
+    machineName: string;
+    sessions: {
+        title: string;
+        repo: string;
+        agent: "claude-code";
+        adoptionKey: string;
+        startedAt: string;
+        lastActivityAt: string;
+        live: boolean;
+        summary?: string | undefined;
+        branch?: string | undefined;
+        messageCount?: number | undefined;
+        touchedPaths?: string[] | undefined;
+        webUrl?: string | undefined;
+    }[];
+    endedKeys?: string[] | undefined;
+}>;
+type ObservationRequest = z.infer<typeof ObservationRequestSchema>;
+declare const ObservationResponseSchema: z.ZodObject<{
+    observed: z.ZodNumber;
+    created: z.ZodNumber;
+    updated: z.ZodNumber;
+    ended: z.ZodNumber;
+    /** Projects auto-created for repos this org had not seen before. */
+    projectsCreated: z.ZodNumber;
+}, "strip", z.ZodTypeAny, {
+    created: number;
+    observed: number;
+    updated: number;
+    ended: number;
+    projectsCreated: number;
+}, {
+    created: number;
+    observed: number;
+    updated: number;
+    ended: number;
+    projectsCreated: number;
+}>;
+type ObservationResponse = z.infer<typeof ObservationResponseSchema>;
 declare const DiscoveredRepoSchema: z.ZodObject<{
     repo: z.ZodString;
     /** The grouping key the portal renders sections by — the GitHub org. */
@@ -1613,4 +1797,4 @@ declare function buildAdoptionIssueDescription(input: {
 }): string;
 declare function linearIdentifierFromBranch(branch: string): string | null;
 
-export { ADOPTION_AGENTS, ADOPTION_LIMITS, ADOPTION_MATCH_KINDS, ADOPTION_OUTCOME_STATUSES, AGENT_KINDS, type AdoptionAgent, AdoptionAgentSchema, type AdoptionCandidate, AdoptionCandidateSchema, type AdoptionCommentInput, type AdoptionMatchKind, AdoptionMatchKindSchema, type AdoptionOutcome, AdoptionOutcomeSchema, type AdoptionOutcomeStatus, AdoptionOutcomeStatusSchema, type AdoptionRequest, AdoptionRequestSchema, type AdoptionResponse, AdoptionResponseSchema, type AgentKind, AgentKindSchema, type ApiErrorBody, ApiErrorSchema, type CompletionCommentInput, type CreateSharedSessionRequest, CreateSharedSessionRequestSchema, type CreateSharedSessionResponse, CreateSharedSessionResponseSchema, type DiscoveredRepo, DiscoveredRepoSchema, type DiscoveryRequest, DiscoveryRequestSchema, type DiscoveryResponse, DiscoveryResponseSchema, DispatchPollResponseSchema, ERROR_CODES, type HeartbeatRequest, HeartbeatRequestSchema, JOIN_PROOF_HEADER, type JoinCredentials, type JoinSessionRequest, JoinSessionRequestSchema, type JoinSessionResponse, JoinSessionResponseSchema, PARTICIPANT_KINDS, type ParticipantKind, ParticipantKindSchema, type PostSessionMessageRequest, PostSessionMessageRequestSchema, type PostSessionMessageResponse, PostSessionMessageResponseSchema, type ProgressCommentInput, RealtimeCredentialsSchema, type RegisterRequest, RegisterRequestSchema, type RegisterResponse, RegisterResponseSchema, RepoSlugSchema, type RotateSessionKeyRequest, RotateSessionKeyRequestSchema, type RotateSessionKeyResponse, RotateSessionKeyResponseSchema, SESSION_EVENT_TYPES, SESSION_LIMITS, SESSION_MESSAGE_KINDS, SESSION_MODES, SESSION_STATUSES, type SessionCipher, type SessionComplete, SessionCompleteResponseSchema, SessionCompleteSchema, SessionCryptoError, SessionDecryptionError, type SessionEventType, SessionEventTypeSchema, SessionKeyError, type SessionMessage, type SessionMessageKind, SessionMessageKindSchema, type SessionMessagePage, SessionMessagePageSchema, SessionMessageSchema, type SessionMode, SessionModeSchema, type SessionParticipant, SessionParticipantSchema, type SessionStatus, SessionStatusSchema, type SessionStatusUpdate, SessionStatusUpdateSchema, type SetSessionModeRequest, SetSessionModeRequestSchema, type SharedSession, SharedSessionSchema, TERMINAL_STATUSES, type TaskDispatchMessage, TaskDispatchMessageSchema, type TerminalStatus, buildAdoptionComment, buildAdoptionIssueDescription, buildBridgeCompletionComment, buildCompletionComment, buildJoinLink, buildProgressComment, escapeLinearMarkdown, formatApiError, isTerminal, linearIdentifierFromBranch, parseJoinLink, parseSessionMessage, parseSessionMessagePage, parseTaskDispatchMessage, safeParseSessionMessage, safeParseTaskDispatchMessage, sessionCrypto };
+export { ADOPTION_AGENTS, ADOPTION_LIMITS, ADOPTION_MATCH_KINDS, ADOPTION_OUTCOME_STATUSES, AGENT_KINDS, type AdoptionAgent, AdoptionAgentSchema, type AdoptionCandidate, AdoptionCandidateSchema, type AdoptionCommentInput, type AdoptionMatchKind, AdoptionMatchKindSchema, type AdoptionOutcome, AdoptionOutcomeSchema, type AdoptionOutcomeStatus, AdoptionOutcomeStatusSchema, type AdoptionRequest, AdoptionRequestSchema, type AdoptionResponse, AdoptionResponseSchema, type AgentKind, AgentKindSchema, type ApiErrorBody, ApiErrorSchema, type CompletionCommentInput, type CreateSharedSessionRequest, CreateSharedSessionRequestSchema, type CreateSharedSessionResponse, CreateSharedSessionResponseSchema, type DiscoveredRepo, DiscoveredRepoSchema, type DiscoveryRequest, DiscoveryRequestSchema, type DiscoveryResponse, DiscoveryResponseSchema, DispatchPollResponseSchema, ERROR_CODES, type HeartbeatRequest, HeartbeatRequestSchema, JOIN_PROOF_HEADER, type JoinCredentials, type JoinSessionRequest, JoinSessionRequestSchema, type JoinSessionResponse, JoinSessionResponseSchema, type ObservationRequest, ObservationRequestSchema, type ObservationResponse, ObservationResponseSchema, PARTICIPANT_KINDS, type ParticipantKind, ParticipantKindSchema, type PostSessionMessageRequest, PostSessionMessageRequestSchema, type PostSessionMessageResponse, PostSessionMessageResponseSchema, type ProgressCommentInput, RealtimeCredentialsSchema, type RegisterRequest, RegisterRequestSchema, type RegisterResponse, RegisterResponseSchema, RepoSlugSchema, type RotateSessionKeyRequest, RotateSessionKeyRequestSchema, type RotateSessionKeyResponse, RotateSessionKeyResponseSchema, SESSION_EVENT_TYPES, SESSION_LIMITS, SESSION_MESSAGE_KINDS, SESSION_MODES, SESSION_STATUSES, type SessionCipher, type SessionComplete, SessionCompleteResponseSchema, SessionCompleteSchema, SessionCryptoError, SessionDecryptionError, type SessionEventType, SessionEventTypeSchema, SessionKeyError, type SessionMessage, type SessionMessageKind, SessionMessageKindSchema, type SessionMessagePage, SessionMessagePageSchema, SessionMessageSchema, type SessionMode, SessionModeSchema, type SessionParticipant, SessionParticipantSchema, type SessionStatus, SessionStatusSchema, type SessionStatusUpdate, SessionStatusUpdateSchema, type SetSessionModeRequest, SetSessionModeRequestSchema, type SharedSession, SharedSessionSchema, TERMINAL_STATUSES, type TaskDispatchMessage, TaskDispatchMessageSchema, type TerminalStatus, buildAdoptionComment, buildAdoptionIssueDescription, buildBridgeCompletionComment, buildCompletionComment, buildJoinLink, buildProgressComment, escapeLinearMarkdown, formatApiError, isTerminal, linearIdentifierFromBranch, parseJoinLink, parseSessionMessage, parseSessionMessagePage, parseTaskDispatchMessage, safeParseSessionMessage, safeParseTaskDispatchMessage, sessionCrypto };

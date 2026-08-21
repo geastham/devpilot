@@ -644,7 +644,21 @@ var AdoptionCandidateSchema = z5.object({
    * This is what makes `getAvoidFiles` correct for a session DevPilot did not
    * start: without it, an adopted agent holds files nothing knows about.
    */
-  touchedPaths: z5.array(z5.string().min(1).max(400)).max(ADOPTION_LIMITS.MAX_TOUCHED_PATHS).optional()
+  touchedPaths: z5.array(z5.string().min(1).max(400)).max(ADOPTION_LIMITS.MAX_TOUCHED_PATHS).optional(),
+  /**
+   * Where this session is actually being driven — TRD 22 §6.3.
+   *
+   * DevPilot cannot steer a session it did not spawn, and pretending
+   * otherwise would be worse than not offering it. But that reasoning
+   * assumed the options were *steer* or *nothing*; there is a third, which
+   * is to take the person to the place that already can.
+   *
+   * Constrained to `https://claude.ai/…` rather than any URL: this value
+   * comes from a transcript, it is rendered as a link in a shared portal,
+   * and an open redirect sourced from attacker-influenced local files is not
+   * a trade worth making for flexibility nobody asked for.
+   */
+  webUrl: z5.string().url().max(500).refine((u) => u.startsWith("https://claude.ai/"), "webUrl must be a claude.ai link").optional()
 }).strict();
 var AdoptionRequestSchema = z5.object({
   machineName: z5.string().min(1).max(255),
@@ -679,6 +693,26 @@ var AdoptionResponseSchema = z5.object({
   skipped: z5.number().int().nonnegative(),
   /** Echoed so a client cannot mistake a preview for a write. */
   dryRun: z5.boolean()
+});
+var ObservationRequestSchema = z5.object({
+  machineName: z5.string().min(1).max(255),
+  sessions: z5.array(AdoptionCandidateSchema).max(ADOPTION_LIMITS.MAX_CANDIDATES),
+  /**
+   * Adoption keys this machine no longer sees as live.
+   *
+   * Without this a session that ends between two sweeps stays `running` in the
+   * cockpit forever — the board would fill with agents that finished hours
+   * ago, which is worse than showing nothing.
+   */
+  endedKeys: z5.array(z5.string().regex(/^[0-9a-f]{64}$/)).max(ADOPTION_LIMITS.MAX_CANDIDATES).default([])
+}).strict();
+var ObservationResponseSchema = z5.object({
+  observed: z5.number().int().nonnegative(),
+  created: z5.number().int().nonnegative(),
+  updated: z5.number().int().nonnegative(),
+  ended: z5.number().int().nonnegative(),
+  /** Projects auto-created for repos this org had not seen before. */
+  projectsCreated: z5.number().int().nonnegative()
 });
 var DiscoveredRepoSchema = z5.object({
   repo: RepoSlugSchema,
@@ -812,6 +846,8 @@ export {
   JOIN_PROOF_HEADER,
   JoinSessionRequestSchema,
   JoinSessionResponseSchema,
+  ObservationRequestSchema,
+  ObservationResponseSchema,
   PARTICIPANT_KINDS,
   ParticipantKindSchema,
   PostSessionMessageRequestSchema,

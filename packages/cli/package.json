@@ -1,6 +1,6 @@
 {
   "name": "@devpilot.sh/cli",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "DevPilot CLI - Manage your AI coding agent fleet from the command line",
   "license": "MIT",
   "author": "DevPilot Team",

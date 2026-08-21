@@ -51,6 +51,7 @@ function stableMachineName(): string {
 import { ConductorWatcher } from './conductor-watcher';
 import { CommandApplier } from './command-applier';
 import { AdoptionWatcher } from './adoption-watcher';
+import { SessionObserver } from './observer';
 import { runIntrospection } from './introspect';
 
 interface ConnectOptions {
@@ -69,6 +70,7 @@ interface ConnectOptions {
   aoProject?: string;
   aoPath?: string;
   discover?: boolean;
+  observe?: boolean;
   adopt?: boolean;
   adoptAllRepos?: boolean;
 }
@@ -124,6 +126,10 @@ export const connectCommand = new Command('connect')
    * every time a laptop reconnects.
    */
   .option('--no-discover', 'Do not report which repos this machine has agent history for')
+  .option(
+    '--no-observe',
+    'Do not report the agent sessions running on this machine to the cockpit',
+  )
   .option(
     '--adopt',
     'Also put agent sessions already running on this machine onto the board',
@@ -286,6 +292,37 @@ export const connectCommand = new Command('connect')
       );
     }
 
+    /**
+     * Observe continuously — TRD 22 §8.
+     *
+     * On by default and needing no configuration at all: no Linear workspace,
+     * no team, no route. This is what makes "turn the bridge on and your
+     * sessions are there" true rather than aspirational.
+     */
+    const observer =
+      options.observe !== false
+        ? new SessionObserver({
+            client,
+            machineName: options.name ?? stableMachineName(),
+            repos,
+            onLog: (line) => console.log(chalk.gray(`   ${line}`)),
+          })
+        : null;
+
+    if (observer) {
+      const first = await observer.sweep();
+      if (first && first.observed > 0) {
+        console.log(
+          chalk.green(
+            `   ✓ Observing ${first.observed} agent session${first.observed === 1 ? '' : 's'} on this machine`,
+          ),
+        );
+        console.log(chalk.gray(`     ${client.hostedUrl()}/cockpit`));
+        console.log('');
+      }
+      observer.start();
+    }
+
     if (options.discover !== false) {
       await runIntrospection({
         client,
@@ -349,6 +386,7 @@ export const connectCommand = new Command('connect')
       console.log('');
       console.log(chalk.yellow('Disconnecting…'));
       heartbeat.stop();
+      observer?.stop();
       // Before the loop: stopping surfaces any run still in flight via onLost,
       // and that warning is the only signal that a ticket's completion will
       // never reach Linear.

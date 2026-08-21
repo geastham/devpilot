@@ -177,3 +177,50 @@ describe('cost while running', () => {
     expect(c.snapshot().costUsd).toBeCloseTo(0.2256);
   });
 });
+
+
+/**
+ * Paths a person can read.
+ *
+ * Claude reports `file_path` absolute, so every surface showed
+ * `/private/tmp/claude-501/-Users-…/scratchpad/fleet-a/src/lru.ts`. Unreadable
+ * on a ticket, and it publishes the directory layout of whoever ran the agent
+ * to everyone who can see the issue.
+ */
+describe('file paths are relative to the repo', () => {
+  const workdir = '/private/tmp/scratch/fleet-a';
+
+  function write(path: string) {
+    return JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', name: 'Write', input: { file_path: path } }] },
+    });
+  }
+
+  it('strips the working directory', () => {
+    const c = new TelemetryCollector(Date.now, workdir);
+    c.ingestLine(write(`${workdir}/src/lru.ts`));
+    expect(c.snapshot().filesTouched).toEqual(['src/lru.ts']);
+  });
+
+  it('handles the /private symlink macOS reports inconsistently', () => {
+    // The workdir may be given as /var/… while the agent reports /private/var/…
+    const c = new TelemetryCollector(Date.now, '/var/folders/x/repo');
+    c.ingestLine(write('/private/var/folders/x/repo/src/a.ts'));
+    expect(c.snapshot().filesTouched).toEqual(['src/a.ts']);
+  });
+
+  it('leaves a path outside the repo alone rather than mangling it', () => {
+    // Truncating an unrelated path would produce a plausible-looking lie about
+    // which file was touched.
+    const c = new TelemetryCollector(Date.now, workdir);
+    c.ingestLine(write('/etc/hosts'));
+    expect(c.snapshot().filesTouched).toEqual(['/etc/hosts']);
+  });
+
+  it('is a no-op when no working directory is known', () => {
+    const c = new TelemetryCollector();
+    c.ingestLine(write('/abs/path/file.ts'));
+    expect(c.snapshot().filesTouched).toEqual(['/abs/path/file.ts']);
+  });
+});

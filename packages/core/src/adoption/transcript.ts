@@ -88,6 +88,14 @@ export interface SessionObservation {
   gitBranch: string | null;
   /** The client's own session title, when it set one. The best title available. */
   customTitle: string | null;
+  /**
+   * Where this session is being driven — `https://claude.ai/code/session_…`.
+   *
+   * Present only for sessions that were remote-controlled; a purely local
+   * terminal session has no such place and correctly reports null. On the
+   * reference machine 19 of the 25 most recent sessions carry one.
+   */
+  webUrl: string | null;
   /** First prompt with a human origin, flattened to text. */
   firstHumanPrompt: string | null;
   /** Earliest timestamp in the head sample. */
@@ -120,6 +128,10 @@ interface TranscriptEntry {
   isMeta?: boolean;
   isSidechain?: boolean;
   customTitle?: string;
+  /** `bridge_status` system entries carry the session's web URL directly. */
+  url?: string;
+  /** `bridge-session` entries carry `cse_<id>`, which maps to `session_<id>`. */
+  bridgeSessionId?: string;
   origin?: { kind?: string };
   message?: { role?: string; content?: unknown };
 }
@@ -250,6 +262,7 @@ export function probeTranscript(
   let cwd: string | null = null;
   let gitBranch: string | null = null;
   let customTitle: string | null = null;
+  let webUrl: string | null = null;
   let firstHumanPrompt: string | null = null;
   let startedAt: string | null = null;
   let parsedEntries = 0;
@@ -292,6 +305,26 @@ export function probeTranscript(
     if (entry.type === 'custom-title' && typeof entry.customTitle === 'string') {
       customTitle = entry.customTitle.trim() || null;
     }
+
+    /**
+     * Two sources, explicit preferred.
+     *
+     * `bridge_status` states the URL outright. `bridge-session` gives only
+     * `cse_01Xdtzh…`, which is the same identifier the URL uses after
+     * `session_` — so the link is reconstructable when the explicit entry falls
+     * outside the sample. Reconstructing is worth it: the entries do not always
+     * arrive in the same order, and a missing link is a session the cockpit can
+     * show but not reach.
+     */
+    if (!webUrl && typeof entry.url === 'string' && entry.url.startsWith('https://claude.ai/')) {
+      webUrl = entry.url;
+    }
+    if (!webUrl && typeof entry.bridgeSessionId === 'string') {
+      const id = entry.bridgeSessionId.replace(/^cse_/, '');
+      if (/^[A-Za-z0-9]{8,64}$/.test(id)) {
+        webUrl = `https://claude.ai/code/session_${id}`;
+      }
+    }
     if (!startedAt && typeof entry.timestamp === 'string') startedAt = entry.timestamp;
 
     if (!firstHumanPrompt && isHumanPrompt(entry)) {
@@ -305,7 +338,18 @@ export function probeTranscript(
     }
   };
 
-  /** Everything a title and a repo need. Reached in one chunk for most files. */
+  /**
+   * Everything a title and a repo need. Reached in one chunk for most files.
+   *
+   * `webUrl` is deliberately NOT part of this. Requiring it would make every
+   * session that was never remote-controlled — which has no link at all, and
+   * never will — read to `MAX_PROBE_BYTES` looking for something that does not
+   * exist. Across 670 sessions that is ~670 MB of reads to find nothing.
+   *
+   * The link entries appear in the first handful of lines when they exist, so
+   * capturing it opportunistically inside whatever we already read costs
+   * nothing and loses nothing in practice.
+   */
   const satisfied = (): boolean => Boolean(cwd && customTitle && firstHumanPrompt);
 
   while (bytesRead < Math.min(size, maxBytes) && !satisfied()) {
@@ -348,6 +392,7 @@ export function probeTranscript(
     cwd,
     gitBranch,
     customTitle,
+    webUrl,
     firstHumanPrompt,
     startedAt,
     lastActivityAt: new Date(mtimeMs).toISOString(),

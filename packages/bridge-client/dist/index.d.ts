@@ -1,4 +1,4 @@
-import { RegisterRequest, RegisterResponse, TaskDispatchMessage, SessionStatusUpdate, SessionComplete, AdoptionRequest, AdoptionResponse, DiscoveryRequest, DiscoveryResponse, SharedSession, SessionMessage, SessionMessageKind, SessionParticipant } from '@devpilot.sh/bridge-protocol';
+import { RegisterRequest, RegisterResponse, TaskDispatchMessage, SessionStatusUpdate, SessionComplete, AdoptionRequest, AdoptionResponse, DiscoveryRequest, DiscoveryResponse, ObservationRequest, ObservationResponse, SharedSession, SessionMessage, SessionMessageKind, SessionParticipant } from '@devpilot.sh/bridge-protocol';
 export { RegisterRequest, RegisterResponse, SessionComplete, SessionStatus, SessionStatusUpdate, TaskDispatchMessage } from '@devpilot.sh/bridge-protocol';
 
 interface BridgeClientConfig {
@@ -126,6 +126,18 @@ declare class BridgeClient {
      * product for a nicety. Callers get null and decide whether to mention it.
      */
     reportDiscovery(request: DiscoveryRequest): Promise<DiscoveryResponse | null>;
+    /**
+     * Report the agent sessions running on this machine — TRD 22 §7.
+     *
+     * The sweep behind a live cockpit. Unlike `adoptSessions` this needs no Linear
+     * workspace, no team and no route, so it is safe to run continuously from the
+     * moment a bridge connects.
+     *
+     * NEVER THROWS. This rides the bridge's own loop, and a machine that stopped
+     * running dispatched work because an observation upload failed would have
+     * traded the product for a display.
+     */
+    reportObservations(request: ObservationRequest): Promise<ObservationResponse | null>;
     /** Fixes the `getOrchestatorId` typo from 0.1.x. */
     getOrchestratorId(): string | null;
     setOrchestratorId(id: string): void;

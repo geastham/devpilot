@@ -322,6 +322,77 @@ describe('probeTranscript', () => {
     expect(observation!.firstHumanPrompt).not.toContain('hunter2');
   });
 
+  it('reads the Claude Code web link from a bridge_status entry', () => {
+    const path = writeTranscript({
+      cwd: repoDirs.devpilot,
+      sessionUuid: 'aaaaaaaa-0000-0000-0000-00000000000a',
+      projectSlug: 'slug-devpilot',
+      extraLines: [
+        JSON.stringify({
+          type: 'system',
+          subtype: 'bridge_status',
+          url: 'https://claude.ai/code/session_01Xdtzh5e7ZNYsNqtrK9BmeV',
+        }),
+      ],
+    });
+    expect(probeTranscript(path, 'x')!.webUrl).toBe(
+      'https://claude.ai/code/session_01Xdtzh5e7ZNYsNqtrK9BmeV',
+    );
+  });
+
+  it('reconstructs the link from a bridge-session id when no url entry is present', () => {
+    const path = writeTranscript({
+      cwd: repoDirs.devpilot,
+      sessionUuid: 'aaaaaaaa-0000-0000-0000-00000000000b',
+      projectSlug: 'slug-devpilot',
+      extraLines: [
+        JSON.stringify({ type: 'bridge-session', bridgeSessionId: 'cse_01RJKkyPfRumTnBJ2D7NHnWE' }),
+      ],
+    });
+    expect(probeTranscript(path, 'x')!.webUrl).toBe(
+      'https://claude.ai/code/session_01RJKkyPfRumTnBJ2D7NHnWE',
+    );
+  });
+
+  it('reports no link for a session that was never remote-controlled', () => {
+    const path = writeTranscript({
+      cwd: repoDirs.devpilot,
+      sessionUuid: 'aaaaaaaa-0000-0000-0000-00000000000c',
+      projectSlug: 'slug-devpilot',
+      customTitle: 'Local only',
+      prompt: 'do a thing',
+    });
+    expect(probeTranscript(path, 'x')!.webUrl).toBeNull();
+  });
+
+  it('will not chase a link that does not exist past one chunk', () => {
+    // Requiring webUrl to finish would make every never-remote-controlled
+    // session read to MAX_PROBE_BYTES looking for something that is not there.
+    const path = writeTranscript({
+      cwd: repoDirs.devpilot,
+      sessionUuid: 'aaaaaaaa-0000-0000-0000-00000000000d',
+      projectSlug: 'slug-devpilot',
+      customTitle: 'No link here',
+      prompt: 'go',
+      padToBytes: 3 * 1024 * 1024,
+    });
+    const observation = probeTranscript(path, 'x')!;
+    expect(observation.webUrl).toBeNull();
+    expect(observation.bytesRead).toBeLessThanOrEqual(HEAD_BYTES);
+  });
+
+  it('ignores a non-claude.ai url, which is not a session link', () => {
+    const path = writeTranscript({
+      cwd: repoDirs.devpilot,
+      sessionUuid: 'aaaaaaaa-0000-0000-0000-00000000000e',
+      projectSlug: 'slug-devpilot',
+      extraLines: [
+        JSON.stringify({ type: 'system', subtype: 'bridge_status', url: 'https://evil.test/x' }),
+      ],
+    });
+    expect(probeTranscript(path, 'x')!.webUrl).toBeNull();
+  });
+
   it('recognises a DevPilot-composed prompt', () => {
     const path = writeTranscript({
       cwd: repoDirs.devpilot,

@@ -118,6 +118,25 @@ export const AdoptionCandidateSchema = z
       .array(z.string().min(1).max(400))
       .max(ADOPTION_LIMITS.MAX_TOUCHED_PATHS)
       .optional(),
+    /**
+     * Where this session is actually being driven — TRD 22 §6.3.
+     *
+     * DevPilot cannot steer a session it did not spawn, and pretending
+     * otherwise would be worse than not offering it. But that reasoning
+     * assumed the options were *steer* or *nothing*; there is a third, which
+     * is to take the person to the place that already can.
+     *
+     * Constrained to `https://claude.ai/…` rather than any URL: this value
+     * comes from a transcript, it is rendered as a link in a shared portal,
+     * and an open redirect sourced from attacker-influenced local files is not
+     * a trade worth making for flexibility nobody asked for.
+     */
+    webUrl: z
+      .string()
+      .url()
+      .max(500)
+      .refine((u) => u.startsWith('https://claude.ai/'), 'webUrl must be a claude.ai link')
+      .optional(),
   })
   .strict();
 
@@ -179,6 +198,46 @@ export type AdoptionResponse = z.infer<typeof AdoptionResponseSchema>;
  * call, writes to no board, and calls no Linear API, which is what makes it
  * safe to run on every connect. Adoption creates issues, so it does not.
  */
+/**
+ * Observation — TRD 22 §7.
+ *
+ * The half of adoption that needs no Linear workspace, no team, and no route.
+ * Same candidate shape; different verb. `POST /api/observations` records these
+ * so they are visible in the cockpit, and `POST /api/adoptions` is the separate,
+ * deliberate step that puts one on a board.
+ *
+ * Split rather than a flag on AdoptionRequest because the two have genuinely
+ * different preconditions and different failure modes: observation cannot fail
+ * for want of configuration, and placement can.
+ */
+export const ObservationRequestSchema = z
+  .object({
+    machineName: z.string().min(1).max(255),
+    sessions: z.array(AdoptionCandidateSchema).max(ADOPTION_LIMITS.MAX_CANDIDATES),
+    /**
+     * Adoption keys this machine no longer sees as live.
+     *
+     * Without this a session that ends between two sweeps stays `running` in the
+     * cockpit forever — the board would fill with agents that finished hours
+     * ago, which is worse than showing nothing.
+     */
+    endedKeys: z.array(z.string().regex(/^[0-9a-f]{64}$/)).max(ADOPTION_LIMITS.MAX_CANDIDATES).default([]),
+  })
+  .strict();
+
+export type ObservationRequest = z.infer<typeof ObservationRequestSchema>;
+
+export const ObservationResponseSchema = z.object({
+  observed: z.number().int().nonnegative(),
+  created: z.number().int().nonnegative(),
+  updated: z.number().int().nonnegative(),
+  ended: z.number().int().nonnegative(),
+  /** Projects auto-created for repos this org had not seen before. */
+  projectsCreated: z.number().int().nonnegative(),
+});
+
+export type ObservationResponse = z.infer<typeof ObservationResponseSchema>;
+
 export const DiscoveredRepoSchema = z
   .object({
     repo: RepoSlugSchema,
