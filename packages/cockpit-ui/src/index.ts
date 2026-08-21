@@ -17,7 +17,7 @@
  *   presets: [require('@devpilot.sh/cockpit-ui/theme')]
  */
 
-export { DAGVisualization } from './components/DAGVisualization';
+export { DAGVisualization, type LiveTaskState } from './components/DAGVisualization';
 export { CriticalPathIndicator } from './components/CriticalPathIndicator';
 export { WaveProgressBar } from './components/WaveProgressBar';
 export { WaveTableView } from './components/WaveTableView';

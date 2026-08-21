@@ -9,8 +9,30 @@ interface DAGVisualizationProps {
     dependencyEdges: DependencyEdge[];
     criticalPath: string[];
     onTaskClick?: (taskCode: string) => void;
+    /**
+     * What the agent on each task is doing right now, keyed by task code.
+     *
+     * Optional: a plan being reviewed has no agents, and a graph with no live
+     * data must still render as a plan. When present it is what makes a node
+     * breathe, name the file it is editing, and admit when it has gone quiet.
+     */
+    live?: Record<string, LiveTaskState>;
 }
-declare function DAGVisualization({ wavePlan, waveTasks, dependencyEdges, criticalPath, onTaskClick, }: DAGVisualizationProps): react_jsx_runtime.JSX.Element;
+interface LiveTaskState {
+    sessionStatus?: string;
+    progressPercent?: number;
+    telemetry?: {
+        toolCalls?: number;
+        filesTouched?: string[];
+        lastAction?: {
+            tool: string;
+            path?: string;
+        };
+        idleMs?: number;
+        costUsd?: number;
+    } | null;
+}
+declare function DAGVisualization({ wavePlan, waveTasks, dependencyEdges, criticalPath, onTaskClick, live, }: DAGVisualizationProps): react_jsx_runtime.JSX.Element;
 
 interface CriticalPathIndicatorProps {
     wavePlan: ParsedWavePlan;
@@ -109,4 +131,4 @@ declare function pluralize(count: number, noun: string, plural?: string): string
  */
 declare function cn(...inputs: ClassValue[]): string;
 
-export { ComplexityBadge, CriticalPathIndicator, DAGVisualization, ModelBadge, WaveProgressBar, WaveTableView, cn, formatMinutes, getComplexityColor, getModelColor, plainText, pluralize, stringToColor };
+export { ComplexityBadge, CriticalPathIndicator, DAGVisualization, type LiveTaskState, ModelBadge, WaveProgressBar, WaveTableView, cn, formatMinutes, getComplexityColor, getModelColor, plainText, pluralize, stringToColor };

@@ -15,7 +15,30 @@ export interface DAGVisualizationProps {
   dependencyEdges: DependencyEdge[];
   criticalPath: string[];
   onTaskClick?: (taskCode: string) => void;
+  /**
+   * What the agent on each task is doing right now, keyed by task code.
+   *
+   * Optional: a plan being reviewed has no agents, and a graph with no live
+   * data must still render as a plan. When present it is what makes a node
+   * breathe, name the file it is editing, and admit when it has gone quiet.
+   */
+  live?: Record<string, LiveTaskState>;
 }
+
+export interface LiveTaskState {
+  sessionStatus?: string;
+  progressPercent?: number;
+  telemetry?: {
+    toolCalls?: number;
+    filesTouched?: string[];
+    lastAction?: { tool: string; path?: string };
+    idleMs?: number;
+    costUsd?: number;
+  } | null;
+}
+
+/** Three minutes of silence after work has started. Mirrors the runner. */
+const STALL_MS = 180_000;
 
 interface Position {
   x: number;
@@ -167,9 +190,16 @@ export function DAGVisualization({
   dependencyEdges,
   criticalPath,
   onTaskClick,
+  live,
 }: DAGVisualizationProps) {
   const [zoom, setZoom] = useState(1);
   const [selectedTask, setSelectedTask] = useState<string | null>(null);
+
+  /** Task status by code, so an edge can ask about both of its endpoints. */
+  const statusByCode = useMemo(
+    () => new Map(waveTasks.map((t) => [t.taskCode, t.status as string])),
+    [waveTasks]
+  );
 
   const { taskNodes, edges, viewBox } = useMemo(() => {
     const nodes = calculateLayout(waveTasks, criticalPath);
@@ -278,6 +308,21 @@ export function DAGVisualization({
             {edges.map((edge, index) => {
               const isDashed = edge.type === 'soft';
 
+              /**
+               * A dependency clearing, right now.
+               *
+               * The upstream task is done and the task it was blocking has
+               * started, so this edge is the moment the plan's structure paid
+               * off. It is the one thing a wave diagram can show that a task
+               * list cannot: not that work is parallel, but that it *became*
+               * parallel because something finished.
+               */
+              const fromStatus = statusByCode.get(edge.from);
+              const toStatus = statusByCode.get(edge.to);
+              const unblocking =
+                fromStatus === 'completed' &&
+                (toStatus === 'dispatched' || toStatus === 'running');
+
               /*
                * THE CRITICAL PATH, MOVING.
                *
@@ -315,11 +360,11 @@ export function DAGVisualization({
                   y1={edge.fromPos.y}
                   x2={edge.toPos.x}
                   y2={edge.toPos.y}
-                  stroke="#4B5563"
-                  strokeWidth="2"
-                  strokeDasharray={isDashed ? '5,5' : '0'}
+                  stroke={unblocking ? '#60A5FA' : '#4B5563'}
+                  strokeWidth={unblocking ? '2.5' : '2'}
+                  strokeDasharray={unblocking ? undefined : isDashed ? '5,5' : '0'}
                   markerEnd="url(#arrowhead)"
-                  className="transition-all"
+                  className={cn('transition-all', unblocking && 'dp-edge-flow')}
                 />
               );
             })}
@@ -331,6 +376,22 @@ export function DAGVisualization({
               const isSelected = selectedTask === node.task.taskCode;
               const statusColor = getTaskStatusColor(node.task.status);
 
+              const liveState = live?.[node.task.taskCode];
+              const telemetry = liveState?.telemetry;
+              const working =
+                node.task.status === 'dispatched' || node.task.status === 'running';
+              const stalled = working && (telemetry?.idleMs ?? 0) > STALL_MS;
+              const justDone = node.task.status === 'completed';
+
+              // What this agent is touching, for the line under the label. The
+              // difference between "something is running" and "1.3 is writing
+              // scheduler.ts" is the whole point of the view.
+              const doing = telemetry?.lastAction
+                ? `${telemetry.lastAction.tool.toLowerCase()} ${
+                    telemetry.lastAction.path?.split('/').slice(-1)[0] ?? ''
+                  }`.trim()
+                : undefined;
+
               return (
                 <g
                   key={node.task.taskCode}
@@ -338,6 +399,22 @@ export function DAGVisualization({
                   onClick={() => handleTaskClick(node.task.taskCode)}
                   className="cursor-pointer transition-transform hover:scale-105"
                 >
+                  {/* Halo behind an active node, so a working task is findable
+                      in peripheral vision on a wide wave. */}
+                  {working && !stalled && (
+                    <rect
+                      x={-4}
+                      y={-4}
+                      width={NODE_WIDTH + 8}
+                      height={NODE_HEIGHT + 8}
+                      rx="9"
+                      fill="none"
+                      stroke="rgba(59,130,246,0.5)"
+                      strokeWidth="2"
+                      className="dp-node-halo"
+                    />
+                  )}
+
                   {/* Node background */}
                   <rect
                     width={NODE_WIDTH}
@@ -346,10 +423,19 @@ export function DAGVisualization({
                     className={cn(
                       'transition-all',
                       statusColor,
+                      working && !stalled && 'dp-node-alive',
+                      stalled && 'dp-node-stalled',
+                      justDone && 'dp-node-settle',
                       isSelected && 'ring-2 ring-accent-primary ring-offset-2',
                       node.isOnCriticalPath && 'ring-2 ring-yellow-500'
                     )}
                   />
+
+                  {/* Stall marker. Amber, top-right, because a quiet agent is
+                      the one thing on this screen worth interrupting for. */}
+                  {stalled && (
+                    <circle cx={NODE_WIDTH - 10} cy={10} r="4" fill="#F59E0B" />
+                  )}
 
                   {/* Task code */}
                   <text
@@ -374,14 +460,26 @@ export function DAGVisualization({
                     })()}
                   </text>
 
-                  {/* Status indicator */}
+                  {/* Status, or what the agent is actually doing.
+                      "dispatched" tells you the conductor sent it; "edit
+                      scheduler.ts" tells you the fleet is alive and where. When
+                      there is a live answer it wins. */}
                   <text
                     x={NODE_WIDTH / 2}
                     y={65}
                     textAnchor="middle"
-                    className="fill-gray-400 text-xs capitalize"
+                    className={cn(
+                      'text-xs',
+                      doing ? 'fill-blue-300' : 'fill-gray-400 capitalize'
+                    )}
                   >
-                    {node.task.status}
+                    {doing
+                      ? doing.length > 24
+                        ? `${doing.slice(0, 24)}…`
+                        : doing
+                      : stalled
+                        ? 'quiet'
+                        : node.task.status}
                   </text>
                 </g>
               );

@@ -42,6 +42,7 @@ function WavesView() {
     picked?: boolean;
   }>({ loading: true, error: null, plan: null });
 
+  const [tick, setTick] = useState(0);
   const searchParams = useSearchParams();
   const requestedItemId = searchParams.get('item');
 
@@ -111,7 +112,20 @@ function WavesView() {
     return () => {
       alive = false;
     };
-  }, [requestedItemId]);
+  }, [requestedItemId, tick]);
+
+  /**
+   * Re-read while work is in flight.
+   *
+   * Without this the graph is a photograph: correct at load, and stale the
+   * moment an agent finishes. Four seconds is slower than the fleet panel's
+   * stream because a wave changes shape far less often than a tool call fires.
+   */
+  useEffect(() => {
+    if (state.plan?.status !== 'executing') return;
+    const id = setInterval(() => setTick((t) => t + 1), 4_000);
+    return () => clearInterval(id);
+  }, [state.plan?.status]);
 
   if (state.loading) {
     return <Centered>Loading wave plan…</Centered>;
@@ -196,6 +210,8 @@ function WavesView() {
             waveTasks={waveTasks}
             dependencyEdges={dependencyEdges}
             criticalPath={critical}
+            // Keyed by task code; see the wave-plan route's `live` join.
+            live={wavePlan.live}
           />
         </div>
         <CriticalPathIndicator wavePlan={wavePlan} />

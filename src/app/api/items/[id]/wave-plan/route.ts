@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, horizonItems, wavePlans, eq, desc } from '@/lib/db';
+import { db, rufloSessions, horizonItems, wavePlans, eq, desc, inArray } from '@/lib/db';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -45,7 +45,51 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    return NextResponse.json(wavePlan);
+    /**
+     * Attach the agent working each task, so the graph can show what is
+     * happening rather than what was planned.
+     *
+     * `wave_tasks.assigned_session_id` is the join dispatch already writes; the
+     * telemetry hanging off that session is what makes a node pulse, name the
+     * file it is editing, and admit when it has gone quiet. Without this the
+     * DAG is a picture of a plan — accurate, and silent about the fleet.
+     *
+     * Sessions are fetched in one query rather than per task: a wide wave is 20
+     * nodes, and 20 round trips to render one screen is how a live view becomes
+     * the reason the page is slow.
+     */
+    type LiveTask = { taskCode: string; assignedSessionId: string | null };
+    const tasks = wavePlan.waveTasks as LiveTask[];
+
+    const sessionIds = tasks
+      .map((t) => t.assignedSessionId)
+      .filter((id): id is string => Boolean(id));
+
+    const sessions = sessionIds.length
+      ? await db.query.rufloSessions.findMany({
+          where: inArray(rufloSessions.id, sessionIds),
+        })
+      : [];
+
+    const byId = new Map(sessions.map((s) => [s.id, s]));
+
+    const live = Object.fromEntries(
+      tasks
+        .filter((t) => t.assignedSessionId && byId.has(t.assignedSessionId))
+        .map((t) => {
+          const session = byId.get(t.assignedSessionId!)!;
+          return [
+            t.taskCode,
+            {
+              sessionStatus: session.status,
+              progressPercent: session.progressPercent,
+              telemetry: session.telemetry ?? null,
+            },
+          ];
+        })
+    );
+
+    return NextResponse.json({ ...wavePlan, live });
   } catch (error) {
     console.error('Failed to fetch wave plan:', error);
     return NextResponse.json(

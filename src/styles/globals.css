@@ -5,6 +5,10 @@
 /* The cockpit motion language. See the header of motion.css for the rule that
    governs what is allowed in it. */
 @import './motion.css';
+/* Live-graph animations ship with the shared components. Without this import
+   the DAG renders but nothing moves — the nodes would be as silent as before,
+   which is the exact problem the package was extracted to fix. */
+@import '@devpilot.sh/cockpit-ui/tokens.css';
 
 @layer base {
   :root {

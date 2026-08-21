@@ -57,6 +57,7 @@ function pluralize(count, noun, plural = `${noun}s`) {
 
 // src/components/DAGVisualization.tsx
 var import_jsx_runtime = require("react/jsx-runtime");
+var STALL_MS = 18e4;
 var NODE_WIDTH = 180;
 var NODE_HEIGHT = 80;
 var WAVE_VERTICAL_SPACING = 150;
@@ -145,10 +146,15 @@ function DAGVisualization({
   waveTasks,
   dependencyEdges,
   criticalPath,
-  onTaskClick
+  onTaskClick,
+  live
 }) {
   const [zoom, setZoom] = (0, import_react.useState)(1);
   const [selectedTask, setSelectedTask] = (0, import_react.useState)(null);
+  const statusByCode = (0, import_react.useMemo)(
+    () => new Map(waveTasks.map((t) => [t.taskCode, t.status])),
+    [waveTasks]
+  );
   const { taskNodes, edges, viewBox } = (0, import_react.useMemo)(() => {
     const nodes = calculateLayout(waveTasks, criticalPath);
     const calculatedEdges = calculateEdges(nodes, dependencyEdges, criticalPath);
@@ -245,6 +251,9 @@ function DAGVisualization({
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("g", { className: "edges", children: edges.map((edge, index) => {
             const isDashed = edge.type === "soft";
+            const fromStatus = statusByCode.get(edge.from);
+            const toStatus = statusByCode.get(edge.to);
+            const unblocking = fromStatus === "completed" && (toStatus === "dispatched" || toStatus === "running");
             if (edge.onCriticalPath) {
               return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
                 "line",
@@ -269,11 +278,11 @@ function DAGVisualization({
                 y1: edge.fromPos.y,
                 x2: edge.toPos.x,
                 y2: edge.toPos.y,
-                stroke: "#4B5563",
-                strokeWidth: "2",
-                strokeDasharray: isDashed ? "5,5" : "0",
+                stroke: unblocking ? "#60A5FA" : "#4B5563",
+                strokeWidth: unblocking ? "2.5" : "2",
+                strokeDasharray: unblocking ? void 0 : isDashed ? "5,5" : "0",
                 markerEnd: "url(#arrowhead)",
-                className: "transition-all"
+                className: cn("transition-all", unblocking && "dp-edge-flow")
               },
               `edge-${index}`
             );
@@ -281,6 +290,12 @@ function DAGVisualization({
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("g", { className: "nodes", children: taskNodes.map((node) => {
             const isSelected = selectedTask === node.task.taskCode;
             const statusColor = getTaskStatusColor(node.task.status);
+            const liveState = live?.[node.task.taskCode];
+            const telemetry = liveState?.telemetry;
+            const working = node.task.status === "dispatched" || node.task.status === "running";
+            const stalled = working && (telemetry?.idleMs ?? 0) > STALL_MS;
+            const justDone = node.task.status === "completed";
+            const doing = telemetry?.lastAction ? `${telemetry.lastAction.tool.toLowerCase()} ${telemetry.lastAction.path?.split("/").slice(-1)[0] ?? ""}`.trim() : void 0;
             return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
               "g",
               {
@@ -288,6 +303,20 @@ function DAGVisualization({
                 onClick: () => handleTaskClick(node.task.taskCode),
                 className: "cursor-pointer transition-transform hover:scale-105",
                 children: [
+                  working && !stalled && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                    "rect",
+                    {
+                      x: -4,
+                      y: -4,
+                      width: NODE_WIDTH + 8,
+                      height: NODE_HEIGHT + 8,
+                      rx: "9",
+                      fill: "none",
+                      stroke: "rgba(59,130,246,0.5)",
+                      strokeWidth: "2",
+                      className: "dp-node-halo"
+                    }
+                  ),
                   /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
                     "rect",
                     {
@@ -297,11 +326,15 @@ function DAGVisualization({
                       className: cn(
                         "transition-all",
                         statusColor,
+                        working && !stalled && "dp-node-alive",
+                        stalled && "dp-node-stalled",
+                        justDone && "dp-node-settle",
                         isSelected && "ring-2 ring-accent-primary ring-offset-2",
                         node.isOnCriticalPath && "ring-2 ring-yellow-500"
                       )
                     }
                   ),
+                  stalled && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", { cx: NODE_WIDTH - 10, cy: 10, r: "4", fill: "#F59E0B" }),
                   /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
                     "text",
                     {
@@ -331,8 +364,11 @@ function DAGVisualization({
                       x: NODE_WIDTH / 2,
                       y: 65,
                       textAnchor: "middle",
-                      className: "fill-gray-400 text-xs capitalize",
-                      children: node.task.status
+                      className: cn(
+                        "text-xs",
+                        doing ? "fill-blue-300" : "fill-gray-400 capitalize"
+                      ),
+                      children: doing ? doing.length > 24 ? `${doing.slice(0, 24)}\u2026` : doing : stalled ? "quiet" : node.task.status
                     }
                   )
                 ]
