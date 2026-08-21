@@ -4,7 +4,7 @@
  * 0.2.0 replaced the GCP Pub/Sub transport with a durable queue plus Supabase
  * Realtime. See CHANGELOG.md for the migration.
  */
-export { BridgeClient, BridgeError, type BridgeClientConfig, type MirroredPlan, type SessionCommandMessage } from './client';
+export { BridgeClient, BridgeError, type BridgeClientConfig, type MirroredPlan, type MirroredTelemetry, type SessionCommandMessage } from './client';
 export { RealtimeSubscriber, type RealtimeSubscriberConfig } from './realtime';
 export {
   DispatchLoop,
