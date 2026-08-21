@@ -108,6 +108,75 @@ That extraction has two outputs from one pipeline:
   correctly refused to plan content against it before the data existed. This is
   where that data comes from.
 
+### 2.4 The rankable unit is a config, not a person
+
+§2.3 assumes patterns are *extracted* — mined out of run records by us, on
+everyone's behalf. There is a better version where conductors publish them
+deliberately, and it resolves three problems at once.
+
+**A config is the artifact.** Skills, system prompts, and topology: the thing a
+conductor actually builds and tunes. It is versioned, forkable, and attributed
+to whoever wrote it. Winning configs earn standing on the arena board; other
+people fork them, adapt them, and their forks earn standing too.
+
+Three things this fixes that §2.1–2.3 leave open.
+
+**It makes the arena honest about what it measures.** §2.2 proposes earning a
+score on identical benchmark tasks. But `fleetUtilization`, `runwayHealth` and
+`velocityTrend` are properties of a live ongoing workload — a one-shot benchmark
+run has no runway to be healthy and no fleet to utilise. What a benchmark run
+*can* measure is planner + model + config. That is the config. Ranking configs is
+not a compromise; it is the only thing the arena was ever able to rank.
+
+**It removes the case for ranking people.** A public score of an individual's
+conducting skill is one screenshot away from being a manager's performance
+metric, and developer-productivity measurement has a long history of going that
+way. Nobody objects to a leaderboard of builds.
+
+**It largely dissolves §4.3.** Cross-org learning is fraught because mined
+patterns carry structure — file paths, module names, repo shapes — that can
+identify a customer even in aggregate. A *published config* is something a
+conductor chose to publish. No mining, no anonymisation threshold, no "we
+learned from your code" conversation to have.
+
+#### Forks and attribution, not a marketplace
+
+The open planning agent lives in this repository and is meant to be iterated on
+in the open. So the sharing mechanism should be the one already under it:
+**a config is a file, a fork is a fork, and attribution is git history.**
+
+Resist building an economy. Trading implies scarcity, and scarcity in a system
+whose supply is text invites config farming, sockpuppet accounts, and arguments
+about ownership. Fork-plus-attribution captures nearly all of the value — credit
+accrues to authors, lineage is visible, good configs spread — at a fraction of
+the cost, and it can grow into an economy later if anyone asks. Nobody has asked
+yet.
+
+#### Four things to get right before this ships
+
+1. **Configs are not portable, and standings will imply they are.** A config
+   tuned on Forgepress wins at Forgepress. Board headings must name the task
+   family, or the first person who adopts the top-ranked config for a real
+   migration and gets a bad result writes the post that defines this feature.
+
+2. **Overfitting stops being a risk and becomes the objective.** Today
+   contamination of a public benchmark is accidental. Under a config board it is
+   the explicit goal of every entrant, which moves held-out and rotating tasks
+   from prudent to load-bearing.
+
+3. **A shared system prompt is executable code.** This is the one most likely to
+   be underweighted, because "gear" and "trading card" are cosmetic framings for
+   something that is not cosmetic: adopting a config means running someone
+   else's instructions against your codebase with your credentials. That is a
+   supply-chain and prompt-injection surface. Provenance, review, and a
+   constrained first run belong in v1, not after the first incident.
+
+4. **Entry must not cost the entrant.** If being ranked means burning your own
+   tokens on benchmark runs, the board measures willingness to spend. Entrants
+   submit a config; we execute it. That also makes results comparable, because
+   the executor is identical — which is the same argument §2.2 makes for a
+   common harness, applied one level up.
+
 ---
 
 ## 3. What this makes DevPilot
@@ -198,6 +267,8 @@ Ordered by dependency, not by appeal. Items 1–3 are prerequisites; nothing in
 
 4. **Benchmark leaderboard v1** — public, opt-in, scored on identical tasks.
    Our own runs seed it. Explicitly *not* backed by self-reported local metrics.
+   Ranks **configs**, not people (§2.4), and headings name the task family so a
+   standing cannot be read as a general claim.
 5. **Score provenance** — every score traceable to the run that produced it.
    Unverifiable standings are worth less than none.
 6. **Consent model for fleet telemetry** — opt-in, per-org, aggregate-only, with
@@ -205,10 +276,16 @@ Ordered by dependency, not by appeal. Items 1–3 are prerequisites; nothing in
 
 ### V3 — Extract and distribute
 
-7. **Pattern extraction** over run records: which decomposition shapes correlate
-   with high scores, which file-contention signatures predict failure.
-8. **Patterns into the planner** — the paid tier's real payload.
-9. **Patterns into content** — the posts only we can write, feeding the engine
+7. **Config publishing** — a config is a file in this repository, forkable,
+   attributed by git history. No marketplace, no scarcity (§2.4). Needs
+   provenance and a constrained first run before anyone adopts a config they
+   did not write.
+8. **Pattern extraction** over run records: which decomposition shapes correlate
+   with high scores, which file-contention signatures predict failure. Note that
+   published configs may make much of this unnecessary — extraction is the
+   fallback for what conductors do not publish deliberately.
+9. **Patterns into the planner** — the paid tier's real payload.
+10. **Patterns into content** — the posts only we can write, feeding the engine
    that is already built and waiting for exactly this.
 
 ### Deliberately later
