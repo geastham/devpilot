@@ -33,9 +33,20 @@ export function FleetSummaryPills({ sessions }: FleetSummaryPillsProps) {
 
   // Get aggregate progress per repo
   const repoStats = Object.entries(sessionsByRepo).map(([repo, repoSessions]) => {
+    /**
+     * Averaged over sessions that actually report a number.
+     *
+     * A single session with a missing `progressPercent` turned the sum into
+     * NaN and the whole repo pill rendered "NaN%" — one bad row blanking a
+     * readout for every other session in that repo. Unknown progress is
+     * excluded rather than counted as zero, which would drag the average down
+     * and misreport a fleet that is doing fine.
+     */
+    const measured = repoSessions.filter((s) => Number.isFinite(s.progressPercent));
     const avgProgress =
-      repoSessions.reduce((sum, s) => sum + s.progressPercent, 0) /
-      repoSessions.length;
+      measured.length > 0
+        ? measured.reduce((sum, s) => sum + s.progressPercent, 0) / measured.length
+        : 0;
     // Already correctly scoped to 'active' — kept as-is, and noted so the next
     // person does not "simplify" it to match the card's old progress-only rule.
     const hasIdleImminent = repoSessions.some(

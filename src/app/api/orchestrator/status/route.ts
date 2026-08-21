@@ -47,7 +47,16 @@ export async function POST(request: Request) {
       .set({
         status: sessionStatus,
         progressPercent: update.progressPercent,
-        currentWorkstream: update.currentStep || session.currentWorkstream,
+        /**
+         * Left alone deliberately.
+         *
+         * This used to be overwritten with `currentStep`, which is now the live
+         * activity ("running rm") — so the card showed the same phrase twice
+         * and lost the one piece of context the line existed to carry: WHICH
+         * task of which wave this agent is on. The activity belongs to the
+         * telemetry readout; this stays the stable label dispatch assigned.
+         */
+        currentWorkstream: session.currentWorkstream,
         /**
          * The live picture, when the runner sends one.
          *

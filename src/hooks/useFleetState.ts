@@ -35,6 +35,13 @@ export function useFleetState() {
           estimatedRemainingMinutes: session.estimatedRemainingMinutes,
           status: (session.status as string).toLowerCase().replace('_', '-'),
           inFlightFiles: session.inFlightFiles || [],
+          /**
+           * The live instrument. This mapper lists fields explicitly, so a new
+           * column reaches the API and stops here silently — the card rendered
+           * a status board again while /api/fleet/state was returning tool
+           * calls, files and cost the whole time.
+           */
+          telemetry: (session.telemetry as RufloSession['telemetry']) ?? null,
           completedTasks: ((session.completedTasks as Array<Record<string, unknown>>) || []).map(
             (task: Record<string, unknown>) => ({
               label: task.label,
