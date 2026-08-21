@@ -28,8 +28,10 @@ interface LiveTaskState {
             tool: string;
             path?: string;
         };
+        commands?: string[];
         idleMs?: number;
         costUsd?: number;
+        costIsEstimate?: boolean;
     } | null;
 }
 declare function DAGVisualization({ wavePlan, waveTasks, dependencyEdges, criticalPath, onTaskClick, live, }: DAGVisualizationProps): react_jsx_runtime.JSX.Element;

@@ -11,6 +11,7 @@ import {
   or,
   and,
   gte,
+  lt,
   desc,
   sql,
 } from '@/lib/db';
@@ -33,6 +34,32 @@ export async function GET() {
     const terminalWindowMs =
       Number(process.env.DEVPILOT_TERMINAL_SESSION_WINDOW_MIN ?? 60) * 60_000;
     const terminalCutoff = new Date(Date.now() - terminalWindowMs);
+
+    /**
+     * Retire sessions whose agent is never coming back.
+     *
+     * A session goes ACTIVE at dispatch and only leaves that state when a
+     * completion callback arrives. An agent that dies — killed, crashed, or
+     * running against a cockpit that was restarted — leaves a row that is
+     * active forever. Three of those sat at 0% with "Elapsed: 0m" for hours,
+     * and every one of them counted toward fleet utilization, so the panel
+     * reported a busy fleet with nothing running.
+     *
+     * The threshold is deliberately generous. A long single task is normal;
+     * an hour of total silence is not, and the runner's own wall-clock cap is
+     * well inside it. Marked ERROR rather than COMPLETE: we do not know that
+     * the work succeeded, and saying so would be inventing an outcome.
+     */
+    const staleCutoff = new Date(Date.now() - 60 * 60_000);
+    await db
+      .update(rufloSessions)
+      .set({ status: 'ERROR', updatedAt: new Date() })
+      .where(
+        and(
+          eq(rufloSessions.status, 'ACTIVE'),
+          lt(rufloSessions.updatedAt, staleCutoff)
+        )
+      );
 
     const sessions = await db.query.rufloSessions.findMany({
       where: or(

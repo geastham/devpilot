@@ -258,7 +258,16 @@ function DAGVisualization({
             const working = node.task.status === "dispatched" || node.task.status === "running";
             const stalled = working && (telemetry?.idleMs ?? 0) > STALL_MS;
             const justDone = node.task.status === "completed";
-            const doing = telemetry?.lastAction ? `${telemetry.lastAction.tool.toLowerCase()} ${telemetry.lastAction.path?.split("/").slice(-1)[0] ?? ""}`.trim() : void 0;
+            const doing = (() => {
+              const a = telemetry?.lastAction;
+              if (!a) return void 0;
+              if (a.tool === "Bash") {
+                const cmd = telemetry?.commands?.at(-1);
+                return cmd ? cmd.split(/\s+/).slice(0, 3).join(" ") : "shell";
+              }
+              const file = a.path?.split("/").slice(-1)[0];
+              return `${a.tool.toLowerCase()}${file ? ` ${file}` : ""}`;
+            })();
             return /* @__PURE__ */ jsxs(
               "g",
               {

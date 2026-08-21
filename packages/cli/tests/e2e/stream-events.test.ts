@@ -130,3 +130,50 @@ describe('what the conductor reads at a glance', () => {
     expect(isStalled(c.snapshot())).toBe(false);
   });
 });
+
+
+/**
+ * The money dial, while there is still time to act on it.
+ *
+ * `total_cost_usd` only arrives in the final `result` event, so cost read
+ * $0.0000 for the entire life of a run — dark at exactly the moment a conductor
+ * could do something about it. Each assistant turn carries its own usage.
+ */
+describe('cost while running', () => {
+  function turn(usage: Record<string, number>) {
+    return JSON.stringify({ type: 'assistant', message: { usage, content: [] } });
+  }
+
+  it('accumulates an estimate from per-turn usage', () => {
+    const c = new TelemetryCollector();
+    c.ingestLine(turn({ input_tokens: 1000, output_tokens: 1000 }));
+    const t = c.snapshot();
+    expect(t.costUsd).toBeGreaterThan(0);
+    // Flagged, because a guess presented as fact is worse than a blank dial.
+    expect(t.costIsEstimate).toBe(true);
+  });
+
+  it('prices cache reads far below fresh input', () => {
+    const fresh = new TelemetryCollector();
+    fresh.ingestLine(turn({ input_tokens: 100_000 }));
+
+    const cached = new TelemetryCollector();
+    cached.ingestLine(turn({ cache_read_input_tokens: 100_000 }));
+
+    expect(cached.snapshot().costUsd).toBeLessThan(fresh.snapshot().costUsd);
+  });
+
+  it('replaces the estimate with the authoritative figure and stops adding', () => {
+    const c = new TelemetryCollector();
+    c.ingestLine(turn({ input_tokens: 50_000, output_tokens: 5_000 }));
+    expect(c.snapshot().costIsEstimate).toBe(true);
+
+    c.ingestLine(JSON.stringify({ type: 'result', total_cost_usd: 0.2256, num_turns: 2 }));
+    expect(c.snapshot().costUsd).toBeCloseTo(0.2256);
+    expect(c.snapshot().costIsEstimate).toBe(false);
+
+    // A turn arriving after the result must not be added to the real number.
+    c.ingestLine(turn({ input_tokens: 999_999 }));
+    expect(c.snapshot().costUsd).toBeCloseTo(0.2256);
+  });
+});

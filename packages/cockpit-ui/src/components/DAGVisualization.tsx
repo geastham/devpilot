@@ -32,8 +32,10 @@ export interface LiveTaskState {
     toolCalls?: number;
     filesTouched?: string[];
     lastAction?: { tool: string; path?: string };
+    commands?: string[];
     idleMs?: number;
     costUsd?: number;
+    costIsEstimate?: boolean;
   } | null;
 }
 
@@ -386,11 +388,18 @@ export function DAGVisualization({
               // What this agent is touching, for the line under the label. The
               // difference between "something is running" and "1.3 is writing
               // scheduler.ts" is the whole point of the view.
-              const doing = telemetry?.lastAction
-                ? `${telemetry.lastAction.tool.toLowerCase()} ${
-                    telemetry.lastAction.path?.split('/').slice(-1)[0] ?? ''
-                  }`.trim()
-                : undefined;
+              const doing = (() => {
+                const a = telemetry?.lastAction;
+                if (!a) return undefined;
+                // "bash" says a tool ran; "npm test" says what the agent is
+                // actually doing, which is the only version worth the pixels.
+                if (a.tool === 'Bash') {
+                  const cmd = telemetry?.commands?.at(-1);
+                  return cmd ? cmd.split(/\s+/).slice(0, 3).join(' ') : 'shell';
+                }
+                const file = a.path?.split('/').slice(-1)[0];
+                return `${a.tool.toLowerCase()}${file ? ` ${file}` : ''}`;
+              })();
 
               return (
                 <g

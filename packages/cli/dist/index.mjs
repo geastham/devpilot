@@ -1945,6 +1945,16 @@ import { tmpdir } from "os";
 import { join as join7 } from "path";
 
 // src/commands/session-runner/stream-events.ts
+var PRICE_PER_MTOK = {
+  input: 5,
+  output: 25,
+  cacheWrite: 6.25,
+  cacheRead: 0.5
+};
+function priceUsage(usage) {
+  const m = 1e6;
+  return (usage.input_tokens ?? 0) * PRICE_PER_MTOK.input / m + (usage.output_tokens ?? 0) * PRICE_PER_MTOK.output / m + (usage.cache_creation_input_tokens ?? 0) * PRICE_PER_MTOK.cacheWrite / m + (usage.cache_read_input_tokens ?? 0) * PRICE_PER_MTOK.cacheRead / m;
+}
 var MAX_ACTIONS = 200;
 var WRITE_TOOLS = /* @__PURE__ */ new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 var READ_TOOLS = /* @__PURE__ */ new Set(["Read", "Glob", "Grep"]);
@@ -1956,6 +1966,7 @@ var TelemetryCollector = class {
     this.actions = [];
     this.toolCalls = 0;
     this.costUsd = 0;
+    this.costIsEstimate = true;
     this.tokensIn = 0;
     this.tokensOut = 0;
     this.turns = 0;
@@ -1981,6 +1992,12 @@ var TelemetryCollector = class {
   ingest(event) {
     this.lastEventAt = this.now();
     if (event.type === "assistant") {
+      const usage = event.message?.usage;
+      if (usage && this.costIsEstimate) {
+        this.costUsd += priceUsage(usage);
+        this.tokensIn += usage.input_tokens ?? 0;
+        this.tokensOut += usage.output_tokens ?? 0;
+      }
       for (const block of event.message?.content ?? []) {
         if (block.type === "tool_use" && block.name) {
           this.recordTool(block.name, block.input ?? {});
@@ -1990,6 +2007,7 @@ var TelemetryCollector = class {
       }
     }
     if (event.type === "result") {
+      if (typeof event.total_cost_usd === "number") this.costIsEstimate = false;
       this.costUsd = event.total_cost_usd ?? this.costUsd;
       this.turns = event.num_turns ?? this.turns;
       this.tokensIn = event.usage?.input_tokens ?? this.tokensIn;
@@ -2022,6 +2040,7 @@ var TelemetryCollector = class {
       lastAction: this.lastAction,
       actions: [...this.actions],
       costUsd: this.costUsd,
+      costIsEstimate: this.costIsEstimate,
       tokensIn: this.tokensIn,
       tokensOut: this.tokensOut,
       turns: this.turns,

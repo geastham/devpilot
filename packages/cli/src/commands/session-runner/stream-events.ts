@@ -37,7 +37,44 @@ interface StreamEvent {
   total_cost_usd?: number;
   num_turns?: number;
   duration_ms?: number;
-  usage?: { input_tokens?: number; output_tokens?: number };
+  usage?: TokenUsage;
+}
+
+interface TokenUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+}
+
+/**
+ * Per-million token prices, to put a number on the dial while work is running.
+ *
+ * `total_cost_usd` only arrives in the final `result` event, so the money
+ * reading was $0.0000 for the entire life of a run — dark at exactly the moment
+ * a conductor could still act on it. Each assistant turn carries its own usage,
+ * including cache tokens, so the spend can be accumulated as it happens.
+ *
+ * These are Opus rates and this is an ESTIMATE. The authoritative number
+ * replaces it the moment `result` lands, and `costIsEstimate` says which one
+ * you are looking at — a made-up figure presented as fact is worse than a blank
+ * dial, which is the whole reason the old progress bar had to go.
+ */
+const PRICE_PER_MTOK = {
+  input: 5,
+  output: 25,
+  cacheWrite: 6.25,
+  cacheRead: 0.5,
+} as const;
+
+function priceUsage(usage: TokenUsage): number {
+  const m = 1_000_000;
+  return (
+    ((usage.input_tokens ?? 0) * PRICE_PER_MTOK.input) / m +
+    ((usage.output_tokens ?? 0) * PRICE_PER_MTOK.output) / m +
+    ((usage.cache_creation_input_tokens ?? 0) * PRICE_PER_MTOK.cacheWrite) / m +
+    ((usage.cache_read_input_tokens ?? 0) * PRICE_PER_MTOK.cacheRead) / m
+  );
 }
 
 /** A single observed action, kept for the session timeline. */
@@ -66,8 +103,13 @@ export interface SessionTelemetry {
   lastAction?: AgentAction;
   /** Timeline of actions, bounded — see MAX_ACTIONS. */
   actions: AgentAction[];
-  /** Real money, from the `result` event. Zero until the run finishes. */
+  /**
+   * Spend so far. Estimated from per-turn usage while running, then replaced by
+   * the authoritative figure when the run ends.
+   */
   costUsd: number;
+  /** True while `costUsd` is our arithmetic rather than Claude's own number. */
+  costIsEstimate: boolean;
   tokensIn: number;
   tokensOut: number;
   turns: number;
@@ -97,6 +139,7 @@ export class TelemetryCollector {
   private readonly actions: AgentAction[] = [];
   private toolCalls = 0;
   private costUsd = 0;
+  private costIsEstimate = true;
   private tokensIn = 0;
   private tokensOut = 0;
   private turns = 0;
@@ -132,6 +175,15 @@ export class TelemetryCollector {
     this.lastEventAt = this.now();
 
     if (event.type === 'assistant') {
+      // Each turn prices itself, so the dial moves during the run instead of
+      // staying dark until it ends.
+      const usage = (event.message as { usage?: TokenUsage } | undefined)?.usage;
+      if (usage && this.costIsEstimate) {
+        this.costUsd += priceUsage(usage);
+        this.tokensIn += usage.input_tokens ?? 0;
+        this.tokensOut += usage.output_tokens ?? 0;
+      }
+
       for (const block of event.message?.content ?? []) {
         if (block.type === 'tool_use' && block.name) {
           this.recordTool(block.name, block.input ?? {});
@@ -143,6 +195,9 @@ export class TelemetryCollector {
     }
 
     if (event.type === 'result') {
+      // Authoritative from here: stop estimating and stop accumulating, or the
+      // real figure would be added to the guess.
+      if (typeof event.total_cost_usd === 'number') this.costIsEstimate = false;
       this.costUsd = event.total_cost_usd ?? this.costUsd;
       this.turns = event.num_turns ?? this.turns;
       this.tokensIn = event.usage?.input_tokens ?? this.tokensIn;
@@ -189,6 +244,7 @@ export class TelemetryCollector {
       lastAction: this.lastAction,
       actions: [...this.actions],
       costUsd: this.costUsd,
+      costIsEstimate: this.costIsEstimate,
       tokensIn: this.tokensIn,
       tokensOut: this.tokensOut,
       turns: this.turns,
