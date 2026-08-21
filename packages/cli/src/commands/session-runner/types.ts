@@ -1,3 +1,4 @@
+import type { SessionTelemetry } from './stream-events';
 /**
  * Wire types for the local session runner.
  *
@@ -47,6 +48,11 @@ export type RunnerSessionStatus =
 
 /** §7.2 `POST {callbackUrl}/status` body — core's `StatusUpdate`. */
 export interface StatusUpdate {
+  /**
+   * The agent's live telemetry. Optional because the callback contract predates
+   * it, and an older cockpit must keep accepting status updates without it.
+   */
+  telemetry?: SessionTelemetry;
   sessionId: string;
   status: string;
   progressPercent: number;
@@ -77,6 +83,8 @@ export interface CompletionReport {
 
 /** In-memory record of one dispatched session. */
 export interface RunnerSession {
+  /** Live picture of what the agent is doing; see stream-events. */
+  telemetry?: SessionTelemetry;
   /** Runner-side id, returned as `externalSessionId`. */
   externalSessionId: string;
   /** DevPilot session id — the correlation key for every callback. */

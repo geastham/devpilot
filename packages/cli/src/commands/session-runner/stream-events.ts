@@ -1,0 +1,273 @@
+/**
+ * What an agent is doing, while it is doing it.
+ *
+ * `claude -p --output-format json` returns a single blob when the run ends, so
+ * a dispatched agent was opaque for its entire life. The cockpit compensated
+ * with a fake progress bar — five percent every ninety seconds, capped at
+ * ninety — which is why three agents sat at 0% for ten minutes and then snapped
+ * to 100%. The conductor was reading painted dials.
+ *
+ * `--output-format stream-json --verbose` emits newline-delimited JSON as the
+ * work happens: every tool call, its result, the assistant's text, and a final
+ * `result` carrying real cost, turns and duration. This module turns that
+ * firehose into something a person can be shown.
+ *
+ * ## Why this aggregates rather than forwards
+ *
+ * A long task emits hundreds of events. Forwarding each one to SQLite and out
+ * through SSE would make the instrument itself the load. What a conductor needs
+ * is not every keystroke but the shape of the work: which files are being
+ * touched, how many tool calls have completed, what it has cost so far, and —
+ * the question no wall-clock timer can answer — whether anything has happened
+ * recently at all.
+ */
+
+/** One decoded line from the stream. Shapes are Claude Code's, not ours. */
+interface StreamEvent {
+  type?: string;
+  subtype?: string;
+  message?: {
+    content?: {
+      type?: string;
+      name?: string;
+      text?: string;
+      input?: Record<string, unknown>;
+    }[];
+  };
+  total_cost_usd?: number;
+  num_turns?: number;
+  duration_ms?: number;
+  usage?: { input_tokens?: number; output_tokens?: number };
+}
+
+/** A single observed action, kept for the session timeline. */
+export interface AgentAction {
+  /** Tool name as Claude reports it: Write, Edit, Bash, Read, Grep… */
+  tool: string;
+  /** The file it acted on, when the tool names one. */
+  path?: string;
+  /** Milliseconds since the session started, so the UI can lay out a timeline. */
+  atMs: number;
+}
+
+/** The live picture of one agent, rebuilt on every event. */
+export interface SessionTelemetry {
+  /** Tool calls the agent has issued. The honest denominator for progress. */
+  toolCalls: number;
+  /** Distinct files it has written to or edited, in the order first touched. */
+  filesTouched: string[];
+  /** Files it only read. Useful for seeing an agent orienting vs. producing. */
+  filesRead: string[];
+  /** Shell commands run, most recent last. */
+  commands: string[];
+  /** The most recent thing it said, which is usually what it is about to do. */
+  lastText?: string;
+  /** The most recent tool, for a "currently: Editing scheduler.ts" readout. */
+  lastAction?: AgentAction;
+  /** Timeline of actions, bounded — see MAX_ACTIONS. */
+  actions: AgentAction[];
+  /** Real money, from the `result` event. Zero until the run finishes. */
+  costUsd: number;
+  tokensIn: number;
+  tokensOut: number;
+  turns: number;
+  /** Wall-clock ms since the first event; the fake "elapsed 0m" is gone. */
+  elapsedMs: number;
+  /** Ms since anything last happened. The stall signal. */
+  idleMs: number;
+}
+
+/**
+ * The timeline is for showing shape, not for forensics. A runaway agent can
+ * emit thousands of actions, and an unbounded array in a long-lived process is
+ * how a session runner starts leaking.
+ */
+const MAX_ACTIONS = 200;
+
+/** Tools whose `input.file_path` means "this file changed". */
+const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+const READ_TOOLS = new Set(['Read', 'Glob', 'Grep']);
+
+export class TelemetryCollector {
+  private readonly startedAt: number;
+  private lastEventAt: number;
+  private readonly touched: string[] = [];
+  private readonly read: string[] = [];
+  private readonly commands: string[] = [];
+  private readonly actions: AgentAction[] = [];
+  private toolCalls = 0;
+  private costUsd = 0;
+  private tokensIn = 0;
+  private tokensOut = 0;
+  private turns = 0;
+  private lastText?: string;
+  private lastAction?: AgentAction;
+
+  constructor(now: () => number = Date.now) {
+    this.now = now;
+    this.startedAt = now();
+    this.lastEventAt = this.startedAt;
+  }
+
+  private readonly now: () => number;
+
+  /**
+   * Feed one raw line. Malformed lines are ignored rather than thrown:
+   * telemetry must never be able to kill the session it is describing.
+   */
+  ingestLine(line: string): void {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+
+    let event: StreamEvent;
+    try {
+      event = JSON.parse(trimmed) as StreamEvent;
+    } catch {
+      return;
+    }
+    this.ingest(event);
+  }
+
+  ingest(event: StreamEvent): void {
+    this.lastEventAt = this.now();
+
+    if (event.type === 'assistant') {
+      for (const block of event.message?.content ?? []) {
+        if (block.type === 'tool_use' && block.name) {
+          this.recordTool(block.name, block.input ?? {});
+        } else if (block.type === 'text' && block.text?.trim()) {
+          // Kept short: this is a status line, not a transcript.
+          this.lastText = block.text.trim().slice(0, 240);
+        }
+      }
+    }
+
+    if (event.type === 'result') {
+      this.costUsd = event.total_cost_usd ?? this.costUsd;
+      this.turns = event.num_turns ?? this.turns;
+      this.tokensIn = event.usage?.input_tokens ?? this.tokensIn;
+      this.tokensOut = event.usage?.output_tokens ?? this.tokensOut;
+    }
+  }
+
+  private recordTool(tool: string, input: Record<string, unknown>): void {
+    this.toolCalls++;
+
+    const path =
+      typeof input.file_path === 'string'
+        ? input.file_path
+        : typeof input.path === 'string'
+          ? input.path
+          : undefined;
+
+    if (path) {
+      const list = WRITE_TOOLS.has(tool) ? this.touched : READ_TOOLS.has(tool) ? this.read : null;
+      // First-touch order, not frequency: a conductor reads this as "what has
+      // this agent been into", and re-listing a file it edited eight times
+      // would drown out the other seven files.
+      if (list && !list.includes(path)) list.push(path);
+    }
+
+    if (tool === 'Bash' && typeof input.command === 'string') {
+      this.commands.push(input.command.slice(0, 200));
+    }
+
+    const action: AgentAction = { tool, path, atMs: this.now() - this.startedAt };
+    this.lastAction = action;
+    this.actions.push(action);
+    if (this.actions.length > MAX_ACTIONS) this.actions.shift();
+  }
+
+  snapshot(): SessionTelemetry {
+    const now = this.now();
+    return {
+      toolCalls: this.toolCalls,
+      filesTouched: [...this.touched],
+      filesRead: [...this.read],
+      commands: [...this.commands],
+      lastText: this.lastText,
+      lastAction: this.lastAction,
+      actions: [...this.actions],
+      costUsd: this.costUsd,
+      tokensIn: this.tokensIn,
+      tokensOut: this.tokensOut,
+      turns: this.turns,
+      elapsedMs: now - this.startedAt,
+      idleMs: now - this.lastEventAt,
+    };
+  }
+}
+
+/**
+ * Progress from evidence rather than from a timer.
+ *
+ * The plan states which files a task will touch. Once an agent has written to
+ * all of them it is, by its own contract, essentially done — so the ratio is a
+ * real measurement instead of a countdown. Both bounds matter: it never claims
+ * completion (the agent decides that), and it never claims zero once work has
+ * started, because an agent five tool calls in is visibly not at nothing.
+ *
+ * With no declared files there is nothing to measure against, so this falls
+ * back to a coarse tool-call curve — still evidence, just weaker evidence, and
+ * it is capped low enough that nobody mistakes it for a real reading.
+ */
+export function estimateProgress(
+  telemetry: SessionTelemetry,
+  declaredFiles: string[] = []
+): number {
+  if (declaredFiles.length > 0) {
+    const declared = declaredFiles.map(normalize);
+    const done = declared.filter((f) =>
+      telemetry.filesTouched.some((t) => normalize(t).endsWith(f) || f.endsWith(normalize(t)))
+    ).length;
+    const ratio = done / declared.length;
+    // 10 as a floor once anything has happened, 90 as a ceiling because the
+    // agent is the only thing that can declare itself finished.
+    return Math.max(telemetry.toolCalls > 0 ? 10 : 0, Math.min(90, Math.round(ratio * 90)));
+  }
+
+  if (telemetry.toolCalls === 0) return 0;
+  // Diminishing curve: 1 call ≈ 12%, 5 ≈ 40%, 20 ≈ 65%, never past 70 without
+  // file evidence to back it.
+  return Math.min(70, Math.round(70 * (1 - Math.exp(-telemetry.toolCalls / 8))));
+}
+
+function normalize(p: string): string {
+  return p.replace(/^\.\//, '').replace(/\\/g, '/');
+}
+
+/** A short human phrase for what the agent is doing right now. */
+export function describeActivity(telemetry: SessionTelemetry): string {
+  const a = telemetry.lastAction;
+  if (!a) return 'starting up';
+
+  const file = a.path ? a.path.split('/').slice(-1)[0] : undefined;
+  switch (a.tool) {
+    case 'Write':
+      return file ? `writing ${file}` : 'writing';
+    case 'Edit':
+    case 'MultiEdit':
+      return file ? `editing ${file}` : 'editing';
+    case 'Read':
+      return file ? `reading ${file}` : 'reading';
+    case 'Bash':
+      return `running ${(telemetry.commands.at(-1) ?? '').split(/\s+/)[0] || 'a command'}`;
+    case 'Grep':
+    case 'Glob':
+      return 'searching';
+    default:
+      return a.tool.toLowerCase();
+  }
+}
+
+/**
+ * Has this agent stopped making progress?
+ *
+ * The one question a wall-clock timer cannot answer, and the reason a conductor
+ * would look at this screen at all. Silence is not the same as slowness: a long
+ * Bash step is quiet and healthy, so the threshold is generous by default and
+ * the caller decides what to do about it.
+ */
+export function isStalled(telemetry: SessionTelemetry, thresholdMs = 180_000): boolean {
+  return telemetry.toolCalls > 0 && telemetry.idleMs > thresholdMs;
+}

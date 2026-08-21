@@ -995,6 +995,40 @@ declare const rufloSessions: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
             enumValues: undefined;
             baseColumn: never;
         }, object>;
+        telemetry: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "telemetry";
+            tableName: "ruflo_sessions";
+            dataType: "json";
+            columnType: "SQLiteTextJson";
+            data: {
+                toolCalls?: number;
+                filesTouched?: string[];
+                filesRead?: string[];
+                commands?: string[];
+                lastText?: string;
+                lastAction?: {
+                    tool: string;
+                    path?: string;
+                    atMs: number;
+                };
+                actions?: {
+                    tool: string;
+                    path?: string;
+                    atMs: number;
+                }[];
+                costUsd?: number;
+                tokensIn?: number;
+                tokensOut?: number;
+                turns?: number;
+                elapsedMs?: number;
+                idleMs?: number;
+            };
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
         createdAt: drizzle_orm_sqlite_core.SQLiteColumn<{
             name: "created_at";
             tableName: "ruflo_sessions";

@@ -48,6 +48,19 @@ export async function POST(request: Request) {
         status: sessionStatus,
         progressPercent: update.progressPercent,
         currentWorkstream: update.currentStep || session.currentWorkstream,
+        /**
+         * The live picture, when the runner sends one.
+         *
+         * Optional on purpose: this callback contract predates telemetry, and a
+         * runner that predates it must keep reporting status. Absent telemetry
+         * leaves the previous snapshot rather than blanking the instrument
+         * every time an older client checks in.
+         */
+        ...(update.telemetry ? { telemetry: update.telemetry } : {}),
+        ...(typeof update.tokensUsed === 'number' ? { tokensUsed: update.tokensUsed } : {}),
+        ...(Array.isArray(update.filesModified)
+          ? { inFlightFiles: update.filesModified }
+          : {}),
         updatedAt: new Date(),
       })
       .where(eq(rufloSessions.id, update.sessionId));

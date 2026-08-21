@@ -3,6 +3,7 @@ import { promisify } from 'util';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { TelemetryCollector, type SessionTelemetry } from './stream-events';
 
 const execFileAsync = promisify(execFile);
 
@@ -119,9 +120,14 @@ function classify(before: GitState, after: GitState) {
 /**
  * Pull the last JSON object out of claude's stdout.
  *
- * With `--output-format json` the envelope is the whole of stdout, but MCP
- * servers and plugins occasionally print to stdout before it. Scanning for the
- * last balanced object is resilient to that; `JSON.parse(stdout)` is not.
+ * With `--output-format stream-json` stdout is newline-delimited events and the
+ * envelope is the final `result` object — which carries the same fields the old
+ * single-object format did (`total_cost_usd`, `num_turns`, `usage`, `result`,
+ * `is_error`), so everything downstream reads unchanged.
+ *
+ * Scanning backwards for the last balanced object handles both shapes, and also
+ * the case this was originally written for: MCP servers and plugins that print
+ * to stdout before the envelope. `JSON.parse(stdout)` handles neither.
  */
 function parseEnvelope(stdout: string): ClaudeResultEnvelope | null {
   const trimmed = stdout.trim();
@@ -219,6 +225,14 @@ export interface RunClaudeOptions {
   onLog?: (line: string) => void;
   /** Receives the kill handle so the HTTP `stop` route can cancel the run. */
   onSpawn?: (kill: () => void) => void;
+  /**
+   * Called as the agent works, with the running picture of what it is doing.
+   *
+   * This is the difference between a status board and an instrument. Without it
+   * a dispatched agent is opaque until it exits, and the only honest thing the
+   * cockpit can show is a timer pretending to be a progress bar.
+   */
+  onTelemetry?: (telemetry: SessionTelemetry) => void;
 }
 
 export async function runClaudeSession(
@@ -230,7 +244,26 @@ export async function runClaudeSession(
   const before = await snapshot(workdir);
   const startedAt = Date.now();
 
-  const args = ['-p', '--output-format', 'json', '--permission-mode', permissionMode];
+  /**
+   * `stream-json`, not `json`.
+   *
+   * `json` buffers everything and returns one object when the run ends, which
+   * is why an agent was a black box for its entire life. `stream-json` emits
+   * newline-delimited events as the work happens — every tool call, its result,
+   * and a final `result` carrying real cost and turns. `--verbose` is required
+   * for it to include the assistant turns at all.
+   *
+   * The final `result` event is still a superset of what `json` returned, so
+   * everything downstream that parsed the old envelope keeps working.
+   */
+  const args = [
+    '-p',
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    '--permission-mode',
+    permissionMode,
+  ];
   if (model) args.push('--model', model);
 
   // Shared-session wiring. `--strict-mcp-config` keeps the agent to exactly this
@@ -263,6 +296,9 @@ export async function runClaudeSession(
 
     let stdout = '';
     let stderr = '';
+    /** Partial trailing line between chunks; NDJSON does not respect chunk boundaries. */
+    let pending = '';
+    const collector = new TelemetryCollector();
     let timedOut = false;
     let killed = false;
 
@@ -279,7 +315,20 @@ export async function runClaudeSession(
     });
 
     child.stdout.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString();
+      const text = chunk.toString();
+      stdout += text;
+
+      /**
+       * Split on newlines and keep the remainder. A chunk boundary lands in the
+       * middle of a JSON object often enough that parsing per-chunk silently
+       * drops events — and dropped events are exactly the tool calls the
+       * instrument exists to show.
+       */
+      pending += text;
+      const lines = pending.split('\n');
+      pending = lines.pop() ?? '';
+      for (const line of lines) collector.ingestLine(line);
+      if (lines.length > 0) options.onTelemetry?.(collector.snapshot());
     });
     child.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString();

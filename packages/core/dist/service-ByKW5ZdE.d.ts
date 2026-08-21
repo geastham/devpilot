@@ -40,6 +40,36 @@ interface StatusUpdate {
     message?: string;
     filesModified?: string[];
     tokensUsed?: number;
+    /**
+     * Live picture of what the agent is doing, when the runner can supply one.
+     *
+     * Optional because this contract predates it: a runner built before
+     * `stream-json` reports status without telemetry, and the cockpit must keep
+     * accepting those rather than treating a missing instrument as an error.
+     */
+    telemetry?: {
+        toolCalls?: number;
+        filesTouched?: string[];
+        filesRead?: string[];
+        commands?: string[];
+        lastText?: string;
+        lastAction?: {
+            tool: string;
+            path?: string;
+            atMs: number;
+        };
+        actions?: {
+            tool: string;
+            path?: string;
+            atMs: number;
+        }[];
+        costUsd?: number;
+        tokensIn?: number;
+        tokensOut?: number;
+        turns?: number;
+        elapsedMs?: number;
+        idleMs?: number;
+    };
     timestamp: string;
 }
 /**

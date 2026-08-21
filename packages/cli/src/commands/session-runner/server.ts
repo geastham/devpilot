@@ -4,6 +4,7 @@ import { existsSync } from 'fs';
 import { basename, isAbsolute, resolve } from 'path';
 import { runClaudeSession } from './claude-runner';
 import { sendCompletion, sendStatus } from './callbacks';
+import { describeActivity, estimateProgress, type SessionTelemetry } from './stream-events';
 import type {
   CreateSessionRequest,
   RunnerConfig,
@@ -141,19 +142,32 @@ export class SessionRunner {
         message: `Claude Code session running in ${session.workdir}`,
       });
 
-      // A heartbeat, not a progress estimate. §7.2 asks for a status at least
-      // every 2 minutes while running; `claude -p` reports nothing until it is
-      // done, so there is no real percentage to send. It stops short of 90 so
-      // the bar never implies the work is nearly over when it may not be.
+      /**
+       * The heartbeat is now a floor, not the signal.
+       *
+       * It used to BE the progress: five percent every ninety seconds, capped
+       * at ninety, because `claude -p` said nothing until it exited. Agents sat
+       * at 0% for ten minutes and then snapped to 100%, and elapsed read 0m
+       * against a real 5.76m. With `stream-json` the telemetry below carries
+       * the actual picture; this only guarantees §7.2's two-minute liveness
+       * requirement when an agent is genuinely quiet (a long Bash step, say).
+       */
       const heartbeat = setInterval(() => {
         if (session.terminal) return;
-        session.progressPercent = Math.min(90, session.progressPercent + 5);
         this.reportStatus(session, callbackUrl, callbackToken, {
-          currentStep: 'working',
-          message: 'Session in progress',
+          currentStep: session.currentStep ?? 'working',
+          message: session.message ?? 'Session in progress',
         });
       }, 90_000);
       heartbeat.unref();
+
+      /**
+       * Throttled so the instrument does not become the load. A busy agent
+       * emits tool calls faster than anyone can read them, and every report is
+       * an HTTP round trip plus a database write on the other end.
+       */
+      let lastReportAt = 0;
+      const REPORT_INTERVAL_MS = 3_000;
 
       const outcome = await runClaudeSession({
         workdir: session.workdir,
@@ -167,6 +181,23 @@ export class SessionRunner {
         onSpawn: (kill) => {
           session.kill = kill;
         },
+        onTelemetry: (telemetry) => {
+          session.telemetry = telemetry;
+          session.currentStep = describeActivity(telemetry);
+          session.progressPercent = estimateProgress(telemetry, request.filePaths ?? []);
+
+          const now = Date.now();
+          if (now - lastReportAt < REPORT_INTERVAL_MS) return;
+          lastReportAt = now;
+
+          this.reportStatus(session, callbackUrl, callbackToken, {
+            currentStep: session.currentStep,
+            message: telemetry.lastText ?? `${telemetry.toolCalls} tool calls`,
+            filesModified: telemetry.filesTouched,
+            tokensUsed: telemetry.tokensIn + telemetry.tokensOut,
+            telemetry,
+          });
+        },
       });
 
       clearInterval(heartbeat);
@@ -174,6 +205,7 @@ export class SessionRunner {
       session.terminal = true;
       session.status = outcome.success ? 'complete' : 'error';
       session.progressPercent = outcome.success ? 100 : session.progressPercent;
+      session.currentStep = outcome.success ? 'complete' : 'failed';
       session.filesModified = outcome.filesModified;
       session.tokensUsed = outcome.tokensUsed;
       session.message = outcome.summary;

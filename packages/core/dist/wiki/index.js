@@ -547,6 +547,16 @@ var rufloSessions = (0, import_sqlite_core2.sqliteTable)("ruflo_sessions", {
   orchestratorMode: (0, import_sqlite_core2.text)("orchestrator_mode", { enum: orchestratorModeValues }),
   tokensUsed: (0, import_sqlite_core2.integer)("tokens_used"),
   costUsd: (0, import_sqlite_core2.integer)("cost_usd"),
+  /**
+   * What the agent is doing right now, as reported by the session runner.
+   *
+   * The fleet used to know only that a session existed and a percentage that
+   * was a timer in disguise. This carries the live picture — tool calls, files
+   * touched, cost so far, idle time — so the cockpit can show an instrument
+   * instead of a placebo. JSON because the shape belongs to the runner and the
+   * cockpit only renders it.
+   */
+  telemetry: (0, import_sqlite_core2.text)("telemetry", { mode: "json" }).$type(),
   createdAt: (0, import_sqlite_core2.integer)("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date()),
   updatedAt: (0, import_sqlite_core2.integer)("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date())
 });

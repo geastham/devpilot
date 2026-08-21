@@ -5,7 +5,7 @@ import { cn, formatMinutes, formatTime } from '@/lib/utils';
 import { Card, CardContent } from '@/components/ui/card';
 import { RepoBadge, StatusBadge } from '@/components/ui/badge';
 import { ProgressBar } from '@/components/ui/progress';
-import type { RufloSession } from '@/types';
+import type { AgentTelemetry, RufloSession } from '@/types';
 
 interface RufloSessionCardProps {
   session: RufloSession;
@@ -13,6 +13,21 @@ interface RufloSessionCardProps {
 
 export function RufloSessionCard({ session }: RufloSessionCardProps) {
   const [isExpanded, setIsExpanded] = useState(false);
+
+  const telemetry = session.telemetry ?? null;
+  const isActive = session.status === 'active';
+  const touchedCount = telemetry?.filesTouched?.length ?? 0;
+
+  /** Three minutes of silence after work has started. See `isStalled`. */
+  const stalled =
+    isActive && (telemetry?.toolCalls ?? 0) > 0 && (telemetry?.idleMs ?? 0) > 180_000;
+
+  const activity = describeAction(telemetry);
+
+  const liveElapsedMinutes =
+    typeof telemetry?.elapsedMs === 'number' && telemetry.elapsedMs > 0
+      ? Math.round(telemetry.elapsedMs / 60_000)
+      : session.elapsedMinutes;
 
   // Idle warnings are about work ABOUT TO run out, so they apply only to a
   // session that is still running. Deriving them from progress alone made every
@@ -80,6 +95,56 @@ export function RufloSessionCard({ session }: RufloSessionCardProps) {
           {session.currentWorkstream}
         </p>
 
+        {/*
+          The live readout.
+
+          This card used to show a workstream label and a percentage that was a
+          timer in disguise — five percent every ninety seconds. A conductor
+          could not tell a working agent from a wedged one. These three lines
+          are the difference: what it is touching, how much it has done, and
+          whether anything has happened recently.
+        */}
+        {telemetry && (
+          <div className="mb-2 space-y-1.5">
+            <div className="flex items-center gap-1.5">
+              {/* The pulse is the point: it only animates while work is live,
+                  so a frozen dot reads as a frozen agent. */}
+              <span
+                className={cn(
+                  'h-1.5 w-1.5 shrink-0 rounded-full',
+                  stalled ? 'bg-accent-amber' : isActive ? 'animate-pulse bg-accent-primary' : 'bg-text-muted'
+                )}
+              />
+              <span className="truncate font-mono text-[11px] text-text-primary">
+                {activity}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[10px] text-text-muted">
+              {typeof telemetry.toolCalls === 'number' && telemetry.toolCalls > 0 && (
+                <span>{telemetry.toolCalls} calls</span>
+              )}
+              {touchedCount > 0 && (
+                <span className="text-accent-green">
+                  {touchedCount} file{touchedCount === 1 ? '' : 's'}
+                </span>
+              )}
+              {typeof telemetry.costUsd === 'number' && telemetry.costUsd > 0 && (
+                <span>${telemetry.costUsd.toFixed(3)}</span>
+              )}
+              {typeof telemetry.turns === 'number' && telemetry.turns > 0 && (
+                <span>{telemetry.turns} turns</span>
+              )}
+            </div>
+
+            {stalled && (
+              <p className="text-[10px] text-accent-amber">
+                No activity for {Math.round((telemetry.idleMs ?? 0) / 60000)}m — may be stuck
+              </p>
+            )}
+          </div>
+        )}
+
         {/* Progress */}
         <div className="flex items-center gap-3 mb-2">
           <ProgressBar
@@ -95,7 +160,10 @@ export function RufloSessionCard({ session }: RufloSessionCardProps) {
         {/* Footer */}
         <div className="flex items-center justify-between">
           <span className="text-xs text-text-muted">
-            Elapsed: {formatMinutes(session.elapsedMinutes)}
+            {/* Prefer the runner's wall clock. `elapsedMinutes` is only written
+                on terminal updates, so a running session showed "0m" for its
+                entire life — observed at 0m against a real 5.76m. */}
+            Elapsed: {formatMinutes(liveElapsedMinutes)}
           </span>
           <StatusBadge status={statusVariant} />
         </div>
@@ -123,4 +191,33 @@ export function RufloSessionCard({ session }: RufloSessionCardProps) {
       </CardContent>
     </Card>
   );
+}
+
+/**
+ * A short phrase for the agent's current action.
+ *
+ * Mirrors `describeActivity` in the session runner rather than importing it —
+ * the runner is a CLI package the cockpit does not depend on, and one shared
+ * sentence is not worth inverting that.
+ */
+function describeAction(telemetry: AgentTelemetry | null): string {
+  const a = telemetry?.lastAction;
+  if (!a) return 'starting up';
+  const file = a.path ? a.path.split('/').slice(-1)[0] : undefined;
+  switch (a.tool) {
+    case 'Write':
+      return file ? `writing ${file}` : 'writing';
+    case 'Edit':
+    case 'MultiEdit':
+      return file ? `editing ${file}` : 'editing';
+    case 'Read':
+      return file ? `reading ${file}` : 'reading';
+    case 'Bash':
+      return `running ${(telemetry?.commands?.at(-1) ?? '').split(/\s+/)[0] || 'a command'}`;
+    case 'Grep':
+    case 'Glob':
+      return 'searching';
+    default:
+      return a.tool.toLowerCase();
+  }
 }

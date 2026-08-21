@@ -354,7 +354,10 @@ export class WaveDispatchCoordinator {
         repo: ctx.repo,
         linearTicketId: ctx.linearTicketId ?? `DP-${task.taskCode}-${Date.now()}`,
         ticketTitle: `${ctx.itemTitle} — ${task.taskCode} ${task.label}`,
-        currentWorkstream: `Wave ${task.waveIndex}`,
+        // +1: waveIndex is 0-based internally, and every surface a person
+        // reads counts from 1 — the board says "wave 1 of 2" while these cards
+        // said "Wave 0" for the same work.
+        currentWorkstream: `Wave ${task.waveIndex + 1} · ${task.taskCode}`,
         status: 'ACTIVE',
         progressPercent: 0,
         inFlightFiles: task.filePaths ?? [],

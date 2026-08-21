@@ -24,6 +24,30 @@ export const rufloSessions = sqliteTable('ruflo_sessions', {
   orchestratorMode: text('orchestrator_mode', { enum: orchestratorModeValues }),
   tokensUsed: integer('tokens_used'),
   costUsd: integer('cost_usd'),
+  /**
+   * What the agent is doing right now, as reported by the session runner.
+   *
+   * The fleet used to know only that a session existed and a percentage that
+   * was a timer in disguise. This carries the live picture — tool calls, files
+   * touched, cost so far, idle time — so the cockpit can show an instrument
+   * instead of a placebo. JSON because the shape belongs to the runner and the
+   * cockpit only renders it.
+   */
+  telemetry: text('telemetry', { mode: 'json' }).$type<{
+    toolCalls?: number;
+    filesTouched?: string[];
+    filesRead?: string[];
+    commands?: string[];
+    lastText?: string;
+    lastAction?: { tool: string; path?: string; atMs: number };
+    actions?: { tool: string; path?: string; atMs: number }[];
+    costUsd?: number;
+    tokensIn?: number;
+    tokensOut?: number;
+    turns?: number;
+    elapsedMs?: number;
+    idleMs?: number;
+  }>(),
   createdAt: integer('created_at', { mode: 'timestamp' })
     .notNull()
     .$defaultFn(() => new Date()),

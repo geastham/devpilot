@@ -117,6 +117,31 @@ export interface RufloSession {
   status: SessionStatus;
   inFlightFiles: string[];
   completedTasks: CompletedTask[];
+  /**
+   * What the agent is doing right now, streamed from the session runner.
+   *
+   * Absent for sessions that predate telemetry, or when the runner is an older
+   * build — every reader must treat it as optional rather than assuming the
+   * instrument is always lit.
+   */
+  telemetry?: AgentTelemetry | null;
+}
+
+/** The live picture of one agent. Mirrors the runner's `SessionTelemetry`. */
+export interface AgentTelemetry {
+  toolCalls?: number;
+  filesTouched?: string[];
+  filesRead?: string[];
+  commands?: string[];
+  lastText?: string;
+  lastAction?: { tool: string; path?: string; atMs: number };
+  actions?: { tool: string; path?: string; atMs: number }[];
+  costUsd?: number;
+  tokensIn?: number;
+  tokensOut?: number;
+  turns?: number;
+  elapsedMs?: number;
+  idleMs?: number;
 }
 
 export interface CompletedTask {

@@ -11,7 +11,7 @@ import { Command as Command17 } from "commander";
 import updateNotifier from "update-notifier";
 
 // src/version.ts
-var VERSION = "0.2.9";
+var VERSION = "0.3.0";
 
 // src/commands/init.ts
 import { Command } from "commander";
@@ -1943,6 +1943,131 @@ import { promisify } from "util";
 import { mkdtempSync, rmSync, writeFileSync as writeFileSync7 } from "fs";
 import { tmpdir } from "os";
 import { join as join7 } from "path";
+
+// src/commands/session-runner/stream-events.ts
+var MAX_ACTIONS = 200;
+var WRITE_TOOLS = /* @__PURE__ */ new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+var READ_TOOLS = /* @__PURE__ */ new Set(["Read", "Glob", "Grep"]);
+var TelemetryCollector = class {
+  constructor(now = Date.now) {
+    this.touched = [];
+    this.read = [];
+    this.commands = [];
+    this.actions = [];
+    this.toolCalls = 0;
+    this.costUsd = 0;
+    this.tokensIn = 0;
+    this.tokensOut = 0;
+    this.turns = 0;
+    this.now = now;
+    this.startedAt = now();
+    this.lastEventAt = this.startedAt;
+  }
+  /**
+   * Feed one raw line. Malformed lines are ignored rather than thrown:
+   * telemetry must never be able to kill the session it is describing.
+   */
+  ingestLine(line) {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let event;
+    try {
+      event = JSON.parse(trimmed);
+    } catch {
+      return;
+    }
+    this.ingest(event);
+  }
+  ingest(event) {
+    this.lastEventAt = this.now();
+    if (event.type === "assistant") {
+      for (const block of event.message?.content ?? []) {
+        if (block.type === "tool_use" && block.name) {
+          this.recordTool(block.name, block.input ?? {});
+        } else if (block.type === "text" && block.text?.trim()) {
+          this.lastText = block.text.trim().slice(0, 240);
+        }
+      }
+    }
+    if (event.type === "result") {
+      this.costUsd = event.total_cost_usd ?? this.costUsd;
+      this.turns = event.num_turns ?? this.turns;
+      this.tokensIn = event.usage?.input_tokens ?? this.tokensIn;
+      this.tokensOut = event.usage?.output_tokens ?? this.tokensOut;
+    }
+  }
+  recordTool(tool, input) {
+    this.toolCalls++;
+    const path = typeof input.file_path === "string" ? input.file_path : typeof input.path === "string" ? input.path : void 0;
+    if (path) {
+      const list = WRITE_TOOLS.has(tool) ? this.touched : READ_TOOLS.has(tool) ? this.read : null;
+      if (list && !list.includes(path)) list.push(path);
+    }
+    if (tool === "Bash" && typeof input.command === "string") {
+      this.commands.push(input.command.slice(0, 200));
+    }
+    const action = { tool, path, atMs: this.now() - this.startedAt };
+    this.lastAction = action;
+    this.actions.push(action);
+    if (this.actions.length > MAX_ACTIONS) this.actions.shift();
+  }
+  snapshot() {
+    const now = this.now();
+    return {
+      toolCalls: this.toolCalls,
+      filesTouched: [...this.touched],
+      filesRead: [...this.read],
+      commands: [...this.commands],
+      lastText: this.lastText,
+      lastAction: this.lastAction,
+      actions: [...this.actions],
+      costUsd: this.costUsd,
+      tokensIn: this.tokensIn,
+      tokensOut: this.tokensOut,
+      turns: this.turns,
+      elapsedMs: now - this.startedAt,
+      idleMs: now - this.lastEventAt
+    };
+  }
+};
+function estimateProgress(telemetry, declaredFiles = []) {
+  if (declaredFiles.length > 0) {
+    const declared = declaredFiles.map(normalize);
+    const done = declared.filter(
+      (f) => telemetry.filesTouched.some((t) => normalize(t).endsWith(f) || f.endsWith(normalize(t)))
+    ).length;
+    const ratio = done / declared.length;
+    return Math.max(telemetry.toolCalls > 0 ? 10 : 0, Math.min(90, Math.round(ratio * 90)));
+  }
+  if (telemetry.toolCalls === 0) return 0;
+  return Math.min(70, Math.round(70 * (1 - Math.exp(-telemetry.toolCalls / 8))));
+}
+function normalize(p) {
+  return p.replace(/^\.\//, "").replace(/\\/g, "/");
+}
+function describeActivity(telemetry) {
+  const a = telemetry.lastAction;
+  if (!a) return "starting up";
+  const file = a.path ? a.path.split("/").slice(-1)[0] : void 0;
+  switch (a.tool) {
+    case "Write":
+      return file ? `writing ${file}` : "writing";
+    case "Edit":
+    case "MultiEdit":
+      return file ? `editing ${file}` : "editing";
+    case "Read":
+      return file ? `reading ${file}` : "reading";
+    case "Bash":
+      return `running ${(telemetry.commands.at(-1) ?? "").split(/\s+/)[0] || "a command"}`;
+    case "Grep":
+    case "Glob":
+      return "searching";
+    default:
+      return a.tool.toLowerCase();
+  }
+}
+
+// src/commands/session-runner/claude-runner.ts
 var execFileAsync = promisify(execFile);
 async function git(workdir, args) {
   const { stdout } = await execFileAsync("git", args, {
@@ -2043,7 +2168,14 @@ async function runClaudeSession(options) {
   const { workdir, prompt: prompt2, sessionLink: sessionLink2, model, claudePath, permissionMode, timeoutMs, onLog, onSpawn } = options;
   const before = await snapshot(workdir);
   const startedAt = Date.now();
-  const args = ["-p", "--output-format", "json", "--permission-mode", permissionMode];
+  const args = [
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--permission-mode",
+    permissionMode
+  ];
   if (model) args.push("--model", model);
   let mcpDir;
   let effectivePrompt = prompt2;
@@ -2063,6 +2195,8 @@ async function runClaudeSession(options) {
     });
     let stdout = "";
     let stderr = "";
+    let pending = "";
+    const collector = new TelemetryCollector();
     let timedOut = false;
     let killed = false;
     const timer = setTimeout(() => {
@@ -2075,7 +2209,13 @@ async function runClaudeSession(options) {
       child.kill("SIGTERM");
     });
     child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
+      const text = chunk.toString();
+      stdout += text;
+      pending += text;
+      const lines = pending.split("\n");
+      pending = lines.pop() ?? "";
+      for (const line of lines) collector.ingestLine(line);
+      if (lines.length > 0) options.onTelemetry?.(collector.snapshot());
     });
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString();
@@ -2254,13 +2394,14 @@ var SessionRunner = class {
       });
       const heartbeat = setInterval(() => {
         if (session.terminal) return;
-        session.progressPercent = Math.min(90, session.progressPercent + 5);
         this.reportStatus(session, callbackUrl, callbackToken, {
-          currentStep: "working",
-          message: "Session in progress"
+          currentStep: session.currentStep ?? "working",
+          message: session.message ?? "Session in progress"
         });
       }, 9e4);
       heartbeat.unref();
+      let lastReportAt = 0;
+      const REPORT_INTERVAL_MS = 3e3;
       const outcome = await runClaudeSession({
         workdir: session.workdir,
         prompt: request.prompt,
@@ -2272,12 +2413,28 @@ var SessionRunner = class {
         onLog: (line) => this.config.log(`[${session.externalSessionId}] ${line}`),
         onSpawn: (kill) => {
           session.kill = kill;
+        },
+        onTelemetry: (telemetry) => {
+          session.telemetry = telemetry;
+          session.currentStep = describeActivity(telemetry);
+          session.progressPercent = estimateProgress(telemetry, request.filePaths ?? []);
+          const now = Date.now();
+          if (now - lastReportAt < REPORT_INTERVAL_MS) return;
+          lastReportAt = now;
+          this.reportStatus(session, callbackUrl, callbackToken, {
+            currentStep: session.currentStep,
+            message: telemetry.lastText ?? `${telemetry.toolCalls} tool calls`,
+            filesModified: telemetry.filesTouched,
+            tokensUsed: telemetry.tokensIn + telemetry.tokensOut,
+            telemetry
+          });
         }
       });
       clearInterval(heartbeat);
       session.terminal = true;
       session.status = outcome.success ? "complete" : "error";
       session.progressPercent = outcome.success ? 100 : session.progressPercent;
+      session.currentStep = outcome.success ? "complete" : "failed";
       session.filesModified = outcome.filesModified;
       session.tokensUsed = outcome.tokensUsed;
       session.message = outcome.summary;
