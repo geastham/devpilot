@@ -20,11 +20,25 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/index.ts
 var index_exports = {};
 __export(index_exports, {
+  ADOPTION_AGENTS: () => ADOPTION_AGENTS,
+  ADOPTION_LIMITS: () => ADOPTION_LIMITS,
+  ADOPTION_MATCH_KINDS: () => ADOPTION_MATCH_KINDS,
+  ADOPTION_OUTCOME_STATUSES: () => ADOPTION_OUTCOME_STATUSES,
   AGENT_KINDS: () => AGENT_KINDS,
+  AdoptionAgentSchema: () => AdoptionAgentSchema,
+  AdoptionCandidateSchema: () => AdoptionCandidateSchema,
+  AdoptionMatchKindSchema: () => AdoptionMatchKindSchema,
+  AdoptionOutcomeSchema: () => AdoptionOutcomeSchema,
+  AdoptionOutcomeStatusSchema: () => AdoptionOutcomeStatusSchema,
+  AdoptionRequestSchema: () => AdoptionRequestSchema,
+  AdoptionResponseSchema: () => AdoptionResponseSchema,
   AgentKindSchema: () => AgentKindSchema,
   ApiErrorSchema: () => ApiErrorSchema,
   CreateSharedSessionRequestSchema: () => CreateSharedSessionRequestSchema,
   CreateSharedSessionResponseSchema: () => CreateSharedSessionResponseSchema,
+  DiscoveredRepoSchema: () => DiscoveredRepoSchema,
+  DiscoveryRequestSchema: () => DiscoveryRequestSchema,
+  DiscoveryResponseSchema: () => DiscoveryResponseSchema,
   DispatchPollResponseSchema: () => DispatchPollResponseSchema,
   ERROR_CODES: () => ERROR_CODES,
   HeartbeatRequestSchema: () => HeartbeatRequestSchema,
@@ -38,6 +52,7 @@ __export(index_exports, {
   RealtimeCredentialsSchema: () => RealtimeCredentialsSchema,
   RegisterRequestSchema: () => RegisterRequestSchema,
   RegisterResponseSchema: () => RegisterResponseSchema,
+  RepoSlugSchema: () => RepoSlugSchema,
   RotateSessionKeyRequestSchema: () => RotateSessionKeyRequestSchema,
   RotateSessionKeyResponseSchema: () => RotateSessionKeyResponseSchema,
   SESSION_EVENT_TYPES: () => SESSION_EVENT_TYPES,
@@ -62,12 +77,16 @@ __export(index_exports, {
   SharedSessionSchema: () => SharedSessionSchema,
   TERMINAL_STATUSES: () => TERMINAL_STATUSES,
   TaskDispatchMessageSchema: () => TaskDispatchMessageSchema,
+  buildAdoptionComment: () => buildAdoptionComment,
+  buildAdoptionIssueDescription: () => buildAdoptionIssueDescription,
   buildBridgeCompletionComment: () => buildBridgeCompletionComment,
   buildCompletionComment: () => buildCompletionComment,
   buildJoinLink: () => buildJoinLink,
   buildProgressComment: () => buildProgressComment,
+  escapeLinearMarkdown: () => escapeLinearMarkdown,
   formatApiError: () => formatApiError,
   isTerminal: () => isTerminal,
+  linearIdentifierFromBranch: () => linearIdentifierFromBranch,
   parseJoinLink: () => parseJoinLink,
   parseSessionMessage: () => parseSessionMessage,
   parseSessionMessagePage: () => parseSessionMessagePage,
@@ -666,13 +685,227 @@ function buildBridgeCompletionComment(input) {
     completionMessage: input.summary
   });
 }
+
+// src/adoption.ts
+var import_zod5 = require("zod");
+var ADOPTION_AGENTS = ["claude-code"];
+var AdoptionAgentSchema = import_zod5.z.enum(ADOPTION_AGENTS);
+var ADOPTION_MATCH_KINDS = ["branch", "title", "created"];
+var AdoptionMatchKindSchema = import_zod5.z.enum(ADOPTION_MATCH_KINDS);
+var ADOPTION_OUTCOME_STATUSES = [
+  /** A new session row, and a new Linear issue. */
+  "adopted",
+  /** Already adopted — same `adoptionKey`. Nothing was written. */
+  "duplicate",
+  /** A new session row against an issue that already existed. */
+  "attached",
+  /** Nothing was written; `reason` says why. */
+  "skipped"
+];
+var AdoptionOutcomeStatusSchema = import_zod5.z.enum(ADOPTION_OUTCOME_STATUSES);
+var ADOPTION_LIMITS = {
+  /** Per request. The CLI chunks beyond this. */
+  MAX_CANDIDATES: 100,
+  /** Paths only, and not many. A session touching more is summarised, not listed. */
+  MAX_TOUCHED_PATHS: 50,
+  MAX_TITLE_CHARS: 120,
+  MAX_SUMMARY_CHARS: 400,
+  /** Per discovery request. A machine with more repos than this has bigger problems. */
+  MAX_DISCOVERED_REPOS: 500
+};
+var RepoSlugSchema = import_zod5.z.string().min(3).max(255).regex(/^[\w.-]+\/[\w.-]+$/, "repo must be owner/name");
+var AdoptionCandidateSchema = import_zod5.z.object({
+  /**
+   * `sha256(machineName + ':' + sessionUuid)`, hex.
+   *
+   * Opaque on the wire and used only for idempotence. The machine name is in
+   * the hash because two laptops share a session UUID only if someone copied
+   * a `~/.claude` directory between them — and if they did, those genuinely
+   * are two observations of two different machines.
+   */
+  adoptionKey: import_zod5.z.string().regex(/^[0-9a-f]{64}$/, "adoptionKey must be sha256 hex"),
+  agent: AdoptionAgentSchema,
+  /** One line. From the client's own session title where it has one. */
+  title: import_zod5.z.string().min(1).max(ADOPTION_LIMITS.MAX_TITLE_CHARS),
+  /** Derived locally. Never a quotation from the transcript. */
+  summary: import_zod5.z.string().max(ADOPTION_LIMITS.MAX_SUMMARY_CHARS).optional(),
+  repo: RepoSlugSchema,
+  branch: import_zod5.z.string().max(255).optional(),
+  startedAt: import_zod5.z.string().datetime(),
+  lastActivityAt: import_zod5.z.string().datetime(),
+  /** Approximate — see the probe's note on why it is not paid for exactly. */
+  messageCount: import_zod5.z.number().int().nonnegative().optional(),
+  /** Still running at scan time. */
+  live: import_zod5.z.boolean(),
+  /**
+   * Changed file PATHS. Not contents, not diffs.
+   *
+   * This is what makes `getAvoidFiles` correct for a session DevPilot did not
+   * start: without it, an adopted agent holds files nothing knows about.
+   */
+  touchedPaths: import_zod5.z.array(import_zod5.z.string().min(1).max(400)).max(ADOPTION_LIMITS.MAX_TOUCHED_PATHS).optional()
+}).strict();
+var AdoptionRequestSchema = import_zod5.z.object({
+  machineName: import_zod5.z.string().min(1).max(255),
+  candidates: import_zod5.z.array(AdoptionCandidateSchema).min(1).max(ADOPTION_LIMITS.MAX_CANDIDATES),
+  /**
+   * Preview. Every read runs — routing, duplicate detection, branch and title
+   * matching — and the response says what creation *would* do. Nothing is
+   * written and no Linear issue is created.
+   *
+   * This is what `devpilot sessions scan` calls, so the matches a user sees
+   * before confirming are the real ones rather than a local guess that can
+   * disagree with the server.
+   */
+  dryRun: import_zod5.z.boolean().default(false)
+}).strict();
+var AdoptionOutcomeSchema = import_zod5.z.object({
+  adoptionKey: import_zod5.z.string(),
+  status: AdoptionOutcomeStatusSchema,
+  /** `dispatch_sessions.id`, or null when nothing was written. */
+  sessionId: import_zod5.z.string().nullable(),
+  linearIdentifier: import_zod5.z.string().nullable(),
+  linearUrl: import_zod5.z.string().url().nullable(),
+  matchedBy: AdoptionMatchKindSchema.nullable(),
+  /** Present for `skipped`, and for any outcome worth explaining. */
+  reason: import_zod5.z.string().max(400).optional()
+});
+var AdoptionResponseSchema = import_zod5.z.object({
+  outcomes: import_zod5.z.array(AdoptionOutcomeSchema),
+  adopted: import_zod5.z.number().int().nonnegative(),
+  attached: import_zod5.z.number().int().nonnegative(),
+  duplicates: import_zod5.z.number().int().nonnegative(),
+  skipped: import_zod5.z.number().int().nonnegative(),
+  /** Echoed so a client cannot mistake a preview for a write. */
+  dryRun: import_zod5.z.boolean()
+});
+var DiscoveredRepoSchema = import_zod5.z.object({
+  repo: RepoSlugSchema,
+  /** The grouping key the portal renders sections by — the GitHub org. */
+  owner: import_zod5.z.string().min(1).max(255),
+  /** `github.com`, `gitlab.com`, … Never a path. */
+  host: import_zod5.z.string().min(1).max(255),
+  /** Distinct working directories. Worktrees legitimately inflate this. */
+  projectCount: import_zod5.z.number().int().nonnegative(),
+  sessionCount: import_zod5.z.number().int().nonnegative(),
+  /** The "this is happening right now" number. */
+  liveSessionCount: import_zod5.z.number().int().nonnegative(),
+  lastActivityAt: import_zod5.z.string().datetime().nullable()
+}).strict();
+var DiscoveryRequestSchema = import_zod5.z.object({
+  machineName: import_zod5.z.string().min(1).max(255),
+  repos: import_zod5.z.array(DiscoveredRepoSchema).max(ADOPTION_LIMITS.MAX_DISCOVERED_REPOS),
+  /**
+   * Directories with agent activity and no resolvable git remote.
+   *
+   * Reported as a count rather than a list: the paths are the user's private
+   * directory layout, and "12 sessions DevPilot cannot route" is the whole of
+   * what the onboarding surface needs to say.
+   */
+  unmappedProjectCount: import_zod5.z.number().int().nonnegative().default(0)
+}).strict();
+var DiscoveryResponseSchema = import_zod5.z.object({
+  /** Rows written or updated. */
+  accepted: import_zod5.z.number().int().nonnegative(),
+  /** Of those, awaiting a member's decision. */
+  proposed: import_zod5.z.number().int().nonnegative(),
+  /** Already routed to a machine — nothing to decide. */
+  alreadyRouted: import_zod5.z.number().int().nonnegative()
+});
+function escapeLinearMarkdown(text) {
+  return text.replace(/\\/g, "\\\\").replace(/([`*_[\]()#<>|~])/g, "\\$1").replace(/\r?\n/g, " ").trim();
+}
+var ADOPTION_FILE_LIMIT = 10;
+function durationLabel(startedAt, endedAt) {
+  const ms = Date.parse(endedAt) - Date.parse(startedAt);
+  if (!Number.isFinite(ms) || ms < 0) return "an unknown duration";
+  const minutes = Math.round(ms / 6e4);
+  if (minutes < 1) return "under a minute";
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0 ? `${hours} hour${hours === 1 ? "" : "s"}` : `${hours}h ${rest}m`;
+}
+function buildAdoptionComment(input) {
+  const lines = [
+    `:eyes: **Agent session observed** \u2014 \`${escapeLinearMarkdown(input.agent)}\` on \`${escapeLinearMarkdown(input.machineName)}\``,
+    "",
+    `DevPilot did not start this session. It was found already running on the machine and recorded here so the work is on the board.`,
+    "",
+    `**Ran for:** ${durationLabel(input.startedAt, input.lastActivityAt)}`
+  ];
+  if (input.branch) {
+    lines.push(`**Branch:** \`${escapeLinearMarkdown(input.branch)}\``);
+  }
+  if (input.summary) {
+    lines.push("", escapeLinearMarkdown(input.summary));
+  }
+  if (input.touchedPaths && input.touchedPaths.length > 0) {
+    lines.push("", "**Files touched:**");
+    for (const path of input.touchedPaths.slice(0, ADOPTION_FILE_LIMIT)) {
+      lines.push(`- \`${escapeLinearMarkdown(path)}\``);
+    }
+    if (input.touchedPaths.length > ADOPTION_FILE_LIMIT) {
+      lines.push(`- \u2026 and ${input.touchedPaths.length - ADOPTION_FILE_LIMIT} more`);
+    }
+  }
+  lines.push(
+    "",
+    "_This issue was not moved. Only a person can say whether observed work is done._"
+  );
+  return lines.join("\n");
+}
+function buildAdoptionIssueDescription(input) {
+  const lines = [
+    `Created by DevPilot from an agent session already running on \`${escapeLinearMarkdown(input.machineName)}\`.`,
+    "",
+    `**Repo:** \`${escapeLinearMarkdown(input.repo)}\``
+  ];
+  if (input.branch) {
+    lines.push(`**Branch:** \`${escapeLinearMarkdown(input.branch)}\``);
+  }
+  lines.push(`**Session started:** ${escapeLinearMarkdown(input.startedAt)}`);
+  if (input.summary) {
+    lines.push("", escapeLinearMarkdown(input.summary));
+  }
+  lines.push(
+    "",
+    "_DevPilot observed this session; it did not dispatch it. Status here reflects_",
+    "_whether the session is still running, not whether the work is complete._"
+  );
+  return lines.join("\n");
+}
+var BRANCH_IDENTIFIER_RE = /(?:^|[^A-Za-z0-9])([A-Za-z]{2,5})-(\d{1,6})(?![0-9])/g;
+function linearIdentifierFromBranch(branch) {
+  BRANCH_IDENTIFIER_RE.lastIndex = 0;
+  for (let m = BRANCH_IDENTIFIER_RE.exec(branch); m; m = BRANCH_IDENTIFIER_RE.exec(branch)) {
+    const rest = branch.slice(m.index + m[0].length);
+    if (/^-\d{2}(?:-\d{2})?(?![0-9])/.test(rest)) continue;
+    return `${m[1].toUpperCase()}-${m[2]}`;
+  }
+  return null;
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  ADOPTION_AGENTS,
+  ADOPTION_LIMITS,
+  ADOPTION_MATCH_KINDS,
+  ADOPTION_OUTCOME_STATUSES,
   AGENT_KINDS,
+  AdoptionAgentSchema,
+  AdoptionCandidateSchema,
+  AdoptionMatchKindSchema,
+  AdoptionOutcomeSchema,
+  AdoptionOutcomeStatusSchema,
+  AdoptionRequestSchema,
+  AdoptionResponseSchema,
   AgentKindSchema,
   ApiErrorSchema,
   CreateSharedSessionRequestSchema,
   CreateSharedSessionResponseSchema,
+  DiscoveredRepoSchema,
+  DiscoveryRequestSchema,
+  DiscoveryResponseSchema,
   DispatchPollResponseSchema,
   ERROR_CODES,
   HeartbeatRequestSchema,
@@ -686,6 +919,7 @@ function buildBridgeCompletionComment(input) {
   RealtimeCredentialsSchema,
   RegisterRequestSchema,
   RegisterResponseSchema,
+  RepoSlugSchema,
   RotateSessionKeyRequestSchema,
   RotateSessionKeyResponseSchema,
   SESSION_EVENT_TYPES,
@@ -710,12 +944,16 @@ function buildBridgeCompletionComment(input) {
   SharedSessionSchema,
   TERMINAL_STATUSES,
   TaskDispatchMessageSchema,
+  buildAdoptionComment,
+  buildAdoptionIssueDescription,
   buildBridgeCompletionComment,
   buildCompletionComment,
   buildJoinLink,
   buildProgressComment,
+  escapeLinearMarkdown,
   formatApiError,
   isTerminal,
+  linearIdentifierFromBranch,
   parseJoinLink,
   parseSessionMessage,
   parseSessionMessagePage,

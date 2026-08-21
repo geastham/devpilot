@@ -20,5 +20,8 @@ export * as mempalace from './mempalace';
 // Conductor Score model — the single declaration of dimension maxima (TRD 16)
 export * as score from './score';
 
+// Fleet introspection — reading agent sessions DevPilot did not start (TRD 21)
+export * as adoption from './adoption';
+
 // Version
 export const VERSION = '0.1.0';

@@ -8,12 +8,15 @@ export { i as orchestrator } from './index-DjXVVrLm.mjs';
 import { W as WikiCompiler, I as IngestResult, a as WikiCompilerConfig, b as WikiSessionHook } from './index-DHfO17Iq.mjs';
 export { i as wiki } from './index-DHfO17Iq.mjs';
 export { i as score } from './index-Drhl0OQH.mjs';
+export { i as adoption } from './index-CV1YVksd.mjs';
 import 'zod';
 import 'drizzle-orm/better-sqlite3';
 import 'drizzle-orm';
 import 'drizzle-orm/sqlite-core';
 import 'drizzle-orm/postgres-js';
 import './service-ByKW5ZdE.mjs';
+import '@devpilot.sh/bridge-protocol';
+import '@anthropic-ai/sdk';
 
 /**
  * Linear integration type definitions

@@ -9198,11 +9198,560 @@ function totalFrom(values) {
   );
 }
 
+// src/adoption/index.ts
+var adoption_exports = {};
+__export(adoption_exports, {
+  HEAD_BYTES: () => HEAD_BYTES,
+  MAX_PROBE_BYTES: () => MAX_PROBE_BYTES,
+  adoptionKeyFor: () => adoptionKeyFor,
+  clearRepoCache: () => clearRepoCache,
+  condenseTitle: () => condenseTitle,
+  defaultProjectsRoot: () => defaultProjectsRoot,
+  groupByOwner: () => groupByOwner,
+  heuristicTitle: () => heuristicTitle,
+  loadOwnedSessionIds: () => loadOwnedSessionIds,
+  parseRemoteUrl: () => parseRemoteUrl,
+  probeTranscript: () => probeTranscript,
+  readHead: () => readHead,
+  resolveBranch: () => resolveBranch,
+  resolveRepo: () => resolveRepo,
+  resolveTouchedPaths: () => resolveTouchedPaths,
+  scanSessions: () => scanSessions,
+  summarizeSession: () => summarizeSession,
+  summarizeSessions: () => summarizeSessions,
+  withheldOwners: () => withheldOwners
+});
+
+// src/adoption/transcript.ts
+import { openSync, readSync, closeSync, statSync } from "fs";
+var HEAD_BYTES = 64 * 1024;
+var MAX_PROBE_BYTES = 1024 * 1024;
+var LARGE_LINE_BYTES = 128 * 1024;
+var DEVPILOT_PROMPT_MARKERS = [
+  "DevPilot session id is",
+  "X-DevPilot-Callback-Token"
+];
+function readHead(path, bytes = HEAD_BYTES, offset = 0) {
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.allocUnsafe(bytes);
+    const read = readSync(fd, buf, 0, bytes, offset);
+    return buf.subarray(0, read).toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+function scrapeLargeLine(line) {
+  const cwd = line.match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1];
+  const gitBranch = line.match(/"gitBranch"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1];
+  return {
+    cwd: cwd ? cwd.replace(/\\(.)/g, "$1") : void 0,
+    gitBranch: gitBranch ? gitBranch.replace(/\\(.)/g, "$1") : void 0
+  };
+}
+function flattenContent(content) {
+  if (typeof content === "string") return content.trim() || null;
+  if (!Array.isArray(content)) return null;
+  const parts = [];
+  for (const block of content) {
+    if (block && typeof block === "object" && block.type === "text") {
+      const text8 = block.text;
+      if (typeof text8 === "string") parts.push(text8);
+    }
+  }
+  const joined = parts.join("\n").trim();
+  return joined || null;
+}
+function isHumanPrompt(entry) {
+  if (entry.type !== "user") return false;
+  if (entry.isMeta) return false;
+  if (entry.origin?.kind && entry.origin.kind !== "human") return false;
+  const text8 = flattenContent(entry.message?.content);
+  if (!text8) return false;
+  if (text8.startsWith("<command-name>")) return false;
+  if (text8.startsWith("<local-command-stdout>")) return false;
+  if (text8.startsWith("<system-reminder>")) return false;
+  return true;
+}
+function probeTranscript(transcriptPath, sessionUuid, options = {}) {
+  const readImpl = options.readHeadImpl ?? readHead;
+  const statImpl = options.statImpl ?? ((p) => {
+    const s = statSync(p);
+    return { size: s.size, mtimeMs: s.mtimeMs };
+  });
+  const chunkBytes = options.headBytes ?? HEAD_BYTES;
+  const maxBytes = options.maxBytes ?? MAX_PROBE_BYTES;
+  let size;
+  let mtimeMs;
+  try {
+    const stat = statImpl(transcriptPath);
+    size = stat.size;
+    mtimeMs = stat.mtimeMs;
+    if (size === 0) return null;
+  } catch {
+    return null;
+  }
+  let cwd = null;
+  let gitBranch = null;
+  let customTitle = null;
+  let firstHumanPrompt = null;
+  let startedAt = null;
+  let parsedEntries = 0;
+  let sawNonSidechain = false;
+  let looksDevPilotOwned = false;
+  let bytesRead = 0;
+  let headSample = "";
+  let carry = "";
+  const handleLine = (line) => {
+    if (!line) return;
+    if (line.length > LARGE_LINE_BYTES) {
+      const scraped = scrapeLargeLine(line);
+      if (!cwd && scraped.cwd) cwd = scraped.cwd;
+      if (!gitBranch && scraped.gitBranch && scraped.gitBranch !== "HEAD") {
+        gitBranch = scraped.gitBranch;
+      }
+      parsedEntries++;
+      return;
+    }
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      return;
+    }
+    parsedEntries++;
+    if (!entry.isSidechain) sawNonSidechain = true;
+    if (!cwd && typeof entry.cwd === "string") cwd = entry.cwd;
+    if (!gitBranch && typeof entry.gitBranch === "string" && entry.gitBranch !== "HEAD") {
+      gitBranch = entry.gitBranch;
+    }
+    if (entry.type === "custom-title" && typeof entry.customTitle === "string") {
+      customTitle = entry.customTitle.trim() || null;
+    }
+    if (!startedAt && typeof entry.timestamp === "string") startedAt = entry.timestamp;
+    if (!firstHumanPrompt && isHumanPrompt(entry)) {
+      const text8 = flattenContent(entry.message?.content);
+      if (text8) {
+        firstHumanPrompt = text8;
+        if (DEVPILOT_PROMPT_MARKERS.some((m) => text8.includes(m))) {
+          looksDevPilotOwned = true;
+        }
+      }
+    }
+  };
+  const satisfied = () => Boolean(cwd && customTitle && firstHumanPrompt);
+  while (bytesRead < Math.min(size, maxBytes) && !satisfied()) {
+    let chunk;
+    try {
+      chunk = readImpl(transcriptPath, chunkBytes, bytesRead);
+    } catch {
+      break;
+    }
+    if (!chunk) break;
+    bytesRead += Buffer.byteLength(chunk, "utf8");
+    if (!headSample) headSample = chunk;
+    const lines = (carry + chunk).split("\n");
+    carry = lines.pop() ?? "";
+    for (const line of lines) handleLine(line);
+  }
+  if (carry && bytesRead >= size) handleLine(carry);
+  if (parsedEntries === 0) return null;
+  const approximate = size > bytesRead;
+  const messageCount = approximate ? Math.max(parsedEntries, Math.round(parsedEntries / bytesRead * size)) : parsedEntries;
+  return {
+    sessionUuid,
+    transcriptPath,
+    cwd,
+    gitBranch,
+    customTitle,
+    firstHumanPrompt,
+    startedAt,
+    lastActivityAt: new Date(mtimeMs).toISOString(),
+    lastActivityMs: mtimeMs,
+    sizeBytes: size,
+    messageCount,
+    messageCountIsApproximate: approximate,
+    sidechainOnly: !sawNonSidechain,
+    looksDevPilotOwned,
+    headSample,
+    bytesRead
+  };
+}
+
+// src/adoption/repo.ts
+import { execFileSync } from "child_process";
+import { existsSync as existsSync2 } from "fs";
+var GIT_TIMEOUT_MS = 5e3;
+var remoteCache = /* @__PURE__ */ new Map();
+var branchCache = /* @__PURE__ */ new Map();
+var statusCache = /* @__PURE__ */ new Map();
+function clearRepoCache() {
+  remoteCache.clear();
+  branchCache.clear();
+  statusCache.clear();
+}
+function git(cwd, args, maxBuffer = 4 * 1024 * 1024) {
+  try {
+    return execFileSync("git", ["-C", cwd, ...args], {
+      encoding: "utf8",
+      timeout: GIT_TIMEOUT_MS,
+      maxBuffer,
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+  } catch {
+    return null;
+  }
+}
+function parseRemoteUrl(raw) {
+  const url = raw.trim();
+  if (!url) return null;
+  let host;
+  let path;
+  const scp = url.match(/^(?:([^@/]+)@)?([^:/@]+):(.+)$/);
+  if (scp && !url.includes("://")) {
+    host = scp[2];
+    path = scp[3];
+  } else {
+    try {
+      const parsed = new URL(url);
+      host = parsed.hostname;
+      path = parsed.pathname;
+    } catch {
+      return null;
+    }
+  }
+  const segments = path.replace(/\.git$/, "").split("/").filter(Boolean);
+  if (segments.length < 2) return null;
+  const name = segments[segments.length - 1];
+  const owner = segments[segments.length - 2];
+  if (!owner || !name) return null;
+  if (!/^[\w.-]+$/.test(owner) || !/^[\w.-]+$/.test(name)) return null;
+  return { repo: `${owner}/${name}`, owner, name, host: host.toLowerCase() };
+}
+function resolveRepo(cwd) {
+  const cached = remoteCache.get(cwd);
+  if (cached !== void 0) return cached;
+  let identity = null;
+  if (existsSync2(cwd)) {
+    const remote = git(cwd, ["remote", "get-url", "origin"]);
+    identity = remote ? parseRemoteUrl(remote) : null;
+  }
+  remoteCache.set(cwd, identity);
+  return identity;
+}
+function resolveBranch(cwd) {
+  const cached = branchCache.get(cwd);
+  if (cached !== void 0) return cached;
+  let branch = null;
+  if (existsSync2(cwd)) {
+    const out = git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
+    const trimmed = out?.trim();
+    branch = trimmed && trimmed !== "HEAD" ? trimmed : null;
+  }
+  branchCache.set(cwd, branch);
+  return branch;
+}
+function resolveTouchedPaths(cwd, limit = 50) {
+  const cached = statusCache.get(cwd);
+  if (cached !== void 0) return cached.slice(0, limit);
+  let paths = [];
+  if (existsSync2(cwd)) {
+    const out = git(cwd, ["status", "--porcelain", "-uall"]);
+    if (out) {
+      paths = out.split("\n").filter(Boolean).map((line) => {
+        const body = line.slice(3);
+        const arrow = body.indexOf(" -> ");
+        return (arrow === -1 ? body : body.slice(arrow + 4)).replace(/^"|"$/g, "");
+      }).filter(Boolean);
+    }
+  }
+  statusCache.set(cwd, paths);
+  return paths.slice(0, limit);
+}
+
+// src/adoption/scanner.ts
+import { createHash as createHash3 } from "crypto";
+import { existsSync as existsSync3, readdirSync, readFileSync } from "fs";
+import { homedir } from "os";
+import { join as join2 } from "path";
+import { ADOPTION_LIMITS } from "@devpilot.sh/bridge-protocol";
+var DEFAULT_LIVE_WITHIN_MS = 15 * 60 * 1e3;
+var DEFAULT_SINCE_MS = 24 * 60 * 60 * 1e3;
+function defaultProjectsRoot() {
+  return join2(homedir(), ".claude", "projects");
+}
+function adoptionKeyFor(machineName, sessionUuid) {
+  return createHash3("sha256").update(`${machineName}:${sessionUuid}`).digest("hex");
+}
+function loadOwnedSessionIds(path) {
+  const file = path ?? join2(homedir(), ".devpilot", "owned-sessions.json");
+  try {
+    if (!existsSync3(file)) return /* @__PURE__ */ new Set();
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    if (!Array.isArray(parsed.sessionIds)) return /* @__PURE__ */ new Set();
+    return new Set(parsed.sessionIds.filter((v) => typeof v === "string"));
+  } catch {
+    return /* @__PURE__ */ new Set();
+  }
+}
+function scratchpadRoots() {
+  const override = process.env.DEVPILOT_SCRATCHPAD_ROOT;
+  if (override) return [override];
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  if (uid === null) return [];
+  return [`/private/tmp/claude-${uid}`, `/tmp/claude-${uid}`];
+}
+function isLive(observation, projectSlug, liveWithinMs, nowMs, existsImpl) {
+  if (nowMs - observation.lastActivityMs <= liveWithinMs) return true;
+  return scratchpadRoots().some(
+    (root) => existsImpl(join2(root, projectSlug, observation.sessionUuid))
+  );
+}
+function condenseTitle(text8, max) {
+  const flat = text8.replace(/\s+/g, " ").trim();
+  if (flat.length <= max) return flat;
+  const cut = flat.slice(0, max);
+  const lastSpace = cut.lastIndexOf(" ");
+  const body = lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut;
+  return `${body.trimEnd()}\u2026`;
+}
+function heuristicTitle(observation) {
+  if (observation.customTitle) {
+    return condenseTitle(observation.customTitle, ADOPTION_LIMITS.MAX_TITLE_CHARS);
+  }
+  if (observation.firstHumanPrompt) {
+    return condenseTitle(observation.firstHumanPrompt, ADOPTION_LIMITS.MAX_TITLE_CHARS);
+  }
+  return `Agent session ${observation.sessionUuid.slice(0, 8)}`;
+}
+function scanSessions(options) {
+  const root = options.root ?? defaultProjectsRoot();
+  const nowMs = (options.now ?? /* @__PURE__ */ new Date()).getTime();
+  const liveWithinMs = options.liveWithinMs ?? DEFAULT_LIVE_WITHIN_MS;
+  const sinceMs = options.sinceMs ?? DEFAULT_SINCE_MS;
+  const includePaths = options.includePaths !== false;
+  const excluded = options.excludeSessionUuids ?? /* @__PURE__ */ new Set();
+  const existsImpl = options.existsImpl ?? existsSync3;
+  const routed = new Set((options.repos ?? []).map((r) => r.toLowerCase()));
+  const candidates = [];
+  const skipped = [];
+  const inventory = /* @__PURE__ */ new Map();
+  let unmappedProjectCount = 0;
+  let projectDirCount = 0;
+  let observedCount = 0;
+  let projectDirs;
+  try {
+    projectDirs = readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+  } catch {
+    return {
+      candidates: [],
+      discovered: [],
+      unmappedProjectCount: 0,
+      skipped: [],
+      projectDirCount: 0,
+      observedCount: 0
+    };
+  }
+  for (const projectSlug of projectDirs) {
+    projectDirCount++;
+    const dir = join2(root, projectSlug);
+    let files;
+    try {
+      files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+    } catch {
+      continue;
+    }
+    for (const file of files) {
+      const sessionUuid = file.replace(/\.jsonl$/, "");
+      const transcriptPath = join2(dir, file);
+      const observation = probeTranscript(transcriptPath, sessionUuid, options.probe);
+      if (!observation) {
+        skipped.push({ sessionUuid, reason: "empty" });
+        continue;
+      }
+      observedCount++;
+      if (observation.sidechainOnly) {
+        skipped.push({ sessionUuid, reason: "sidechain" });
+        continue;
+      }
+      if (excluded.has(sessionUuid) || observation.looksDevPilotOwned) {
+        skipped.push({ sessionUuid, reason: "devpilot-owned" });
+        continue;
+      }
+      if (!observation.cwd) {
+        skipped.push({ sessionUuid, reason: "unreadable" });
+        continue;
+      }
+      const identity = resolveRepo(observation.cwd);
+      if (!identity) {
+        unmappedProjectCount++;
+        skipped.push({ sessionUuid, reason: "no-repo" });
+        continue;
+      }
+      const live = isLive(observation, projectSlug, liveWithinMs, nowMs, existsImpl);
+      const entry = inventory.get(identity.repo) ?? {
+        repo: identity.repo,
+        owner: identity.owner,
+        host: identity.host,
+        projectCount: 0,
+        sessionCount: 0,
+        liveSessionCount: 0,
+        lastActivityAt: null,
+        cwds: /* @__PURE__ */ new Set()
+      };
+      entry.cwds.add(observation.cwd);
+      entry.sessionCount++;
+      if (live) entry.liveSessionCount++;
+      if (!entry.lastActivityAt || observation.lastActivityAt > entry.lastActivityAt) {
+        entry.lastActivityAt = observation.lastActivityAt;
+      }
+      inventory.set(identity.repo, entry);
+      if (!options.allRepos && !routed.has(identity.repo.toLowerCase())) {
+        skipped.push({
+          sessionUuid,
+          reason: "not-routed",
+          repo: identity.repo,
+          owner: identity.owner
+        });
+        continue;
+      }
+      if (!live && nowMs - observation.lastActivityMs > sinceMs) {
+        skipped.push({ sessionUuid, reason: "too-old", repo: identity.repo, owner: identity.owner });
+        continue;
+      }
+      const startedAt = observation.startedAt ?? observation.lastActivityAt;
+      const touchedPaths = includePaths ? resolveTouchedPaths(observation.cwd, ADOPTION_LIMITS.MAX_TOUCHED_PATHS) : [];
+      candidates.push({
+        adoptionKey: adoptionKeyFor(options.machineName, sessionUuid),
+        agent: "claude-code",
+        title: heuristicTitle(observation),
+        repo: identity.repo,
+        // Live branch beats the transcript's, which records session start.
+        branch: resolveBranch(observation.cwd) ?? observation.gitBranch ?? void 0,
+        startedAt: new Date(startedAt).toISOString(),
+        lastActivityAt: observation.lastActivityAt,
+        messageCount: observation.messageCount,
+        live,
+        ...touchedPaths.length > 0 ? { touchedPaths } : {}
+      });
+    }
+  }
+  const discovered = [...inventory.values()].map(({ cwds, ...repo }) => ({ ...repo, projectCount: cwds.size })).sort((a, b) => b.sessionCount - a.sessionCount || a.repo.localeCompare(b.repo));
+  candidates.sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt));
+  return {
+    candidates,
+    discovered,
+    unmappedProjectCount,
+    skipped,
+    projectDirCount,
+    observedCount
+  };
+}
+function groupByOwner(repos) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const repo of repos) {
+    const list = groups.get(repo.owner) ?? [];
+    list.push(repo);
+    groups.set(repo.owner, list);
+  }
+  return groups;
+}
+function withheldOwners(skipped) {
+  const owners = /* @__PURE__ */ new Set();
+  for (const skip of skipped) {
+    if (skip.reason === "not-routed" && skip.owner) owners.add(skip.owner);
+  }
+  return [...owners].sort();
+}
+
+// src/adoption/summarize.ts
+import Anthropic3 from "@anthropic-ai/sdk";
+import { ADOPTION_LIMITS as ADOPTION_LIMITS2 } from "@devpilot.sh/bridge-protocol";
+var SAMPLE_CHARS = 6e3;
+var REQUEST_TIMEOUT_MS = 2e4;
+var MAX_CONCURRENCY = 4;
+var SYSTEM_PROMPT = [
+  "You label coding-agent sessions so they can be tracked on an issue board.",
+  "",
+  "You are given the opening of a session transcript and the list of files it has",
+  "changed. Reply with exactly two lines and nothing else:",
+  "",
+  "TITLE: <an imperative summary of the work, at most 10 words, no trailing period>",
+  "SUMMARY: <one or two sentences on what this session is doing and why>",
+  "",
+  'Describe the WORK, not the conversation. Never write "the user asked" or "this',
+  'session". Never quote the transcript. Never include file contents, code, secrets,',
+  "or credentials \u2014 if the transcript contains any, ignore them entirely."
+].join("\n");
+function buildUserPrompt(observation, touchedPaths) {
+  const parts = [];
+  if (observation.customTitle) parts.push(`Client-assigned title: ${observation.customTitle}`);
+  if (observation.gitBranch) parts.push(`Branch: ${observation.gitBranch}`);
+  if (touchedPaths.length > 0) {
+    parts.push(`Changed files:
+${touchedPaths.slice(0, 25).map((p) => `- ${p}`).join("\n")}`);
+  }
+  parts.push(`Transcript opening:
+${observation.headSample.slice(0, SAMPLE_CHARS)}`);
+  return parts.join("\n\n");
+}
+function parseResponse(text8) {
+  const title = text8.match(/^TITLE:\s*(.+)$/m)?.[1]?.trim();
+  const summary = text8.match(/^SUMMARY:\s*([\s\S]+?)$/m)?.[1]?.trim();
+  return { title: title || void 0, summary: summary || void 0 };
+}
+async function summarizeSession(observation, touchedPaths, options = {}) {
+  const fallback = { title: heuristicTitle(observation), source: "heuristic" };
+  const apiKey = options.apiKey ?? process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return fallback;
+  try {
+    const client = options.clientFactory ? options.clientFactory(apiKey) : new Anthropic3({ apiKey, timeout: options.timeoutMs ?? REQUEST_TIMEOUT_MS });
+    const response = await client.messages.create({
+      model: options.model ?? resolveWikiModel(),
+      max_tokens: 300,
+      system: SYSTEM_PROMPT,
+      messages: [{ role: "user", content: buildUserPrompt(observation, touchedPaths) }]
+    });
+    const text8 = ("content" in response ? response.content : []).map((block) => block.type === "text" ? block.text : "").join("").trim();
+    const { title, summary } = parseResponse(text8);
+    if (!title) return fallback;
+    return {
+      title: condenseTitle(title, ADOPTION_LIMITS2.MAX_TITLE_CHARS),
+      summary: summary ? condenseTitle(summary, ADOPTION_LIMITS2.MAX_SUMMARY_CHARS) : void 0,
+      source: "model"
+    };
+  } catch (err) {
+    options.onWarn?.(
+      `could not summarize ${observation.sessionUuid.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return fallback;
+  }
+}
+async function summarizeSessions(jobs, options = {}) {
+  const limit = options.maxSummaries ?? 25;
+  const concurrency = Math.max(1, options.concurrency ?? MAX_CONCURRENCY);
+  const results = new Array(jobs.length);
+  let next = 0;
+  async function worker() {
+    for (; ; ) {
+      const index2 = next++;
+      if (index2 >= jobs.length) return;
+      const job = jobs[index2];
+      results[index2] = index2 < limit ? await summarizeSession(job.observation, job.touchedPaths, options) : { title: heuristicTitle(job.observation), source: "heuristic" };
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, jobs.length) }, () => worker())
+  );
+  return results;
+}
+
 // src/index.ts
 var VERSION = "0.1.0";
 export {
   VERSION,
   activityEvents,
+  adoption_exports as adoption,
   closeDatabase,
   completedTasks,
   completedTasksRelations,

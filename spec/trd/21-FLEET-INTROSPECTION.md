@@ -497,21 +497,38 @@ export interface SessionObservation {
 }
 ```
 
-**It must not read whole files.** The reference machine has a 36 MB transcript;
-`JSON.parse` per line across 38 project directories on every `bridge connect`
-would make the command feel broken. The probe therefore:
+**It must not read whole files.** The reference machine has a 36 MB transcript
+and 670 sessions across 38 project directories; `JSON.parse` per line over all
+of it on every `bridge connect` would make the command feel broken. The probe
+therefore reads **64 KB chunks from the front, stopping as soon as it has `cwd`,
+a title and a first prompt, and never exceeding 1 MB** (`MAX_PROBE_BYTES`).
 
-- reads the **first 64 KB**, which reliably contains `cwd`, `gitBranch`,
-  `custom-title`, and the first `type: 'user'` entry with `origin.kind === 'human'`;
-- takes `lastActivityAt` from `stat().mtime` rather than the last entry, which
-  costs one syscall instead of a full scan;
-- estimates `messageCount` from the head sample's bytes-per-entry and file size,
-  and marks it approximate rather than pretending to precision it did not pay
-  for.
+> **Corrected during Wave 2, from real data.** The first version read exactly
+> one 64 KB chunk. On the reference machine that produced useless titles —
+> `Agent session 9030b53a` — for three of the first eight live sessions, because
+> a session can open with a single `attachment` entry (a pasted file, an image)
+> **larger than the whole chunk**, pushing `custom-title` and the first human
+> prompt past it. A fixed single-chunk read is wrong; a bounded progressive one
+> is right, and still costs one read for a well-formed transcript.
+
+Also:
+
+- `lastActivityAt` comes from `stat().mtime`, one syscall rather than a scan.
+- A line over 128 KB is **not** parsed as JSON. `JSON.parse` on a multi-megabyte
+  attachment to reach a 40-character `cwd` is the one genuinely wasteful thing
+  this module could do, so those lines are scraped for `cwd` and `gitBranch`
+  with a targeted regex. `content` is never touched on that path.
+- `messageCount` is estimated from bytes-per-entry and flagged approximate
+  rather than pretending to precision nobody paid for.
+- `headSample` — what the summarizer sees — is the **first chunk only**. Later
+  chunks exist to find a title, not to widen what a model is shown.
 
 Malformed lines are skipped, not thrown on. A transcript being written
-concurrently will have a torn final line by definition, and a scanner that
-crashes on live data is useless.
+concurrently has a torn final line by definition, and a scanner that crashes on
+live data is useless.
+
+Measured on the reference machine: **670 sessions across 38 project directories
+in 634 ms.**
 
 ### 6.2 `packages/core/src/adoption/repo.ts` — resolution
 
@@ -831,7 +848,8 @@ the resulting rows and the *absence* of a `dispatch_queue` row.
 | # | Criterion |
 | --- | --- |
 | T21-AC-01 | `devpilot sessions scan` on the reference machine lists sessions from routed repos only, and names the withheld owners. |
-| T21-AC-02 | The probe reads ≤ 64 KB of a 5 MB transcript. Asserted, not assumed. |
+| T21-AC-02 | The probe reads ≤ 64 KB of a well-formed 5 MB transcript, and ≤ 1 MB of any transcript however large. Asserted, not assumed. |
+| T21-AC-02b | A title behind a multi-chunk `attachment` entry is still found, and the attachment is never parsed. |
 | T21-AC-03 | `adopt` creates a `dispatch_sessions` row with `origin='adopted'` and **no** `dispatch_queue` row. |
 | T21-AC-04 | Running `adopt` twice produces zero new rows and zero new Linear issues. |
 | T21-AC-05 | A session on a branch named `AVA-31-…` attaches to AVA-31 rather than creating an issue. |

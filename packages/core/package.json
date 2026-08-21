@@ -42,6 +42,11 @@
       "types": "./dist/score/index.d.ts",
       "import": "./dist/score/index.mjs",
       "require": "./dist/score/index.js"
+    },
+    "./adoption": {
+      "types": "./dist/adoption/index.d.ts",
+      "import": "./dist/adoption/index.mjs",
+      "require": "./dist/adoption/index.js"
     }
   },
   "files": [

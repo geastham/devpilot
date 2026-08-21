@@ -12,6 +12,9 @@ export default defineConfig({
     // node:fs into the browser bundle. Safe as a separate entry despite
     // splitting:false — it is pure constants and functions with no module state.
     'src/score/index.ts',
+    // Same reasoning as score/: the CLI imports the scanner and must not pull
+    // better-sqlite3 in behind it. Nothing under adoption/ touches the db.
+    'src/adoption/index.ts',
   ],
   format: ['cjs', 'esm'],
   dts: true,
