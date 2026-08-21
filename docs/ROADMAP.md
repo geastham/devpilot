@@ -11,14 +11,17 @@
 
 ## 0. August 2026 — what changed
 
-**TRD 21 (fleet introspection & adoption) is in build.** The loop only ever ran
+**TRD 21 (fleet introspection & adoption) is built**, all five waves. The loop only ever ran
 one way: every session DevPilot knew about was one DevPilot started, while the
 same machine had dozens of Claude Code sessions the product could not see — 38
 project directories on the reference machine, none of them on the board. TRD 21
 walks `~/.claude/projects`, resolves each session to a repo, and backs it onto
 Linear; the same walk produces a repo/owner inventory that drives first-run
 setup. Adopted sessions are observational: no queue row, no commands, and
-completion never moves a ticket. See `docs/ADOPTION.md`.
+completion never moves a ticket. Verified end to end against the live database
+over real HTTP: the shipped CLI adopted six live sessions and wrote zero
+dispatch-queue rows. Not yet exercised against a live Linear workspace — every
+Linear call in the suite goes to a local GraphQL stub. See `docs/ADOPTION.md`.
 
 **TRD 06 (shared agent sessions) shipped**, all five waves. End-to-end encrypted
 transcripts, join links, an MCP server so Claude Code can take part, and CLI

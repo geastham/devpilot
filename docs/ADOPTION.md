@@ -1,10 +1,23 @@
 # Fleet Introspection & Adoption
 
-> **Status: in progress.** Spec is `spec/trd/21-FLEET-INTROSPECTION.md`. This
-> document describes the design as specified; sections are marked ⚠ until the
-> corresponding wave lands. This repo has a history of documentation asserting
-> things the code did not do (see `docs/ROADMAP.md` §0) — the markers exist so
-> that cannot happen again.
+> **Status: built, all five waves.** Spec is
+> `spec/trd/21-FLEET-INTROSPECTION.md`.
+>
+> What has and has not been proven, stated precisely because this repo has a
+> history of documentation asserting things the code did not do
+> (`docs/ROADMAP.md` §0):
+>
+> - **Proven end to end against the live database over real HTTP.** The real
+>   CLI adopted 6 live sessions, created 6 Linear issues (against a local
+>   GraphQL stub), wrote 6 rows with `origin='adopted'` and **zero**
+>   `dispatch_queue` rows, and a second run created nothing.
+> - **Proven against real data.** The scanner reads this machine's actual
+>   store: 670 sessions across 38 project directories in 634 ms, 12 repos
+>   under 5 owners.
+> - **Not yet proven against Linear itself.** Every Linear call in the tests
+>   goes to a local stub that speaks the same GraphQL. The documents are the
+>   ones the route really sends, but no issue has been created in a live
+>   Linear workspace.
 
 DevPilot dispatches work to agents. **Adoption is the other direction**: agent
 sessions already running on your machine that DevPilot did not start get a place
@@ -71,7 +84,7 @@ This is enforced structurally, not by convention: the request schema is a
 `.strict()` zod object, so an unknown key is a parse failure on both sides, and
 the hosted table has no column that could hold transcript text.
 
-## Commands ⚠ *(Wave 4)*
+## Commands
 
 ```bash
 # Read-only. Shows exactly what would happen, writes nothing.
@@ -143,7 +156,7 @@ An adopted session posts a comment saying how long it ran and what it touched,
 states plainly that it was observed rather than dispatched, and leaves the issue
 where it is.
 
-## Matching before creating ⚠ *(Wave 3)*
+## Matching before creating
 
 Adopting 38 sessions blindly would spam your board with duplicates of issues
 that already exist. The order is:
@@ -156,7 +169,7 @@ that already exist. The order is:
    match that attaches to the wrong ticket is silent, and an extra issue is not.
 4. **Create** a new issue in the team configured for that repo.
 
-## Discovery and first-run setup ⚠ *(Wave 5)*
+## Discovery and first-run setup
 
 The same walk produces an inventory of repos and owners, pushed as *proposals*:
 
@@ -210,6 +223,37 @@ else. Adopting them would double-count work already on the board. Two exclusions
 because either alone has a hole: the runner records the `session_id` from
 `claude`'s own JSON envelope, and the probe independently recognizes the
 DevPilot-composed prompt marker for sessions that predate that ledger.
+
+## What it looks like on this machine
+
+The scan, run for real against 38 project directories:
+
+```
+  Scanned 38 project directories · 63 sessions in scope
+
+  REPO                           SESSION                                      LAST   → BOARD
+  Avant-Garde-AI/memoryframe     MemoryFrame: Immersive Scene                 now  ● → create
+  Arthaus-Inc/artwork-ms         AMS: Social Profile                          17m  ● → create
+  NeuroGraph-AI/core             Core: Working + Fatigue Reporting            36m  ● → POR-4 (branch)
+  …
+
+  Skipped: 85 not routed (Arthaus-Inc, Avant-Garde-AI, NeuroGraph-AI, OpenConjecture, dokkio),
+           518 outside the window, 22 no git remote, 41 DevPilot-owned
+           Run with --all-repos to include the others.
+```
+
+Every exclusion is reported. A scanner whose skips are invisible is
+indistinguishable from one that is broken, and the conclusion a user reaches is
+"this doesn't work" rather than "that session was outside the window".
+
+## In the portal
+
+- **Fleet → Discovered** — repositories grouped by GitHub owner, with session
+  counts and how many are running right now. One click routes one; one click
+  dismisses it, and a dismissal survives every future scan.
+- **Sessions** — an adopted row carries an `Observed` badge and shows
+  *not measurable* where a progress bar would be. It reads "Observed" rather
+  than "Adopted" because the reader needs the consequence, not the mechanism.
 
 ## See also
 

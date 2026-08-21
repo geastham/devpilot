@@ -1,6 +1,30 @@
 # TRD 21 — Fleet Introspection & Adoption
 ## Discovering Live Agent Sessions · Backing Them Onto the Board · Repo/Org Scaffolding
-### v1.0 · August 2026 · Status: DRAFT
+### v1.1 · August 2026 · Status: BUILT
+
+> **Change log — v1.1 (21 Aug 2026)**
+> - All five waves built. 93 new tests in `devpilot`, 37 in `devpilot-website`.
+> - **§6.1 corrected by real data.** A single 64 KB head read was wrong: a
+>   session can open with one `attachment` entry larger than the whole chunk,
+>   which produced `Agent session 9030b53a` titles for three of the first eight
+>   live sessions on the reference machine. The probe now reads bounded chunks
+>   to `MAX_PROBE_BYTES`, and scrapes rather than parses any line over 128 KB.
+>   T21-AC-02 restated accordingly, and T21-AC-02b added.
+> - **§8.2 corrected.** The matcher was deriving a team key from the team name.
+>   Linear has always returned the real key in the OAuth flow and it was
+>   discarded; `team_configs.linear_team_key` now stores it. A guess living next
+>   to the real answer is two sources of truth.
+> - **§5 `linearIdentifierFromBranch` narrowed twice**, both from real branch
+>   names: `v1-2-3` parsed as `V1-2`, and `work-2026-08-09` — a worktree name
+>   that exists on this machine — parsed as `WORK-2026`.
+> - **§4.3 gains `transcriptPaths`** on the scan result, local-only, so the
+>   summarizer can re-read one transcript without `SessionObservation` (which
+>   carries transcript text) ever becoming part of the value that is uploaded.
+> - §7.1 step 3 gains a cross-team check. Linear's issue search is
+>   workspace-wide, so a branch named `ENG-4` would otherwise attach an agent
+>   session to another team's ticket four.
+> - **Not proven:** every Linear call in the test suite goes to a local GraphQL
+>   stub. No issue has been created in a live Linear workspace (§10).
 
 > **Depends on:** `04-HOSTED-ACCOUNTS.md` (orgs, guards, machine tokens),
 > `05-HOSTED-BRIDGE.md` (queue, routing, `dispatch_sessions`, Linear write-back).
@@ -867,31 +891,64 @@ the resulting rows and the *absence* of a `dispatch_queue` row.
 
 ## 12. Implementation Plan
 
-### Wave 1 — Protocol (`devpilot`, independent)
+### Wave 1 — Protocol (`devpilot`, independent) ✅ COMPLETE
 `packages/bridge-protocol/src/adoption.ts` + `buildAdoptionComment` in
 `messages.ts` + barrel export + tests. Nothing consumes it yet.
 
-### Wave 2 — Scanner (`devpilot`, depends on Wave 1)
+### Wave 2 — Scanner (`devpilot`, depends on Wave 1) ✅ COMPLETE
 `packages/core/src/adoption/{transcript,repo,scanner,summarize,index}.ts`,
 fixtures, tests, barrel export. Pure library; no CLI, no network.
 
-### Wave 3 — Hosted (`devpilot-website`, depends on Wave 1)
+### Wave 3 — Hosted (`devpilot-website`, depends on Wave 1) ✅ COMPLETE
 Schema columns + `discovered_repos` + `team_configs.suggested_repo` + migration;
 `issueCreate`/`issueByIdentifier` on `LinearApiService`; `moveToDone` parameter;
 `POST /api/adoptions`, `POST /api/discovery`, accept/ignore routes; the commands
 guard. Route tests.
 
-### Wave 4 — CLI (`devpilot`, depends on 2 and 3)
+### Wave 4 — CLI (`devpilot`, depends on 2 and 3) ✅ COMPLETE
 `BridgeClient.adoptSessions` / `reportDiscovery`; `devpilot sessions scan|adopt`;
 `AdoptionWatcher`; `bridge connect --adopt` and the discovery summary; the
 owned-sessions ledger written by the session-runner. Harness script.
 
-### Wave 5 — Portal, PLG, docs (`devpilot-website` + `devpilot`)
+### Wave 5 — Portal, PLG, docs (`devpilot-website` + `devpilot`) ✅ COMPLETE
 `/fleet/discovered`; adopted badge on the sessions list and detail; Linear
 connect suggestion; `docs/ADOPTION.md`; `docs/LINEAR-BRIDGE.md` and
 `docs/ROADMAP.md` updated; end-to-end verification against the live deployment.
 
 ---
+
+## 13. What is proven, and what is not
+
+**Proven end to end, against the live database over real HTTP** — not only
+in-process. The shipped CLI adopted 6 live sessions from this machine, the
+route created 6 issues, and the database held 6 rows with `origin='adopted'`,
+the correct `touchedPaths`, 6 `session_events`, and **zero `dispatch_queue`
+rows**. A second run created nothing (T21-AC-04).
+
+**Proven against real data.** The scanner reads this machine's actual store:
+670 sessions across 38 project directories in 634 ms, 12 repos under 5 owners.
+Every correction in the v1.1 change log came from that data rather than from
+reasoning about it.
+
+**Proven by test.** 130 tests across both repos, including both directions of
+DECISION A: an adopted session comments and does not move its issue; a
+dispatched session on the same route does move it.
+
+**NOT proven — carried forward:**
+
+- **No issue has been created in a live Linear workspace.** Every Linear call in
+  the suite goes to a local GraphQL stub speaking the same protocol. The
+  documents are the ones the route really sends and the stub asserts on them,
+  but `issueCreate` against api.linear.app is unexercised. T21-AC-05 and
+  T21-AC-06 are satisfied against the stub only.
+- **The 30-minute settle has not run at full duration.** `AdoptionWatcher` is
+  tested by advancing mtimes, not by waiting.
+- **`@devpilot.sh/bridge-protocol` is not published.** `devpilot-website`
+  resolves it from `github:geastham/devpilot#main`, so the hosted side cannot
+  build against these changes until the public repo's `main` carries them.
+- **`suggested_repo` is written but the OAuth path that populates
+  `linear_team_key` has not run live.** Teams connected before this TRD have a
+  null key and fall back to the matcher's name rules.
 
 ## Decisions other TRDs must respect
 
