@@ -1,6 +1,6 @@
 export { cli, runCli } from './cli.js';
 import 'commander';
 
-declare const VERSION = "0.5.11";
+declare const VERSION = "0.5.12";
 
 export { VERSION };
