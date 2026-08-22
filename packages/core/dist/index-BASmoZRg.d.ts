@@ -290,7 +290,15 @@ declare function adoptionKeyFor(machineName: string, sessionUuid: string): strin
  * scan.
  */
 declare function loadOwnedSessionIds(path?: string): Set<string>;
-/** One line, no newlines, cut on a word boundary. */
+/**
+ * One line, no newlines, cut on a word boundary, and NEVER longer than `max`.
+ *
+ * The ellipsis counts. An earlier version appended it after cutting to `max`
+ * and so returned `max + 1` characters, which the wire schema caps at exactly
+ * 120 — so a title whose first 120 characters contain no space (a pasted URL,
+ * a base64 blob, a long identifier) was rejected by the server as invalid
+ * rather than shown. Reserve the character before cutting.
+ */
 declare function condenseTitle(text: string, max: number): string;
 /**
  * The title used when no model call is made.

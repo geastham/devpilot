@@ -71,12 +71,22 @@ function readHead(path, bytes = HEAD_BYTES, offset = 0) {
     (0, import_node_fs.closeSync)(fd);
   }
 }
+var LARGE_LINE_PROMPT_CHARS = 400;
 function scrapeLargeLine(line) {
+  const unescape = (v) => v.replace(/\\n/g, " ").replace(/\\(.)/g, "$1");
   const cwd = line.match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1];
   const gitBranch = line.match(/"gitBranch"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1];
+  let userPrompt;
+  if (/"type"\s*:\s*"user"/.test(line)) {
+    const m = line.match(
+      new RegExp(`"content"\\s*:\\s*"((?:[^"\\\\]|\\\\.){1,${LARGE_LINE_PROMPT_CHARS}})`)
+    );
+    if (m) userPrompt = unescape(m[1]).trim() || void 0;
+  }
   return {
-    cwd: cwd ? cwd.replace(/\\(.)/g, "$1") : void 0,
-    gitBranch: gitBranch ? gitBranch.replace(/\\(.)/g, "$1") : void 0
+    cwd: cwd ? unescape(cwd) : void 0,
+    gitBranch: gitBranch ? unescape(gitBranch) : void 0,
+    userPrompt
   };
 }
 function flattenContent(content) {
@@ -140,6 +150,12 @@ function probeTranscript(transcriptPath, sessionUuid, options = {}) {
       if (!cwd && scraped.cwd) cwd = scraped.cwd;
       if (!gitBranch && scraped.gitBranch && scraped.gitBranch !== "HEAD") {
         gitBranch = scraped.gitBranch;
+      }
+      if (!firstHumanPrompt && scraped.userPrompt) {
+        firstHumanPrompt = scraped.userPrompt;
+        if (DEVPILOT_PROMPT_MARKERS.some((m) => scraped.userPrompt.includes(m))) {
+          looksDevPilotOwned = true;
+        }
       }
       parsedEntries++;
       return;
@@ -353,7 +369,7 @@ function condenseTitle(text, max) {
   if (flat.length <= max) return flat;
   const cut = flat.slice(0, max);
   const lastSpace = cut.lastIndexOf(" ");
-  const body = lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut;
+  const body = lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut.slice(0, max - 1);
   return `${body.trimEnd()}\u2026`;
 }
 function heuristicTitle(observation) {

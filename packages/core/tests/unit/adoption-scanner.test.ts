@@ -393,6 +393,49 @@ describe('probeTranscript', () => {
     expect(probeTranscript(path, 'x')!.webUrl).toBeNull();
   });
 
+  /**
+   * Found on the board: a session whose first prompt was a 178 KB paste had
+   * that single line skipped, found no title, and became `Agent session
+   * f2565e47` — which on Linear is a ticket nobody can identify.
+   */
+  it('recovers a title from a user prompt too large to parse', () => {
+    const huge = JSON.stringify({
+      type: 'user',
+      cwd: repoDirs.devpilot,
+      gitBranch: 'main',
+      message: { role: 'user', content: `Rewrite the ingest pipeline. ${'x'.repeat(200 * 1024)}` },
+    });
+    const path = writeTranscript({
+      cwd: repoDirs.devpilot,
+      sessionUuid: 'aaaaaaaa-0000-0000-0000-00000000000f',
+      projectSlug: 'slug-devpilot',
+      extraLines: [huge],
+    });
+
+    const observation = probeTranscript(path, 'aaaaaaaa-0000-0000-0000-00000000000f')!;
+    expect(observation.firstHumanPrompt).toContain('Rewrite the ingest pipeline');
+    expect(heuristicTitle(observation)).toContain('Rewrite the ingest pipeline');
+    expect(heuristicTitle(observation)).not.toContain('Agent session');
+  });
+
+  it('never materialises the whole of an oversized prompt', () => {
+    const huge = JSON.stringify({
+      type: 'user',
+      cwd: repoDirs.devpilot,
+      message: { role: 'user', content: `start ${'y'.repeat(300 * 1024)}` },
+    });
+    const path = writeTranscript({
+      cwd: repoDirs.devpilot,
+      sessionUuid: 'aaaaaaaa-0000-0000-0000-000000000010',
+      projectSlug: 'slug-devpilot',
+      extraLines: [huge],
+    });
+
+    const observation = probeTranscript(path, 'x')!;
+    // Bounded by the regex itself, not by a truncation afterwards.
+    expect(observation.firstHumanPrompt!.length).toBeLessThanOrEqual(400);
+  });
+
   it('recognises a DevPilot-composed prompt', () => {
     const path = writeTranscript({
       cwd: repoDirs.devpilot,
@@ -452,7 +495,18 @@ describe('condenseTitle', () => {
   });
 
   it('does not collapse a single long token to nothing', () => {
-    expect(condenseTitle(`short ${'x'.repeat(100)}`, 20)).toHaveLength(21);
+    expect(condenseTitle(`short ${'x'.repeat(100)}`, 20)).toHaveLength(20);
+  });
+
+  /**
+   * The ellipsis counts toward the cap. This returned max+1 and the wire
+   * schema rejects a 121-character title outright, so any prompt starting
+   * with a long unbroken token — a URL, a base64 blob — failed to adopt.
+   */
+  it.each([10, 20, 120])('never exceeds max=%i, ellipsis included', (max) => {
+    expect(condenseTitle('y'.repeat(500), max).length).toBeLessThanOrEqual(max);
+    expect(condenseTitle(`start ${'y'.repeat(500)}`, max).length).toBeLessThanOrEqual(max);
+    expect(condenseTitle('a b c d e f g h i j k l m n o p'.repeat(40), max).length).toBeLessThanOrEqual(max);
   });
 
   it('flattens newlines', () => {
