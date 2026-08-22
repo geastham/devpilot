@@ -11,7 +11,7 @@ import { Command as Command18 } from "commander";
 import updateNotifier from "update-notifier";
 
 // src/version.ts
-var VERSION = "0.5.7";
+var VERSION = "0.5.8";
 
 // src/commands/init.ts
 import { Command } from "commander";
@@ -2146,15 +2146,16 @@ async function runIntrospection(options) {
     );
     const byKey = new Map(result.candidates.map((c) => [c.adoptionKey, c]));
     for (const outcome of response.outcomes) {
-      if (outcome.status !== "adopted" && outcome.status !== "attached") continue;
-      if (!outcome.sessionId || !outcome.linearIdentifier) continue;
+      if (outcome.status !== "adopted" && outcome.status !== "attached" && outcome.status !== "duplicate")
+        continue;
+      if (!outcome.sessionId) continue;
       const candidate = byKey.get(outcome.adoptionKey);
       const location = result.transcriptPaths?.get(outcome.adoptionKey);
       if (!candidate?.live || !location) continue;
       options.watcher.track({
         adoptionKey: outcome.adoptionKey,
         sessionId: outcome.sessionId,
-        identifier: outcome.linearIdentifier,
+        identifier: outcome.linearIdentifier ?? candidate.repo,
         transcriptPath: location.transcriptPath,
         repo: candidate.repo,
         startedAt: candidate.startedAt,

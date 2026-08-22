@@ -148,8 +148,17 @@ export async function runIntrospection(options: IntrospectionOptions): Promise<v
      */
     const byKey = new Map(result.candidates.map((c) => [c.adoptionKey, c]));
     for (const outcome of response.outcomes) {
-      if (outcome.status !== 'adopted' && outcome.status !== 'attached') continue;
-      if (!outcome.sessionId || !outcome.linearIdentifier) continue;
+      /**
+       * 'duplicate' is tracked too — deliberately. It means the session is
+       * already on the board, and the hosted side returns the existing row's
+       * id precisely so a machine can resume watching it. Without this, a
+       * bridge that lost its ledger (reinstall, new machine, deleted state)
+       * would never stream for any session adopted before the loss — which
+       * was this machine's exact condition when streaming first shipped.
+       */
+      if (outcome.status !== 'adopted' && outcome.status !== 'attached' && outcome.status !== 'duplicate')
+        continue;
+      if (!outcome.sessionId) continue;
 
       const candidate = byKey.get(outcome.adoptionKey);
       const location = result.transcriptPaths?.get(outcome.adoptionKey);
@@ -158,7 +167,7 @@ export async function runIntrospection(options: IntrospectionOptions): Promise<v
       options.watcher.track({
         adoptionKey: outcome.adoptionKey,
         sessionId: outcome.sessionId,
-        identifier: outcome.linearIdentifier,
+        identifier: outcome.linearIdentifier ?? candidate.repo,
         transcriptPath: location.transcriptPath,
         repo: candidate.repo,
         startedAt: candidate.startedAt,
