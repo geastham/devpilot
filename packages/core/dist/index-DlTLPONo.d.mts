@@ -338,6 +338,23 @@ interface SessionSummary {
     source: 'model' | 'heuristic';
 }
 /**
+ * Title AND body, with no model call.
+ *
+ * The heuristic tier used to produce only a title, so a session on a machine
+ * with no `ANTHROPIC_API_KEY` reached the hosted plane with a null summary —
+ * and `/api/sessions/:id/promote` uses that as the body of the Linear issue it
+ * drafts. Every such ticket fell back to bare evidence: a repo, a branch, a
+ * file list, and nothing about the work.
+ *
+ * The first human prompt is right there and is a genuinely good body: it is the
+ * person's own statement of what they wanted. It is not a summary of the work —
+ * it is the request — so it is labelled as such rather than passed off as one.
+ *
+ * This keeps the promise that observation costs nothing: no key, no network,
+ * still a usable ticket.
+ */
+declare function heuristicSummary(observation: SessionObservation): SessionSummary;
+/**
  * Summarize one session. Never throws — any failure degrades to the heuristic.
  *
  * A failed summary must cost that one candidate its nicer title and nothing
@@ -386,6 +403,7 @@ declare const index_clearRepoCache: typeof clearRepoCache;
 declare const index_condenseTitle: typeof condenseTitle;
 declare const index_defaultProjectsRoot: typeof defaultProjectsRoot;
 declare const index_groupByOwner: typeof groupByOwner;
+declare const index_heuristicSummary: typeof heuristicSummary;
 declare const index_heuristicTitle: typeof heuristicTitle;
 declare const index_loadOwnedSessionIds: typeof loadOwnedSessionIds;
 declare const index_parseRemoteUrl: typeof parseRemoteUrl;
@@ -399,7 +417,7 @@ declare const index_summarizeSession: typeof summarizeSession;
 declare const index_summarizeSessions: typeof summarizeSessions;
 declare const index_withheldOwners: typeof withheldOwners;
 declare namespace index {
-  export { index_HEAD_BYTES as HEAD_BYTES, index_MAX_PROBE_BYTES as MAX_PROBE_BYTES, type index_ProbeOptions as ProbeOptions, type index_RepoIdentity as RepoIdentity, type index_ScanOptions as ScanOptions, type index_ScanResult as ScanResult, type index_SessionObservation as SessionObservation, type index_SessionSummary as SessionSummary, type index_SkipReason as SkipReason, type index_SkippedSession as SkippedSession, type index_SummarizeOptions as SummarizeOptions, index_adoptionKeyFor as adoptionKeyFor, index_clearRepoCache as clearRepoCache, index_condenseTitle as condenseTitle, index_defaultProjectsRoot as defaultProjectsRoot, index_groupByOwner as groupByOwner, index_heuristicTitle as heuristicTitle, index_loadOwnedSessionIds as loadOwnedSessionIds, index_parseRemoteUrl as parseRemoteUrl, index_probeTranscript as probeTranscript, index_readHead as readHead, index_resolveBranch as resolveBranch, index_resolveRepo as resolveRepo, index_resolveTouchedPaths as resolveTouchedPaths, index_scanSessions as scanSessions, index_summarizeSession as summarizeSession, index_summarizeSessions as summarizeSessions, index_withheldOwners as withheldOwners };
+  export { index_HEAD_BYTES as HEAD_BYTES, index_MAX_PROBE_BYTES as MAX_PROBE_BYTES, type index_ProbeOptions as ProbeOptions, type index_RepoIdentity as RepoIdentity, type index_ScanOptions as ScanOptions, type index_ScanResult as ScanResult, type index_SessionObservation as SessionObservation, type index_SessionSummary as SessionSummary, type index_SkipReason as SkipReason, type index_SkippedSession as SkippedSession, type index_SummarizeOptions as SummarizeOptions, index_adoptionKeyFor as adoptionKeyFor, index_clearRepoCache as clearRepoCache, index_condenseTitle as condenseTitle, index_defaultProjectsRoot as defaultProjectsRoot, index_groupByOwner as groupByOwner, index_heuristicSummary as heuristicSummary, index_heuristicTitle as heuristicTitle, index_loadOwnedSessionIds as loadOwnedSessionIds, index_parseRemoteUrl as parseRemoteUrl, index_probeTranscript as probeTranscript, index_readHead as readHead, index_resolveBranch as resolveBranch, index_resolveRepo as resolveRepo, index_resolveTouchedPaths as resolveTouchedPaths, index_scanSessions as scanSessions, index_summarizeSession as summarizeSession, index_summarizeSessions as summarizeSessions, index_withheldOwners as withheldOwners };
 }
 
-export { HEAD_BYTES as H, MAX_PROBE_BYTES as M, type ProbeOptions as P, type RepoIdentity as R, type ScanOptions as S, type ScanResult as a, type SessionObservation as b, type SessionSummary as c, type SkipReason as d, type SkippedSession as e, type SummarizeOptions as f, adoptionKeyFor as g, clearRepoCache as h, index as i, condenseTitle as j, defaultProjectsRoot as k, groupByOwner as l, heuristicTitle as m, loadOwnedSessionIds as n, probeTranscript as o, parseRemoteUrl as p, resolveBranch as q, readHead as r, resolveRepo as s, resolveTouchedPaths as t, scanSessions as u, summarizeSession as v, summarizeSessions as w, withheldOwners as x };
+export { HEAD_BYTES as H, MAX_PROBE_BYTES as M, type ProbeOptions as P, type RepoIdentity as R, type ScanOptions as S, type ScanResult as a, type SessionObservation as b, type SessionSummary as c, type SkipReason as d, type SkippedSession as e, type SummarizeOptions as f, adoptionKeyFor as g, clearRepoCache as h, index as i, condenseTitle as j, defaultProjectsRoot as k, groupByOwner as l, heuristicSummary as m, heuristicTitle as n, loadOwnedSessionIds as o, parseRemoteUrl as p, probeTranscript as q, readHead as r, resolveBranch as s, resolveRepo as t, resolveTouchedPaths as u, scanSessions as v, summarizeSession as w, summarizeSessions as x, withheldOwners as y };

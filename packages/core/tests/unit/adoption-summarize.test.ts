@@ -35,7 +35,44 @@ describe('summarizeSession', () => {
   /** T21-AC-08 — the headline experience must not require configuration. */
   it('falls back to the heuristic with no API key', async () => {
     const result = await summarizeSession(observation(), [], { apiKey: undefined });
-    expect(result).toEqual({ title: 'Cockpit landing copy', source: 'heuristic' });
+    expect(result.title).toBe('Cockpit landing copy');
+    expect(result.source).toBe('heuristic');
+  });
+
+  /**
+   * The heuristic tier used to return a title and NO body, so a machine with
+   * no API key produced a null summary — and that is the body of the Linear
+   * issue `promote` drafts. Every such ticket described nothing.
+   */
+  it('the heuristic still produces a body, not just a title', async () => {
+    const result = await summarizeSession(
+      observation({
+        customTitle: 'Ingest rework',
+        firstHumanPrompt: 'Rework the ingest pipeline so a malformed row is quarantined rather than dropped.',
+      }),
+      [],
+      { apiKey: undefined },
+    );
+    expect(result.summary).toContain('Session opened with');
+    expect(result.summary).toContain('quarantined');
+  });
+
+  it('omits the body when it would only repeat the title', async () => {
+    const result = await summarizeSession(
+      observation({ customTitle: 'Ingest rework', firstHumanPrompt: 'hi' }),
+      [],
+      { apiKey: undefined },
+    );
+    expect(result.summary).toBeUndefined();
+  });
+
+  it('keeps the heuristic body inside the wire limit', async () => {
+    const result = await summarizeSession(
+      observation({ customTitle: 'x', firstHumanPrompt: 'y'.repeat(5000) }),
+      [],
+      { apiKey: undefined },
+    );
+    expect(result.summary!.length).toBeLessThanOrEqual(400);
   });
 
   it('uses the model response when one is available', async () => {

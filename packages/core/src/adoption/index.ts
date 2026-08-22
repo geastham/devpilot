@@ -45,6 +45,7 @@ export {
 export {
   summarizeSession,
   summarizeSessions,
+  heuristicSummary,
   type SummarizeOptions,
   type SessionSummary,
 } from './summarize';
