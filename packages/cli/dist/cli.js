@@ -39,7 +39,7 @@ var import_commander18 = require("commander");
 var import_update_notifier = __toESM(require("update-notifier"));
 
 // src/version.ts
-var VERSION = "0.5.12";
+var VERSION = "0.5.13";
 
 // src/commands/init.ts
 var import_commander = require("commander");
