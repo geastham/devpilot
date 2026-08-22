@@ -52,6 +52,7 @@ import { ConductorWatcher } from './conductor-watcher';
 import { CommandApplier } from './command-applier';
 import { AdoptionWatcher } from './adoption-watcher';
 import { SessionObserver } from './observer';
+import { ResumeApplier } from './resume-applier';
 import { runIntrospection } from './introspect';
 
 interface ConnectOptions {
@@ -251,11 +252,6 @@ export const connectCommand = new Command('connect')
           })
         : null;
 
-    if (commandApplier) {
-      const tick = () => void commandApplier.sweep();
-      setInterval(tick, 15_000).unref?.();
-      tick();
-    }
 
     const readopted = conductorWatcher?.restore() ?? 0;
     if (readopted > 0) {
@@ -321,6 +317,74 @@ export const connectCommand = new Command('connect')
         console.log('');
       }
       observer.start();
+    }
+
+    /**
+     * The command return path — TRD 23 §7.1.
+     *
+     * This used to run only under `--plan`, because the only commands were
+     * conductor decisions. `resume` is not one: it is how a person picks up a
+     * session DevPilot never dispatched, and a bridge in single-session mode
+     * must be able to apply it. So the poll moved out from behind the flag.
+     *
+     * ONE poll, then routed. Two pollers would race to claim the same rows and
+     * each would see half of them.
+     */
+    const resumeApplier =
+      observer && options.sessionApiUrl
+        ? new ResumeApplier({
+            client,
+            sessionApiUrl: options.sessionApiUrl,
+            sessionApiKey: options.sessionApiKey,
+            callbackUrl: `${client.hostedUrl()}/api/orchestrator`,
+            resolveTarget: (key) => {
+              const at = observer.targetFor(key);
+              return at ? { ...at, cwd: '' } : undefined;
+            },
+            onLog: (line) => console.log(chalk.blue(`   ${line}`)),
+          })
+        : null;
+
+    if (commandApplier || resumeApplier) {
+      const pump = async () => {
+        let commands;
+        try {
+          commands = await client.pollSessionCommands();
+        } catch {
+          // Briefly unreachable is not worth stopping a bridge for.
+          return;
+        }
+        for (const command of commands) {
+          if (ResumeApplier.handles(command)) {
+            if (resumeApplier) {
+              await resumeApplier.apply(command);
+            } else {
+              /**
+               * Told, not left pending. A bridge with no session runner cannot
+               * take the wheel, and a cockpit button that spins forever is
+               * worse than one that says why it cannot.
+               */
+              await client.acknowledgeCommands(
+                [command.id],
+                'failed',
+                'This machine has no session runner, so it cannot take the wheel. ' +
+                  'Start one with `devpilot session-runner` and reconnect.',
+              );
+            }
+          } else if (commandApplier) {
+            await commandApplier.applyOne(command);
+          } else {
+            await client.acknowledgeCommands(
+              [command.id],
+              'failed',
+              'This bridge is not running a conductor, so it cannot apply that decision.',
+            );
+          }
+        }
+      };
+      const tick = () => void pump();
+      setInterval(tick, 15_000).unref?.();
+      tick();
     }
 
     if (options.discover !== false) {

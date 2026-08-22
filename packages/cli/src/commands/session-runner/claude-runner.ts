@@ -257,6 +257,8 @@ export interface RunClaudeOptions {
   sessionLink?: string;
   model?: string;
   claudePath: string;
+  /** Continue this Claude Code conversation rather than starting a new one. */
+  resumeSessionId?: string;
   permissionMode: string;
   timeoutMs: number;
   /** Called with each chunk of stderr, for operator visibility. */
@@ -276,7 +278,7 @@ export interface RunClaudeOptions {
 export async function runClaudeSession(
   options: RunClaudeOptions
 ): Promise<ClaudeRunOutcome> {
-  const { workdir, prompt, sessionLink, model, claudePath, permissionMode, timeoutMs, onLog, onSpawn } =
+  const { workdir, prompt, sessionLink, model, claudePath, permissionMode, timeoutMs, resumeSessionId, onLog, onSpawn } =
     options;
 
   const before = await snapshot(workdir);
@@ -303,6 +305,22 @@ export async function runClaudeSession(
     permissionMode,
   ];
   if (model) args.push('--model', model);
+
+  /**
+   * Continue the conversation rather than opening a new one — TRD 23.
+   *
+   * Deliberately WITHOUT `--fork-session`: resuming in place keeps the same
+   * session id, so the transcript the cockpit is already watching simply grows
+   * and the row stays continuous. Forking would mint a new id, hence a new
+   * adoption key, hence a second row for what a person thinks of as one piece
+   * of work.
+   *
+   * The caller is responsible for only ever passing a HELD session. Two
+   * processes appending to one transcript corrupts it, which is why the bridge
+   * re-probes liveness immediately before spawning rather than trusting a
+   * status that may be a minute old.
+   */
+  if (resumeSessionId) args.push('--resume', resumeSessionId);
 
   // Shared-session wiring. `--strict-mcp-config` keeps the agent to exactly this
   // server: a dispatched agent should not inherit whatever MCP servers happen to

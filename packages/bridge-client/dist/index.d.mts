@@ -43,9 +43,25 @@ interface MirroredPlan {
 interface SessionCommandMessage {
     id: string;
     sessionId: string;
-    command: 'approve' | 'replan' | 'abort';
+    command: 'approve' | 'replan' | 'abort' | 'resume';
     payload?: {
+        /** replan */
         constraints?: string[];
+        /**
+         * resume — what to say on pickup. Optional: taking the wheel with nothing
+         * to say is a legitimate request (TRD 23 §3.2).
+         */
+        message?: string;
+        /**
+         * resume — which observed session this is, as the machine knows it.
+         *
+         * `sha256(machineName + ':' + sessionUuid)`, and ONE-WAY: the hosted plane
+         * holds this because the machine sent it, and cannot derive the Claude
+         * session id from it. So a command can point at a conversation without the
+         * control plane ever learning what that conversation is called
+         * (TRD 23 §3.3).
+         */
+        adoptionKey?: string;
     };
     createdAt?: string;
 }

@@ -65,11 +65,18 @@ export class CommandApplier {
     }
 
     for (const command of commands) {
-      await this.apply(command);
+      await this.applyOne(command);
     }
   }
 
-  private async apply(command: SessionCommandMessage): Promise<void> {
+  /**
+   * Apply one command that has already been polled.
+   *
+   * Public since TRD 23: the bridge now polls ONCE and routes, because
+   * `resume` is applied by a different applier and two pollers would race to
+   * claim the same rows.
+   */
+  async applyOne(command: SessionCommandMessage): Promise<void> {
     const itemId = this.opts.resolveItemId(command.sessionId);
 
     if (!itemId) {

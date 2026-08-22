@@ -59,6 +59,14 @@ export class SessionObserver {
    * thin. First sight is the right moment.
    */
   private seen = new Set<string>();
+  /**
+   * `adoptionKey → where that conversation lives on this machine`.
+   *
+   * The resolution table for "take the wheel" (TRD 23 §3.3). The hosted plane
+   * can only point at a row; this is the state that says what that means here,
+   * and it never leaves the process.
+   */
+  private targets = new Map<string, { transcriptPath: string; sessionUuid: string; repo: string }>();
   private readonly intervalMs: number;
   private readonly sinceMs: number;
   private readonly summariseBudget: number;
@@ -67,6 +75,19 @@ export class SessionObserver {
     this.intervalMs = config.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.sinceMs = config.sinceMs ?? DEFAULT_SINCE_MS;
     this.summariseBudget = config.summariseBudget ?? DEFAULT_SUMMARISE_BUDGET;
+  }
+
+  /**
+   * Where a conversation lives on this machine, by adoption key.
+   *
+   * Undefined for anything this process has not observed — which is the honest
+   * answer, and the reason a resume for another machine's session refuses
+   * rather than guessing.
+   */
+  targetFor(adoptionKey: string):
+    | { transcriptPath: string; sessionUuid: string; repo: string }
+    | undefined {
+    return this.targets.get(adoptionKey);
   }
 
   start(): void {
@@ -127,7 +148,17 @@ export class SessionObserver {
        * never got a summary this pass, and the server's COALESCE upsert treats
        * an absent summary as "leave what you have" rather than an erasure.
        */
-      result.candidates.forEach((c) => this.seen.add(c.adoptionKey));
+      result.candidates.forEach((c) => {
+        this.seen.add(c.adoptionKey);
+        const at = result.transcriptPaths.get(c.adoptionKey);
+        if (at) {
+          this.targets.set(c.adoptionKey, {
+            transcriptPath: at.transcriptPath,
+            sessionUuid: at.sessionUuid,
+            repo: c.repo,
+          });
+        }
+      });
 
       const live = new Set(result.candidates.filter((c) => c.live).map((c) => c.adoptionKey));
       const ended = [...this.lastLive].filter((key) => !live.has(key));
