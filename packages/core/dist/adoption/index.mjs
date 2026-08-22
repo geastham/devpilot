@@ -487,6 +487,12 @@ function resolveWikiModel(explicit) {
 var SAMPLE_CHARS = 6e3;
 var REQUEST_TIMEOUT_MS = 2e4;
 var MAX_CONCURRENCY = 4;
+function heuristicSummary(observation) {
+  const title = heuristicTitle(observation);
+  const prompt = observation.firstHumanPrompt?.trim();
+  const summary = prompt && prompt.length > title.length ? condenseTitle(`Session opened with: ${prompt}`, ADOPTION_LIMITS2.MAX_SUMMARY_CHARS) : void 0;
+  return { title, summary, source: "heuristic" };
+}
 var SYSTEM_PROMPT = [
   "You label coding-agent sessions so they can be tracked on an issue board.",
   "",
@@ -518,7 +524,7 @@ function parseResponse(text) {
   return { title: title || void 0, summary: summary || void 0 };
 }
 async function summarizeSession(observation, touchedPaths, options = {}) {
-  const fallback = { title: heuristicTitle(observation), source: "heuristic" };
+  const fallback = heuristicSummary(observation);
   const apiKey = options.apiKey ?? process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return fallback;
   try {
@@ -554,7 +560,7 @@ async function summarizeSessions(jobs, options = {}) {
       const index = next++;
       if (index >= jobs.length) return;
       const job = jobs[index];
-      results[index] = index < limit ? await summarizeSession(job.observation, job.touchedPaths, options) : { title: heuristicTitle(job.observation), source: "heuristic" };
+      results[index] = index < limit ? await summarizeSession(job.observation, job.touchedPaths, options) : heuristicSummary(job.observation);
     }
   }
   await Promise.all(
@@ -570,6 +576,7 @@ export {
   condenseTitle,
   defaultProjectsRoot,
   groupByOwner,
+  heuristicSummary,
   heuristicTitle,
   loadOwnedSessionIds,
   parseRemoteUrl,

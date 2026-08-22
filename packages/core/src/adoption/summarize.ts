@@ -54,6 +54,35 @@ export interface SessionSummary {
   source: 'model' | 'heuristic';
 }
 
+/**
+ * Title AND body, with no model call.
+ *
+ * The heuristic tier used to produce only a title, so a session on a machine
+ * with no `ANTHROPIC_API_KEY` reached the hosted plane with a null summary —
+ * and `/api/sessions/:id/promote` uses that as the body of the Linear issue it
+ * drafts. Every such ticket fell back to bare evidence: a repo, a branch, a
+ * file list, and nothing about the work.
+ *
+ * The first human prompt is right there and is a genuinely good body: it is the
+ * person's own statement of what they wanted. It is not a summary of the work —
+ * it is the request — so it is labelled as such rather than passed off as one.
+ *
+ * This keeps the promise that observation costs nothing: no key, no network,
+ * still a usable ticket.
+ */
+export function heuristicSummary(observation: SessionObservation): SessionSummary {
+  const title = heuristicTitle(observation);
+  const prompt = observation.firstHumanPrompt?.trim();
+
+  // Only worth including when it says more than the title already did.
+  const summary =
+    prompt && prompt.length > title.length
+      ? condenseTitle(`Session opened with: ${prompt}`, ADOPTION_LIMITS.MAX_SUMMARY_CHARS)
+      : undefined;
+
+  return { title, summary, source: 'heuristic' };
+}
+
 const SYSTEM_PROMPT = [
   'You label coding-agent sessions so they can be tracked on an issue board.',
   '',
@@ -97,7 +126,7 @@ export async function summarizeSession(
   touchedPaths: string[],
   options: SummarizeOptions = {},
 ): Promise<SessionSummary> {
-  const fallback: SessionSummary = { title: heuristicTitle(observation), source: 'heuristic' };
+  const fallback: SessionSummary = heuristicSummary(observation);
 
   const apiKey = options.apiKey ?? process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return fallback;
@@ -162,7 +191,7 @@ export async function summarizeSessions(
       results[index] =
         index < limit
           ? await summarizeSession(job.observation, job.touchedPaths, options)
-          : { title: heuristicTitle(job.observation), source: 'heuristic' };
+          : heuristicSummary(job.observation);
     }
   }
 
