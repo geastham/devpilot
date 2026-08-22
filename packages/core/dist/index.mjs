@@ -9652,7 +9652,7 @@ function scanSessions(options) {
       const startedAt = observation.startedAt ?? observation.lastActivityAt;
       const touchedPaths = includePaths ? resolveTouchedPaths(observation.cwd, ADOPTION_LIMITS.MAX_TOUCHED_PATHS) : [];
       const adoptionKey = adoptionKeyFor(options.machineName, sessionUuid);
-      transcriptPaths.set(adoptionKey, { transcriptPath, sessionUuid });
+      transcriptPaths.set(adoptionKey, { transcriptPath, sessionUuid, cwd: observation.cwd ?? null });
       candidates.push({
         adoptionKey,
         agent: "claude-code",

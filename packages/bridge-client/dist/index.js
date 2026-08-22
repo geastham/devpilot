@@ -292,6 +292,30 @@ var BridgeClient = class {
       return false;
     }
   }
+  /**
+   * Send derived stream events for the live watch view.
+   *
+   * The same privacy line as telemetry, at event granularity: tool name,
+   * repo-relative path, time offset. The sender numbers events itself so a
+   * redelivered batch overlaps idempotently on the hosted side.
+   *
+   * Best-effort and never throws, for the same reason telemetry is: the view
+   * describes the run, and losing a frame of it must never cost the run.
+   */
+  async streamEvents(sessionId, events) {
+    if (events.length === 0) return true;
+    try {
+      for (let i = 0; i < events.length; i += 500) {
+        await this.request(`/api/sessions/${sessionId}/stream`, {
+          method: "POST",
+          body: JSON.stringify({ events: events.slice(i, i + 500) })
+        });
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
   /** Fixes the `getOrchestatorId` typo from 0.1.x. */
   getOrchestratorId() {
     return this.orchestratorId;

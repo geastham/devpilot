@@ -1,6 +1,7 @@
 import { statSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { BridgeClient } from '@devpilot.sh/bridge-client';
+import { tailTranscript, initialTailState, type TailState } from './transcript-tail.js';
 
 /**
  * Keeping an adopted session's status honest — TRD 21 §6.6.
@@ -42,6 +43,15 @@ export interface AdoptionLedgerEntry {
   lastMtimeMs: number;
   lastReportedAt: string;
   settled: boolean;
+  /** Working directory the session runs in, for repo-relative paths. */
+  cwd?: string | null;
+  /**
+   * Incremental read position into the transcript. Persisted so a restarted
+   * bridge resumes the stream where it left off instead of re-sending
+   * everything — the hosted side would dedupe by seq, but re-deriving a
+   * 10-hour transcript on every restart is work for nothing.
+   */
+  tail?: TailState;
 }
 
 interface Ledger {
@@ -141,7 +151,43 @@ export class AdoptionWatcher {
       if (mtimeMs > entry.lastMtimeMs) {
         entry.lastMtimeMs = mtimeMs;
         entry.lastReportedAt = new Date(now).toISOString();
+
+        /**
+         * The transcript grew — derive what was appended and stream it up.
+         * This is the sender that never existed: telemetry and the live watch
+         * both read from what lands here. Failure is tolerated per tick; the
+         * byte offset only advances after derivation, so nothing is skipped.
+         */
+        // Capability-guarded like the conductor watcher: an older installed
+        // bridge-client simply has no streaming, and that degrades to the
+        // status line below rather than a crash.
+        const canStream = typeof this.config.client.streamEvents === 'function';
+        entry.tail ??= initialTailState();
+        const derived = canStream
+          ? tailTranscript(entry.transcriptPath, entry.tail, entry.cwd)
+          : [];
         this.persist();
+
+        if (derived.length > 0) {
+          const sent = await this.config.client.streamEvents(entry.sessionId, derived);
+          if (!sent) {
+            this.config.onLog?.(`stream for ${entry.identifier} did not land; will catch up next tick`);
+          }
+
+          const latest = derived[derived.length - 1];
+          const files = new Set<string>();
+          for (const e of derived) if (e.path) files.add(e.path);
+          if (typeof this.config.client.reportTelemetry === 'function')
+          await this.config.client.reportTelemetry(entry.sessionId, {
+            toolCalls: entry.tail.seq,
+            filesTouched: [...files].slice(0, 500),
+            currentAction: latest.path
+              ? `${latest.tool} · ${latest.path.split('/').slice(-2).join('/')}`
+              : latest.tool,
+            elapsedMs: entry.tail.activeMs,
+            idleMs: Math.max(0, now - mtimeMs),
+          });
+        }
 
         try {
           await this.config.client.reportSessionStatus(entry.sessionId, {

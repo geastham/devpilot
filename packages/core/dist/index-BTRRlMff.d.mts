@@ -269,6 +269,7 @@ interface ScanResult {
     transcriptPaths: Map<string, {
         transcriptPath: string;
         sessionUuid: string;
+        cwd: string | null;
     }>;
 }
 declare function defaultProjectsRoot(): string;

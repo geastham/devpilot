@@ -89,7 +89,7 @@ export interface ScanResult {
    * careless `JSON.stringify` away from the network; keeping transcript samples
    * out of it is structural, not stylistic.
    */
-  transcriptPaths: Map<string, { transcriptPath: string; sessionUuid: string }>;
+  transcriptPaths: Map<string, { transcriptPath: string; sessionUuid: string; cwd: string | null }>;
 }
 
 const DEFAULT_LIVE_WITHIN_MS = 15 * 60 * 1000;
@@ -230,7 +230,7 @@ export function scanSessions(options: ScanOptions): ScanResult {
 
   const candidates: AdoptionCandidate[] = [];
   const skipped: SkippedSession[] = [];
-  const transcriptPaths = new Map<string, { transcriptPath: string; sessionUuid: string }>();
+  const transcriptPaths = new Map<string, { transcriptPath: string; sessionUuid: string; cwd: string | null }>();
   const inventory = new Map<
     string,
     DiscoveredRepo & { cwds: Set<string> }
@@ -348,7 +348,7 @@ export function scanSessions(options: ScanOptions): ScanResult {
         : [];
 
       const adoptionKey = adoptionKeyFor(options.machineName, sessionUuid);
-      transcriptPaths.set(adoptionKey, { transcriptPath, sessionUuid });
+      transcriptPaths.set(adoptionKey, { transcriptPath, sessionUuid, cwd: observation.cwd ?? null });
 
       candidates.push({
         adoptionKey,

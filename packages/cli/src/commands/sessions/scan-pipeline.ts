@@ -46,7 +46,7 @@ export interface PipelineResult {
    * lets the watcher stat the right file after adoption, and it must never be
    * serialized into a request.
    */
-  transcriptPaths: Map<string, { transcriptPath: string; sessionUuid: string }>;
+  transcriptPaths: Map<string, { transcriptPath: string; sessionUuid: string; cwd: string | null }>;
 }
 
 /** `24h`, `90m`, `7d`, or a bare number of hours. */

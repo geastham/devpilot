@@ -1249,7 +1249,7 @@ function createConductorDispatchHandler(opts) {
 // src/commands/bridge/connect.ts
 var import_node_os2 = require("os");
 var import_node_path4 = require("path");
-var import_node_fs3 = require("fs");
+var import_node_fs4 = require("fs");
 
 // src/commands/bridge/conductor-watcher.ts
 var import_node_fs = require("fs");
@@ -1645,8 +1645,84 @@ var CommandApplier = class {
 };
 
 // src/commands/bridge/adoption-watcher.ts
-var import_node_fs2 = require("fs");
+var import_node_fs3 = require("fs");
 var import_node_path2 = require("path");
+
+// src/commands/bridge/transcript-tail.ts
+var import_node_fs2 = require("fs");
+var IDLE_MS = 5 * 60 * 1e3;
+var PAUSE_BEAT_MS = 30 * 1e3;
+function initialTailState() {
+  return { byteOffset: 0, remainder: "", seq: 0, lastEventMs: null, activeMs: 0 };
+}
+function pathFromCommand(command) {
+  if (typeof command !== "string") return null;
+  const m = command.match(/[\w./-]+\.(?:ts|tsx|js|jsx|py|sql|md|json|css|sh|mjs|go|rs)\b/);
+  return m ? m[0] : null;
+}
+function tailTranscript(transcriptPath, state, cwd) {
+  let fd;
+  try {
+    fd = (0, import_node_fs2.openSync)(transcriptPath, "r");
+  } catch {
+    return [];
+  }
+  let chunk;
+  try {
+    const size = (0, import_node_fs2.fstatSync)(fd).size;
+    if (size < state.byteOffset) {
+      state.byteOffset = 0;
+      state.remainder = "";
+    }
+    if (size === state.byteOffset) {
+      (0, import_node_fs2.closeSync)(fd);
+      return [];
+    }
+    const buf = Buffer.alloc(size - state.byteOffset);
+    (0, import_node_fs2.readSync)(fd, buf, 0, buf.length, state.byteOffset);
+    state.byteOffset = size;
+    chunk = state.remainder + buf.toString("utf8");
+  } finally {
+    (0, import_node_fs2.closeSync)(fd);
+  }
+  const lines = chunk.split("\n");
+  state.remainder = lines.pop() ?? "";
+  const events = [];
+  for (const line of lines) {
+    if (!line) continue;
+    let o;
+    try {
+      o = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (o.type !== "assistant") continue;
+    const ms = o.timestamp ? Date.parse(o.timestamp) : NaN;
+    if (!Number.isFinite(ms)) continue;
+    for (const block of o.message?.content ?? []) {
+      if (block.type !== "tool_use" || !block.name) continue;
+      const input = block.input ?? {};
+      let path = typeof input.file_path === "string" && input.file_path || typeof input.path === "string" && input.path || typeof input.notebook_path === "string" && input.notebook_path || null;
+      if (!path && block.name === "Bash") path = pathFromCommand(input.command);
+      if (path && cwd && path.startsWith(cwd)) path = path.slice(cwd.length + 1);
+      if (path && path.startsWith("/")) path = null;
+      if (state.lastEventMs !== null) {
+        const gap = ms - state.lastEventMs;
+        state.activeMs += gap > 0 && gap < IDLE_MS ? gap : PAUSE_BEAT_MS;
+      }
+      state.lastEventMs = ms;
+      events.push({
+        seq: state.seq++,
+        t: Math.round(state.activeMs / 1e3),
+        tool: block.name,
+        path
+      });
+    }
+  }
+  return events;
+}
+
+// src/commands/bridge/adoption-watcher.ts
 var DEFAULT_SETTLE_MS = 30 * 60 * 1e3;
 var DEFAULT_TICK_MS = 6e4;
 var AdoptionWatcher = class {
@@ -1671,13 +1747,13 @@ var AdoptionWatcher = class {
    */
   restore() {
     try {
-      if (!(0, import_node_fs2.existsSync)(this.config.statePath)) return 0;
-      const parsed = JSON.parse((0, import_node_fs2.readFileSync)(this.config.statePath, "utf8"));
+      if (!(0, import_node_fs3.existsSync)(this.config.statePath)) return 0;
+      const parsed = JSON.parse((0, import_node_fs3.readFileSync)(this.config.statePath, "utf8"));
       if (parsed?.version !== 1 || !parsed.entries) return 0;
       let restored = 0;
       for (const entry of Object.values(parsed.entries)) {
         if (entry.settled) continue;
-        if (!(0, import_node_fs2.existsSync)(entry.transcriptPath)) continue;
+        if (!(0, import_node_fs3.existsSync)(entry.transcriptPath)) continue;
         this.entries.set(entry.adoptionKey, entry);
         restored++;
       }
@@ -1706,7 +1782,7 @@ var AdoptionWatcher = class {
       if (entry.settled) continue;
       let mtimeMs;
       try {
-        mtimeMs = (0, import_node_fs2.statSync)(entry.transcriptPath).mtimeMs;
+        mtimeMs = (0, import_node_fs3.statSync)(entry.transcriptPath).mtimeMs;
       } catch {
         this.entries.delete(entry.adoptionKey);
         this.persist();
@@ -1715,7 +1791,25 @@ var AdoptionWatcher = class {
       if (mtimeMs > entry.lastMtimeMs) {
         entry.lastMtimeMs = mtimeMs;
         entry.lastReportedAt = new Date(now).toISOString();
+        entry.tail ?? (entry.tail = initialTailState());
+        const derived = tailTranscript(entry.transcriptPath, entry.tail, entry.cwd);
         this.persist();
+        if (derived.length > 0) {
+          const sent = await this.config.client.streamEvents(entry.sessionId, derived);
+          if (!sent) {
+            this.config.onLog?.(`stream for ${entry.identifier} did not land; will catch up next tick`);
+          }
+          const latest = derived[derived.length - 1];
+          const files = /* @__PURE__ */ new Set();
+          for (const e of derived) if (e.path) files.add(e.path);
+          await this.config.client.reportTelemetry(entry.sessionId, {
+            toolCalls: entry.tail.seq,
+            filesTouched: [...files].slice(0, 500),
+            currentAction: latest.path ? `${latest.tool} \xB7 ${latest.path.split("/").slice(-2).join("/")}` : latest.tool,
+            elapsedMs: entry.tail.activeMs,
+            idleMs: Math.max(0, now - mtimeMs)
+          });
+        }
         try {
           await this.config.client.reportSessionStatus(entry.sessionId, {
             status: "running",
@@ -1748,9 +1842,9 @@ var AdoptionWatcher = class {
   }
   persist() {
     try {
-      (0, import_node_fs2.mkdirSync)((0, import_node_path2.dirname)(this.config.statePath), { recursive: true });
+      (0, import_node_fs3.mkdirSync)((0, import_node_path2.dirname)(this.config.statePath), { recursive: true });
       const ledger = { version: 1, entries: Object.fromEntries(this.entries) };
-      (0, import_node_fs2.writeFileSync)(this.config.statePath, JSON.stringify(ledger, null, 2), "utf8");
+      (0, import_node_fs3.writeFileSync)(this.config.statePath, JSON.stringify(ledger, null, 2), "utf8");
     } catch {
     }
   }
@@ -2096,7 +2190,9 @@ async function runIntrospection(options) {
         startedAt: candidate.startedAt,
         lastMtimeMs: Date.parse(candidate.lastActivityAt),
         lastReportedAt: (/* @__PURE__ */ new Date()).toISOString(),
-        settled: false
+        settled: false,
+        // Repo-relative paths in the stream need the absolute prefix to strip.
+        cwd: location.cwd
       });
     }
     if (options.watcher.size() > 0) {
@@ -2120,16 +2216,16 @@ function describe2(err) {
 function stableMachineName() {
   const path = (0, import_node_path4.join)((0, import_node_os2.homedir)(), ".devpilot", "machine.json");
   try {
-    if ((0, import_node_fs3.existsSync)(path)) {
-      const saved = JSON.parse((0, import_node_fs3.readFileSync)(path, "utf8"));
+    if ((0, import_node_fs4.existsSync)(path)) {
+      const saved = JSON.parse((0, import_node_fs4.readFileSync)(path, "utf8"));
       if (saved.name) return saved.name;
     }
   } catch {
   }
   const name = import_os2.default.hostname();
   try {
-    (0, import_node_fs3.mkdirSync)((0, import_node_path4.dirname)(path), { recursive: true });
-    (0, import_node_fs3.writeFileSync)(path, JSON.stringify({ name }, null, 2), "utf8");
+    (0, import_node_fs4.mkdirSync)((0, import_node_path4.dirname)(path), { recursive: true });
+    (0, import_node_fs4.writeFileSync)(path, JSON.stringify({ name }, null, 2), "utf8");
   } catch {
   }
   return name;
@@ -2597,7 +2693,7 @@ var sessionCommand = new import_commander13.Command("session").description("Shar
 var import_os5 = __toESM(require("os"));
 var import_node_os3 = require("os");
 var import_node_path5 = require("path");
-var import_node_fs4 = require("fs");
+var import_node_fs5 = require("fs");
 var import_commander14 = require("commander");
 var import_chalk16 = __toESM(require("chalk"));
 var import_inquirer = __toESM(require("inquirer"));
@@ -2605,16 +2701,16 @@ var import_bridge_client4 = require("@devpilot.sh/bridge-client");
 function stableMachineName2() {
   const path = (0, import_node_path5.join)((0, import_node_os3.homedir)(), ".devpilot", "machine.json");
   try {
-    if ((0, import_node_fs4.existsSync)(path)) {
-      const saved = JSON.parse((0, import_node_fs4.readFileSync)(path, "utf8"));
+    if ((0, import_node_fs5.existsSync)(path)) {
+      const saved = JSON.parse((0, import_node_fs5.readFileSync)(path, "utf8"));
       if (saved.name) return saved.name;
     }
   } catch {
   }
   const name = import_os5.default.hostname();
   try {
-    (0, import_node_fs4.mkdirSync)((0, import_node_path5.dirname)(path), { recursive: true });
-    (0, import_node_fs4.writeFileSync)(path, JSON.stringify({ name }, null, 2), "utf8");
+    (0, import_node_fs5.mkdirSync)((0, import_node_path5.dirname)(path), { recursive: true });
+    (0, import_node_fs5.writeFileSync)(path, JSON.stringify({ name }, null, 2), "utf8");
   } catch {
   }
   return name;

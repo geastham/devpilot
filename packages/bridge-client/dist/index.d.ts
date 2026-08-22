@@ -169,6 +169,22 @@ declare class BridgeClient {
      * frame of it must never cost the run it describes.
      */
     reportTelemetry(sessionId: string, telemetry: MirroredTelemetry): Promise<boolean>;
+    /**
+     * Send derived stream events for the live watch view.
+     *
+     * The same privacy line as telemetry, at event granularity: tool name,
+     * repo-relative path, time offset. The sender numbers events itself so a
+     * redelivered batch overlaps idempotently on the hosted side.
+     *
+     * Best-effort and never throws, for the same reason telemetry is: the view
+     * describes the run, and losing a frame of it must never cost the run.
+     */
+    streamEvents(sessionId: string, events: Array<{
+        seq: number;
+        t: number;
+        tool: string;
+        path: string | null;
+    }>): Promise<boolean>;
     /** Fixes the `getOrchestatorId` typo from 0.1.x. */
     getOrchestratorId(): string | null;
     setOrchestratorId(id: string): void;

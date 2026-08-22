@@ -165,6 +165,8 @@ export async function runIntrospection(options: IntrospectionOptions): Promise<v
         lastMtimeMs: Date.parse(candidate.lastActivityAt),
         lastReportedAt: new Date().toISOString(),
         settled: false,
+        // Repo-relative paths in the stream need the absolute prefix to strip.
+        cwd: location.cwd,
       });
     }
 
