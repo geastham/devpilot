@@ -1803,7 +1803,7 @@ async function runScanPipeline(options) {
     )
   });
   let modelTitles = 0;
-  if (options.summarize && scan.candidates.length > 0 && process.env.ANTHROPIC_API_KEY) {
+  if (options.summarize && scan.candidates.length > 0) {
     const jobs = scan.candidates.filter((c) => !options.skipSummaryFor?.has(c.adoptionKey)).map((candidate) => {
       const observation = observationFor(candidate, scan);
       return observation ? { candidate, observation } : null;
