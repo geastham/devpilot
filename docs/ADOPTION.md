@@ -255,8 +255,66 @@ indistinguishable from one that is broken, and the conclusion a user reaches is
   *not measurable* where a progress bar would be. It reads "Observed" rather
   than "Adopted" because the reader needs the consequence, not the mechanism.
 
+## Taking the wheel
+
+Seeing a session is one thing; doing something about it is another. A session
+DevPilot did not start offers two actions, and they are different requests
+rather than a setting on one:
+
+| | What it does |
+| --- | --- |
+| **Plan it** | Hands the work to the conductor. Comes back with waves to approve *before anything runs*. |
+| **Just continue** | Resumes the conversation on the machine that ran it, optionally with an instruction. |
+
+```
+Anything to say on pickup? Leave it blank to have the agent take stock first.
+┌──────────────────────────────────────────────┐
+│ Finish the migration and run the tests.      │
+└──────────────────────────────────────────────┘
+  [ Plan it ]  [ Just continue ]  Cancel
+```
+
+### Why DevPilot cannot simply drive a running session
+
+There is no handle on a running `claude` process — no IPC, no attach. So a live
+session offers **Open in Claude Code**, which is honest, rather than a control
+that would not work.
+
+What it *can* do is resume a **held** one. `claude --resume <id>` continues the
+same conversation, and a session DevPilot resumes is one it spawned — so every
+callback, stream event and plan gate already built applies to it. Verified: the
+session id and transcript stay the same, so the cockpit row is continuous rather
+than duplicated.
+
+### Planning works on a live session; continuing does not
+
+The rule is about the transcript, not about liveness. Two processes appending to
+one transcript corrupts it — so **continuing** a live session is refused. But
+**planning** never opens the transcript; it reads what the observer already
+recorded and asks the conductor. So you can plan a session while it is still
+running, which is often exactly when you want to.
+
+### The session id never leaves your machine
+
+The hosted plane holds only `adoptionKey` — `sha256(machine + ':' + sessionId)`,
+one-way. A command points at a row; what that means locally is resolved on the
+machine. A compromised control plane cannot ask your laptop to resume an
+arbitrary conversation, because it does not know what any conversation is
+called.
+
+The machine also re-checks liveness against the file immediately before
+spawning, rather than trusting a status that may be a minute old.
+
+### What runs, and with whose permissions
+
+The agent runs on your machine with the permissions the **bridge** was started
+with. Nothing in the request can raise them — a field that could would let
+someone in a cockpit escalate what an agent may do on another person's laptop.
+
 ## See also
 
 - `spec/trd/21-FLEET-INTROSPECTION.md` — the full technical design
+- `spec/trd/22-PROJECTS-AND-OBSERVATION.md` — projects, and why observation is free
+- `spec/trd/23-TAKE-THE-WHEEL.md` — resuming a held session, and the planning handoff
 - `docs/LINEAR-BRIDGE.md` — the dispatch direction
 - `docs/SESSION-RUNNER.md` — how DevPilot starts sessions of its own

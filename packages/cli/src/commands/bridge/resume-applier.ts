@@ -45,8 +45,13 @@ export interface ResumeTarget {
 
 export interface ResumeApplierOptions {
   client: BridgeClient;
-  /** Session-runner base URL, e.g. http://127.0.0.1:3900. */
-  sessionApiUrl: string;
+  /**
+   * Session-runner base URL, e.g. http://127.0.0.1:3900.
+   *
+   * Required only for `continue`. A planning bridge does not run one, and
+   * demanding it would refuse the mode that does not need it.
+   */
+  sessionApiUrl?: string;
   sessionApiKey?: string;
   /** Where the runner should report back to. */
   callbackUrl: string;
@@ -130,16 +135,41 @@ export class ResumeApplier {
       return;
     }
 
-    if (Date.now() - observation.lastActivityMs < this.liveWithinMs) {
+    /**
+     * Liveness blocks CONTINUING, not planning.
+     *
+     * The rule was never "leave live sessions alone", it was "do not put a
+     * second process on one transcript". Planning does not touch the transcript
+     * at all — it reads what the observer already recorded and asks the
+     * conductor — so refusing it on a live session withheld the safe mode along
+     * with the unsafe one.
+     *
+     * That matters in practice: a session you are watching run and want to
+     * redirect is exactly when a plan is most useful, and it is the state a
+     * busy fleet is mostly in.
+     */
+    if (
+      command.payload?.mode !== 'plan' &&
+      Date.now() - observation.lastActivityMs < this.liveWithinMs
+    ) {
       await this.fail(
         command,
-        'That session is still running. Two agents writing one transcript would corrupt it — ' +
-          'open it in Claude Code, or wait for it to stop.',
+        'That session is still running, so continuing it would put two agents on one ' +
+          'transcript. Open it in Claude Code, or plan the work instead.',
       );
       return;
     }
 
     const message = command.payload?.message?.trim();
+
+    if (command.payload?.mode !== 'plan' && !this.opts.sessionApiUrl) {
+      await this.fail(
+        command,
+        'Continuing a session needs the local session runner. Start one with ' +
+          '`devpilot session-runner` and reconnect with --session-api-url, or use Plan it.',
+      );
+      return;
+    }
 
     /**
      * Plan, rather than continue — TRD 23 §3.5.
@@ -190,7 +220,7 @@ export class ResumeApplier {
     }
 
     try {
-      const res = await this.doFetch(`${this.opts.sessionApiUrl.replace(/\/$/, '')}/v1/sessions`, {
+      const res = await this.doFetch(`${this.opts.sessionApiUrl!.replace(/\/$/, '')}/v1/sessions`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',

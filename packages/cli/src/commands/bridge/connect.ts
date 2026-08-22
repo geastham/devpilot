@@ -330,8 +330,20 @@ export const connectCommand = new Command('connect')
      * ONE poll, then routed. Two pollers would race to claim the same rows and
      * each would see half of them.
      */
+    /**
+     * Constructed when EITHER mode is possible, not only when both are.
+     *
+     * This required `--session-api-url`, which meant a bridge started with
+     * `--plan --cockpit-url` — a perfectly good planning bridge, and the shape
+     * the reference machine actually runs — could take the wheel in neither
+     * mode. Planning never touches the session runner; it is an HTTP call to
+     * the cockpit. Gating both on the runner was simply wrong.
+     *
+     * Each mode refuses individually when its own dependency is missing, and
+     * says which one to start.
+     */
     const resumeApplier =
-      observer && options.sessionApiUrl
+      observer && (options.sessionApiUrl || options.cockpitUrl)
         ? new ResumeApplier({
             client,
             sessionApiUrl: options.sessionApiUrl,

@@ -11,6 +11,15 @@
 
 ## 0. August 2026 — what changed
 
+**TRD 22 and TRD 23 shipped.** Observation no longer requires Linear — a session
+is visible in the cockpit with no workspace, no team, no route and no issue —
+and `projects` gives repo→team a column that means only that, many-to-one. TRD
+23 then answered the question the cockpit could not: a held session can be
+**taken over**, either by resuming the conversation or by handing the work to
+the planner for waves you approve. A live session can be planned but not
+continued, because the constraint is about the transcript rather than about
+liveness. See `docs/ADOPTION.md`.
+
 **TRD 21 (fleet introspection & adoption) is built**, all five waves. The loop only ever ran
 one way: every session DevPilot knew about was one DevPilot started, while the
 same machine had dozens of Claude Code sessions the product could not see — 38
