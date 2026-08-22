@@ -88,7 +88,18 @@ export async function runScanPipeline(options: PipelineOptions): Promise<Pipelin
    * first prompt). The model call only improves them, so everything below is
    * optional and any failure leaves the heuristic in place.
    */
-  if (options.summarize && scan.candidates.length > 0 && process.env.ANTHROPIC_API_KEY) {
+  /**
+   * Runs with or without an API key.
+   *
+   * This used to require `ANTHROPIC_API_KEY`, which skipped the HEURISTIC tier
+   * as well as the model one — so a machine with no key produced no summary at
+   * all, and `promote` drafted every Linear issue from bare evidence. All 102
+   * adopted sessions on the live fleet had a null summary because of this line.
+   *
+   * `summarizeSessions` already decides per session which tier it can afford;
+   * gating the call on the key second-guessed it and lost the free tier.
+   */
+  if (options.summarize && scan.candidates.length > 0) {
     const jobs = scan.candidates
       .filter((c) => !options.skipSummaryFor?.has(c.adoptionKey))
       .map((candidate) => {
