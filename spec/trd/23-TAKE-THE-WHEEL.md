@@ -1,6 +1,25 @@
 # TRD 23 — Take the Wheel
 ## Resuming a Held Session Under DevPilot · The Planning Handoff
-### v1.0 · August 2026 · Status: DRAFT
+### v1.1 · August 2026 · Status: BUILT
+
+> **Change log — v1.1 (22 Aug 2026)**
+> - All five waves built, merged and deployed. CLI 0.5.12+.
+> - **§3.4 REVERSED on the live case, and it was the wrong call.** v1.0 refused
+>   every action on a live session and deferred forking. But the rule was never
+>   "leave live sessions alone" — it was "do not put a second process on one
+>   transcript", and **planning touches no transcript at all**. So a live
+>   session can now be PLANNED and still cannot be CONTINUED. Live is the state
+>   a busy fleet is mostly in, and refusing the safe mode along with the unsafe
+>   one withheld the feature exactly when it is most useful.
+> - **Forking is dropped rather than deferred.** `--fork-session` was verified
+>   to work (new id, context retained) but mints a second cockpit row for what a
+>   person thinks of as one piece of work. Planning a live session gets the same
+>   outcome — waves you approve — without that reconciliation problem.
+> - §7.1 fixed: the applier required `--session-api-url`, so a bridge started
+>   with `--plan --cockpit-url` could take the wheel in NEITHER mode. Planning
+>   never touches the runner; gating both on it was simply wrong.
+> - §3.5 built: `resume` carries a mode, and planning goes through the conductor.
+> - **Not proven:** see §11.
 
 > **Depends on:** `21-FLEET-INTROSPECTION.md` (the scanner, `origin='adopted'`,
 > DECISION A), `22-PROJECTS-AND-OBSERVATION.md` (observation, `projects`), and
@@ -125,16 +144,17 @@ machine polls, and the machine is still the only thing that starts work.
 `claude --resume <uuid>` continues the same session and appends to the same
 transcript. `--fork-session` branches a new one.
 
-| Session state | Action | Why |
+| Session state | `continue` | `plan` |
 | --- | --- | --- |
-| **held** (transcript quiet) | `--resume` | Same UUID → same `adoptionKey` → the existing cockpit row keeps updating. Continuity is free. |
-| **live** | `--fork-session` | Two processes appending to one transcript would corrupt it. This is a correctness rule, not a courtesy. |
+| **held** (transcript quiet) | `--resume` — same UUID, same `adoptionKey`, the existing row keeps updating | yes |
+| **live** | **refused** — two processes on one transcript corrupts it | **yes** — it touches no transcript |
 
-**v1 ships the held case only.** Forking a live session produces a *new* UUID,
-therefore a new `adoptionKey`, therefore a second row for what a person thinks
-of as one piece of work — and reconciling that is a design problem worth its own
-decision rather than a footnote here. The live case returns a clear refusal
-(§6.2) until then.
+> **Corrected in v1.1.** v1.0 refused both on a live session and planned to add
+> `--fork-session` later. That read the rule too broadly: the constraint is
+> about the *transcript*, and planning never opens it. Forking was then dropped
+> entirely — it works, but a new UUID means a new `adoptionKey` means a second
+> cockpit row for one piece of work, and planning reaches the same outcome
+> without that.
 
 ### 3.5 The handoff is to the planner, not to a prompt box
 
@@ -236,7 +256,8 @@ reason as before.
 
 | Condition | Response |
 | --- | --- |
-| Session still live | 409 `session_live` — "still running; open it in Claude Code, or wait for it to stop" |
+| Session live **and** mode is `continue` | 409 `session_live` — "still running, so continuing would put two agents on one transcript; open it in Claude Code, or plan the work instead" |
+| Session live **and** mode is `plan` | allowed |
 | No machine online for the repo | 409 `no_machine` — the bridge must be connected to act |
 | Session already driven and running | 409 `already_driven` |
 
@@ -305,7 +326,7 @@ stays where it is — with the operator who started the bridge.
 | T23-AC-01 | A held adopted session resumes from the cockpit and reports status as a DevPilot-owned run. |
 | T23-AC-02 | The resumed run appends to the SAME transcript, so the cockpit row is continuous rather than duplicated. |
 | T23-AC-03 | A `resume` carrying a message reaches the agent as its prompt. |
-| T23-AC-04 | A live session refuses with `session_live` and offers Open instead. |
+| T23-AC-04 | A live session refuses `continue` with `session_live`, and ACCEPTS `plan`. |
 | T23-AC-05 | Every non-`resume` command against an adopted session still 409s. |
 | T23-AC-06 | The Claude session UUID appears in no request body and no hosted column. |
 | T23-AC-07 | A bridge without `--plan` still polls and applies `resume`. |
@@ -325,11 +346,44 @@ stays where it is — with the operator who started the bridge.
 
 ---
 
+## 11. What is proven, and what is not
+
+**Proven against the real CLI**, not assumed — the load-bearing assumption of
+the whole design:
+
+```
+run1 session_id: 4487eba7-…  → ALPHA
+run2 session_id: 4487eba7-…  → ALPHA     (same id, context retained)
+user turns in ONE transcript: 2
+```
+
+`--fork-session` was checked the same way (new id, context retained) before
+being dropped for the reason in §3.4.
+
+**Proven by test.** 19 applier tests covering every refusal path, 12 on the
+hosted guard. The narrow exception is asserted directly: admitting `resume` must
+not admit `approve`/`replan`/`abort`.
+
+**NOT proven — carried forward:**
+
+- **No resume has run end to end against a live bridge.** The applier is
+  unit-tested against a stubbed runner and cockpit; nobody has clicked the
+  button and watched an agent pick a session up. That is the next thing worth
+  doing and the only claim in this TRD that rests on reasoning rather than
+  observation.
+- **The planning brief has never been read by the conductor.** `buildSessionBrief`
+  is asserted for shape and ordering, not for whether the planner produces a
+  good decomposition from it.
+- **`metadata.driven` is written by nothing yet.** The cockpit reads it to pick
+  the "already driven" state, and no code path sets it — so a resumed session
+  will not show that state until it does.
+
 ## Decisions other TRDs must respect
 
 - **Take-the-wheel and send-message are one command.** Do not split them.
 - **The Claude session UUID stays on the machine.** Any future feature needing
   to address a local session addresses it by `adoptionKey`.
-- **A live session is never resumed in place.** Fork or refuse.
+- **A live session is never CONTINUED in place.** Planning it is fine and
+  expected; only spawning a second process on its transcript is forbidden.
 - **The handoff is to the planner.** If a future surface adds free-form chat to
   a driven session, it is competing with Claude Code and should say why.

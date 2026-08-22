@@ -2261,14 +2261,21 @@ var ResumeApplier = class {
       await this.fail(command, "That session\u2019s transcript is no longer on this machine.");
       return;
     }
-    if (Date.now() - observation.lastActivityMs < this.liveWithinMs) {
+    if (command.payload?.mode !== "plan" && Date.now() - observation.lastActivityMs < this.liveWithinMs) {
       await this.fail(
         command,
-        "That session is still running. Two agents writing one transcript would corrupt it \u2014 open it in Claude Code, or wait for it to stop."
+        "That session is still running, so continuing it would put two agents on one transcript. Open it in Claude Code, or plan the work instead."
       );
       return;
     }
     const message = command.payload?.message?.trim();
+    if (command.payload?.mode !== "plan" && !this.opts.sessionApiUrl) {
+      await this.fail(
+        command,
+        "Continuing a session needs the local session runner. Start one with `devpilot session-runner` and reconnect with --session-api-url, or use Plan it."
+      );
+      return;
+    }
     if (command.payload?.mode === "plan") {
       if (!this.opts.cockpitUrl) {
         await this.fail(
@@ -2634,7 +2641,7 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
     }
     observer.start();
   }
-  const resumeApplier = observer && options.sessionApiUrl ? new ResumeApplier({
+  const resumeApplier = observer && (options.sessionApiUrl || options.cockpitUrl) ? new ResumeApplier({
     client: client2,
     sessionApiUrl: options.sessionApiUrl,
     sessionApiKey: options.sessionApiKey,

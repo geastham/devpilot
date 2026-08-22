@@ -117,13 +117,49 @@ describe('ResumeApplier', () => {
   });
 
   /** T23-AC-04 — the correctness rule, not a courtesy. */
-  it('refuses a session that is still live', async () => {
+  it('refuses to CONTINUE a session that is still live', async () => {
     const target = { ...held(), transcriptPath: transcript(5_000) };
     await applier(target).apply(command());
 
     expect(posts, 'nothing may be spawned against a live transcript').toHaveLength(0);
     expect(acks[0].status).toBe('failed');
     expect(acks[0].error).toContain('still running');
+  });
+
+  /**
+   * The rule was never "leave live sessions alone", it was "do not put a second
+   * process on one transcript". Planning touches no transcript, and a session
+   * you are watching run is exactly when a plan is most useful.
+   */
+  it('DOES plan a session that is still live', async () => {
+    const cockpit = vi.fn(async (url: string) =>
+      String(url).endsWith('/api/items')
+        ? new Response(JSON.stringify({ id: 'item_1' }), { status: 200 })
+        : new Response(JSON.stringify({ awaiting: 'review' }), { status: 200 }),
+    ) as never;
+
+    const live = { ...held(), transcriptPath: transcript(5_000) };
+    await applier(live, cockpit, 'http://127.0.0.1:3000').apply(
+      command({ payload: { adoptionKey: 'a'.repeat(64), mode: 'plan' } }),
+    );
+
+    expect(acks[0].status).toBe('applied');
+    expect(posts.some((p) => p.url.includes('/v1/sessions')), 'still no agent on it').toBe(false);
+  });
+
+  it('refuses to continue without a session runner, and says to plan instead', async () => {
+    const noRunner = new ResumeApplier({
+      client: client(),
+      callbackUrl: 'https://devpilot.sh/api/orchestrator',
+      cockpitUrl: 'http://127.0.0.1:3000',
+      resolveTarget: () => held(),
+      fetchImpl: (() => {
+        throw new Error('should not be called');
+      }) as never,
+    });
+    await noRunner.apply(command());
+    expect(acks[0].status).toBe('failed');
+    expect(acks[0].error).toContain('session-runner');
   });
 
   /** T23-AC-10 — the ledger is per-machine, and saying so beats spinning. */
