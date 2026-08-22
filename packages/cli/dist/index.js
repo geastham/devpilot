@@ -1804,7 +1804,7 @@ async function runScanPipeline(options) {
   });
   let modelTitles = 0;
   if (options.summarize && scan.candidates.length > 0 && process.env.ANTHROPIC_API_KEY) {
-    const jobs = scan.candidates.map((candidate) => {
+    const jobs = scan.candidates.filter((c) => !options.skipSummaryFor?.has(c.adoptionKey)).map((candidate) => {
       const observation = observationFor(candidate, scan);
       return observation ? { candidate, observation } : null;
     }).filter((j) => j !== null);
@@ -1903,6 +1903,7 @@ function renderPreview(rows, result) {
 // src/commands/bridge/observer.ts
 var DEFAULT_INTERVAL_MS = 6e4;
 var DEFAULT_SINCE_MS = 24 * 60 * 60 * 1e3;
+var DEFAULT_SUMMARISE_BUDGET = 10;
 var SessionObserver = class {
   constructor(config) {
     this.config = config;
@@ -1910,8 +1911,19 @@ var SessionObserver = class {
     this.running = false;
     /** Adoption keys reported live on the previous sweep. */
     this.lastLive = /* @__PURE__ */ new Set();
+    /**
+     * Adoption keys this process has already reported once.
+     *
+     * A summary is worth paying for exactly once per session: it is what
+     * `/api/sessions/:id/promote` uses as the body of the Linear issue it drafts,
+     * and a sweep with no summary produced tickets describing nothing. Paying for
+     * it every 60 seconds would be absurd; paying for it never left every ticket
+     * thin. First sight is the right moment.
+     */
+    this.seen = /* @__PURE__ */ new Set();
     this.intervalMs = config.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.sinceMs = config.sinceMs ?? DEFAULT_SINCE_MS;
+    this.summariseBudget = config.summariseBudget ?? DEFAULT_SUMMARISE_BUDGET;
   }
   start() {
     if (this.timer) return;
@@ -1950,12 +1962,19 @@ var SessionObserver = class {
         allRepos: this.config.allRepos !== false,
         sinceMs: this.sinceMs,
         includePaths: true,
-        maxSummaries: 0,
-        // No model call on a sweep that runs every minute. The client's own
-        // session titles are already good, and paying per minute for a nicer
-        // one would be an absurd trade.
-        summarize: false
+        /**
+         * Summarise only what this process has not seen before, and only a
+         * handful per sweep.
+         *
+         * The first sweep after a connect is the expensive one — everything is
+         * new — so it is capped, and the remainder pick up their summary on
+         * later passes rather than all at once.
+         */
+        maxSummaries: this.summariseBudget,
+        summarize: true,
+        skipSummaryFor: this.seen
       });
+      result.candidates.forEach((c) => this.seen.add(c.adoptionKey));
       const live = new Set(result.candidates.filter((c) => c.live).map((c) => c.adoptionKey));
       const ended = [...this.lastLive].filter((key) => !live.has(key));
       const response = await this.config.client.reportObservations({
