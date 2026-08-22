@@ -24,6 +24,11 @@ export interface PipelineOptions {
   maxSummaries: number;
   /** Skip the model entirely. Discovery-only paths do not need titles. */
   summarize: boolean;
+  /**
+   * Adoption keys that already have a summary somewhere else, so paying for
+   * one again is waste. The observer passes everything it has reported before.
+   */
+  skipSummaryFor?: Set<string>;
   onWarn?: (message: string) => void;
 }
 
@@ -85,6 +90,7 @@ export async function runScanPipeline(options: PipelineOptions): Promise<Pipelin
    */
   if (options.summarize && scan.candidates.length > 0 && process.env.ANTHROPIC_API_KEY) {
     const jobs = scan.candidates
+      .filter((c) => !options.skipSummaryFor?.has(c.adoptionKey))
       .map((candidate) => {
         // Re-probe rather than threading observations through the scan's return
         // type: the scanner's contract is wire values, and widening it to carry

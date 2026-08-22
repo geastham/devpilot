@@ -32,6 +32,8 @@ export interface ObserverConfig {
   /** Observe every repo, not only routed ones. Default true — see below. */
   allRepos?: boolean;
   intervalMs?: number;
+  /** Model-written summaries per sweep. Sessions beyond it wait for the next. */
+  summariseBudget?: number;
   /** How far back a session counts as worth reporting. */
   sinceMs?: number;
   onLog?: (line: string) => void;
@@ -39,18 +41,32 @@ export interface ObserverConfig {
 
 const DEFAULT_INTERVAL_MS = 60_000;
 const DEFAULT_SINCE_MS = 24 * 60 * 60 * 1000;
+/** Model-written summaries per sweep. Bounded so a big fleet does not spike. */
+const DEFAULT_SUMMARISE_BUDGET = 10;
 
 export class SessionObserver {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   /** Adoption keys reported live on the previous sweep. */
   private lastLive = new Set<string>();
+  /**
+   * Adoption keys this process has already reported once.
+   *
+   * A summary is worth paying for exactly once per session: it is what
+   * `/api/sessions/:id/promote` uses as the body of the Linear issue it drafts,
+   * and a sweep with no summary produced tickets describing nothing. Paying for
+   * it every 60 seconds would be absurd; paying for it never left every ticket
+   * thin. First sight is the right moment.
+   */
+  private seen = new Set<string>();
   private readonly intervalMs: number;
   private readonly sinceMs: number;
+  private readonly summariseBudget: number;
 
   constructor(private readonly config: ObserverConfig) {
     this.intervalMs = config.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.sinceMs = config.sinceMs ?? DEFAULT_SINCE_MS;
+    this.summariseBudget = config.summariseBudget ?? DEFAULT_SUMMARISE_BUDGET;
   }
 
   start(): void {
@@ -93,12 +109,25 @@ export class SessionObserver {
         allRepos: this.config.allRepos !== false,
         sinceMs: this.sinceMs,
         includePaths: true,
-        maxSummaries: 0,
-        // No model call on a sweep that runs every minute. The client's own
-        // session titles are already good, and paying per minute for a nicer
-        // one would be an absurd trade.
-        summarize: false,
+        /**
+         * Summarise only what this process has not seen before, and only a
+         * handful per sweep.
+         *
+         * The first sweep after a connect is the expensive one — everything is
+         * new — so it is capped, and the remainder pick up their summary on
+         * later passes rather than all at once.
+         */
+        maxSummaries: this.summariseBudget,
+        summarize: true,
+        skipSummaryFor: this.seen,
       });
+
+      /**
+       * Nothing is stripped from already-seen candidates here: they simply
+       * never got a summary this pass, and the server's COALESCE upsert treats
+       * an absent summary as "leave what you have" rather than an erasure.
+       */
+      result.candidates.forEach((c) => this.seen.add(c.adoptionKey));
 
       const live = new Set(result.candidates.filter((c) => c.live).map((c) => c.adoptionKey));
       const ended = [...this.lastLive].filter((key) => !live.has(key));
