@@ -155,19 +155,56 @@ export function readHead(path: string, bytes: number = HEAD_BYTES, offset = 0): 
   }
 }
 
+/** How much of an oversized user prompt to recover for a title. */
+const LARGE_LINE_PROMPT_CHARS = 400;
+
 /**
- * Pull `cwd` and `gitBranch` out of a line too large to be worth parsing.
+ * Pull the few flat fields worth having out of a line too large to parse.
  *
- * Deliberately only these two: they are flat string fields with no nesting, so
- * a regex is exact for them, and they are the only fields adoption needs from
- * an attachment-bearing entry. Nothing here reads `content`.
+ * `cwd` and `gitBranch` are flat strings with no nesting, so a regex is exact
+ * for them.
+ *
+ * ## Why the prompt prefix is here too
+ *
+ * Skipping oversized lines entirely was wrong, and it showed up on the board.
+ * A session whose first human prompt is a large paste — 178 KB in the case
+ * that exposed this — had that single line skipped, found no title anywhere,
+ * and fell back to `Agent session f2565e47`. Placed on Linear that becomes a
+ * ticket nobody can identify.
+ *
+ * So a bounded prefix of `message.content` is recovered when the entry is a
+ * user message. Bounded twice over: the regex itself cannot match more than
+ * `LARGE_LINE_PROMPT_CHARS`, so a 178 KB string is never materialised, and the
+ * result is condensed to a title afterwards.
+ *
+ * This reads no more than the normal path already does — the first human
+ * prompt is exactly what `heuristicTitle` uses — it just stops losing it when
+ * the prompt is big. Nothing here reads assistant output or tool results.
  */
-function scrapeLargeLine(line: string): { cwd?: string; gitBranch?: string } {
+function scrapeLargeLine(line: string): {
+  cwd?: string;
+  gitBranch?: string;
+  userPrompt?: string;
+} {
+  const unescape = (v: string) => v.replace(/\\n/g, ' ').replace(/\\(.)/g, '$1');
+
   const cwd = line.match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1];
   const gitBranch = line.match(/"gitBranch"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1];
+
+  let userPrompt: string | undefined;
+  if (/"type"\s*:\s*"user"/.test(line)) {
+    // Bounded by construction: at most LARGE_LINE_PROMPT_CHARS characters are
+    // captured, whatever the size of the line.
+    const m = line.match(
+      new RegExp(`"content"\\s*:\\s*"((?:[^"\\\\]|\\\\.){1,${LARGE_LINE_PROMPT_CHARS}})`),
+    );
+    if (m) userPrompt = unescape(m[1]).trim() || undefined;
+  }
+
   return {
-    cwd: cwd ? cwd.replace(/\\(.)/g, '$1') : undefined,
-    gitBranch: gitBranch ? gitBranch.replace(/\\(.)/g, '$1') : undefined,
+    cwd: cwd ? unescape(cwd) : undefined,
+    gitBranch: gitBranch ? unescape(gitBranch) : undefined,
+    userPrompt,
   };
 }
 
@@ -284,6 +321,12 @@ export function probeTranscript(
       if (!cwd && scraped.cwd) cwd = scraped.cwd;
       if (!gitBranch && scraped.gitBranch && scraped.gitBranch !== 'HEAD') {
         gitBranch = scraped.gitBranch;
+      }
+      if (!firstHumanPrompt && scraped.userPrompt) {
+        firstHumanPrompt = scraped.userPrompt;
+        if (DEVPILOT_PROMPT_MARKERS.some((m) => scraped.userPrompt!.includes(m))) {
+          looksDevPilotOwned = true;
+        }
       }
       parsedEntries++;
       return;

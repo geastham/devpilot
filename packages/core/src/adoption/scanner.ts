@@ -168,15 +168,30 @@ function isLive(
   );
 }
 
-/** One line, no newlines, cut on a word boundary. */
+/**
+ * One line, no newlines, cut on a word boundary, and NEVER longer than `max`.
+ *
+ * The ellipsis counts. An earlier version appended it after cutting to `max`
+ * and so returned `max + 1` characters, which the wire schema caps at exactly
+ * 120 — so a title whose first 120 characters contain no space (a pasted URL,
+ * a base64 blob, a long identifier) was rejected by the server as invalid
+ * rather than shown. Reserve the character before cutting.
+ */
 export function condenseTitle(text: string, max: number): string {
   const flat = text.replace(/\s+/g, ' ').trim();
   if (flat.length <= max) return flat;
+
   const cut = flat.slice(0, max);
   const lastSpace = cut.lastIndexOf(' ');
-  // Only respect a word boundary if it is not absurdly early — a single
-  // 200-character token would otherwise collapse to nothing.
-  const body = lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut;
+
+  // Cutting at a word boundary already leaves room: `lastSpace <= max - 1`, so
+  // the body plus one ellipsis is at most `max`.
+  //
+  // Only respect that boundary if it is not absurdly early — a single
+  // 200-character token would otherwise collapse to nothing. In that case
+  // there is no boundary to exploit, so a character has to be given back to
+  // the ellipsis explicitly.
+  const body = lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut.slice(0, max - 1);
   return `${body.trimEnd()}…`;
 }
 
