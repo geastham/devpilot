@@ -11,7 +11,7 @@ import { Command as Command18 } from "commander";
 import updateNotifier from "update-notifier";
 
 // src/version.ts
-var VERSION = "0.5.13";
+var VERSION = "0.5.14";
 
 // src/commands/init.ts
 import { Command } from "commander";
