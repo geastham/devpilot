@@ -42,7 +42,7 @@ var import_commander18 = require("commander");
 var import_update_notifier = __toESM(require("update-notifier"));
 
 // src/version.ts
-var VERSION = "0.5.8";
+var VERSION = "0.5.9";
 
 // src/commands/init.ts
 var import_commander = require("commander");
@@ -1807,8 +1807,10 @@ var AdoptionWatcher = class {
               toolCalls: entry.tail.seq,
               filesTouched: [...files].slice(0, 500),
               currentAction: latest.path ? `${latest.tool} \xB7 ${latest.path.split("/").slice(-2).join("/")}` : latest.tool,
-              elapsedMs: entry.tail.activeMs,
-              idleMs: Math.max(0, now - mtimeMs)
+              elapsedMs: Math.round(entry.tail.activeMs),
+              // mtimeMs is fractional on macOS; the schema's int() refuses a
+              // float and the client swallows the 400 — a silently empty table.
+              idleMs: Math.round(Math.max(0, now - mtimeMs))
             });
         }
         try {

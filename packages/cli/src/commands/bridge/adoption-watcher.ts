@@ -184,8 +184,10 @@ export class AdoptionWatcher {
             currentAction: latest.path
               ? `${latest.tool} · ${latest.path.split('/').slice(-2).join('/')}`
               : latest.tool,
-            elapsedMs: entry.tail.activeMs,
-            idleMs: Math.max(0, now - mtimeMs),
+            elapsedMs: Math.round(entry.tail.activeMs),
+            // mtimeMs is fractional on macOS; the schema's int() refuses a
+            // float and the client swallows the 400 — a silently empty table.
+            idleMs: Math.round(Math.max(0, now - mtimeMs)),
           });
         }
 
