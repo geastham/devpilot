@@ -148,7 +148,15 @@ export class AdoptionWatcher {
         continue;
       }
 
-      if (mtimeMs > entry.lastMtimeMs) {
+      /**
+       * First sight of a session streams its backlog even without growth.
+       * The tailer used to run only when the transcript grew, so a session
+       * that went quiet before the bridge started never streamed at all —
+       * its watch view sat empty while 1,800 events sat on disk.
+       */
+      const neverDerived = entry.tail === undefined;
+      if (mtimeMs > entry.lastMtimeMs || neverDerived) {
+        const grew = mtimeMs > entry.lastMtimeMs;
         entry.lastMtimeMs = mtimeMs;
         entry.lastReportedAt = new Date(now).toISOString();
 
@@ -191,6 +199,7 @@ export class AdoptionWatcher {
           });
         }
 
+        if (grew) {
         try {
           await this.config.client.reportSessionStatus(entry.sessionId, {
             status: 'running',
@@ -203,6 +212,7 @@ export class AdoptionWatcher {
           );
         }
         continue;
+        }
       }
 
       if (now - mtimeMs < this.settleAfterMs) continue;

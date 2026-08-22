@@ -42,7 +42,7 @@ var import_commander18 = require("commander");
 var import_update_notifier = __toESM(require("update-notifier"));
 
 // src/version.ts
-var VERSION = "0.5.9";
+var VERSION = "0.5.10";
 
 // src/commands/init.ts
 var import_commander = require("commander");
@@ -1787,7 +1787,9 @@ var AdoptionWatcher = class {
         this.persist();
         continue;
       }
-      if (mtimeMs > entry.lastMtimeMs) {
+      const neverDerived = entry.tail === void 0;
+      if (mtimeMs > entry.lastMtimeMs || neverDerived) {
+        const grew = mtimeMs > entry.lastMtimeMs;
         entry.lastMtimeMs = mtimeMs;
         entry.lastReportedAt = new Date(now).toISOString();
         const canStream = typeof this.config.client.streamEvents === "function";
@@ -1813,18 +1815,20 @@ var AdoptionWatcher = class {
               idleMs: Math.round(Math.max(0, now - mtimeMs))
             });
         }
-        try {
-          await this.config.client.reportSessionStatus(entry.sessionId, {
-            status: "running",
-            progressPercent: 0,
-            message: `Still running on this machine \u2014 ${elapsed(entry.startedAt, now)} so far`
-          });
-        } catch (err) {
-          this.config.onLog?.(
-            `could not report ${entry.identifier}: ${err instanceof Error ? err.message : err}`
-          );
+        if (grew) {
+          try {
+            await this.config.client.reportSessionStatus(entry.sessionId, {
+              status: "running",
+              progressPercent: 0,
+              message: `Still running on this machine \u2014 ${elapsed(entry.startedAt, now)} so far`
+            });
+          } catch (err) {
+            this.config.onLog?.(
+              `could not report ${entry.identifier}: ${err instanceof Error ? err.message : err}`
+            );
+          }
+          continue;
         }
-        continue;
       }
       if (now - mtimeMs < this.settleAfterMs) continue;
       try {
