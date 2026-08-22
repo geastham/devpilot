@@ -36,6 +36,21 @@ export interface CreateSessionRequest {
    * the agent instead.
    */
   sessionLink?: string;
+  /**
+   * Continue an existing Claude Code conversation instead of starting a fresh
+   * one — TRD 23 §3.4.
+   *
+   * This is what "take the wheel" is made of. A session DevPilot did not spawn
+   * cannot be steered, but a session it RESUMES is one it spawned, so every
+   * callback, stream event and plan gate already built applies to it.
+   *
+   * The uuid is resolved on this machine from an `adoptionKey` and never
+   * travels: the hosted plane cannot name a local session (TRD 23 §3.3).
+   *
+   * Only ever a HELD session. Resuming one that is still being written to
+   * would have two processes appending to a single transcript.
+   */
+  resumeSessionId?: string;
   metadata?: Record<string, unknown>;
 }
 

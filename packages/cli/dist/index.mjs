@@ -1568,10 +1568,17 @@ var CommandApplier = class {
       return;
     }
     for (const command of commands) {
-      await this.apply(command);
+      await this.applyOne(command);
     }
   }
-  async apply(command) {
+  /**
+   * Apply one command that has already been polled.
+   *
+   * Public since TRD 23: the bridge now polls ONCE and routes, because
+   * `resume` is applied by a different applier and two pollers would race to
+   * claim the same rows.
+   */
+  async applyOne(command) {
     const itemId = this.opts.resolveItemId(command.sessionId);
     if (!itemId) {
       await this.opts.client.acknowledgeCommands(
@@ -1991,9 +1998,27 @@ var SessionObserver = class {
      * thin. First sight is the right moment.
      */
     this.seen = /* @__PURE__ */ new Set();
+    /**
+     * `adoptionKey → where that conversation lives on this machine`.
+     *
+     * The resolution table for "take the wheel" (TRD 23 §3.3). The hosted plane
+     * can only point at a row; this is the state that says what that means here,
+     * and it never leaves the process.
+     */
+    this.targets = /* @__PURE__ */ new Map();
     this.intervalMs = config.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.sinceMs = config.sinceMs ?? DEFAULT_SINCE_MS;
     this.summariseBudget = config.summariseBudget ?? DEFAULT_SUMMARISE_BUDGET;
+  }
+  /**
+   * Where a conversation lives on this machine, by adoption key.
+   *
+   * Undefined for anything this process has not observed — which is the honest
+   * answer, and the reason a resume for another machine's session refuses
+   * rather than guessing.
+   */
+  targetFor(adoptionKey) {
+    return this.targets.get(adoptionKey);
   }
   start() {
     if (this.timer) return;
@@ -2044,7 +2069,17 @@ var SessionObserver = class {
         summarize: true,
         skipSummaryFor: this.seen
       });
-      result.candidates.forEach((c) => this.seen.add(c.adoptionKey));
+      result.candidates.forEach((c) => {
+        this.seen.add(c.adoptionKey);
+        const at = result.transcriptPaths.get(c.adoptionKey);
+        if (at) {
+          this.targets.set(c.adoptionKey, {
+            transcriptPath: at.transcriptPath,
+            sessionUuid: at.sessionUuid,
+            repo: c.repo
+          });
+        }
+      });
       const live = new Set(result.candidates.filter((c) => c.live).map((c) => c.adoptionKey));
       const ended = [...this.lastLive].filter((key) => !live.has(key));
       const response = await this.config.client.reportObservations({
@@ -2068,9 +2103,109 @@ var SessionObserver = class {
   }
 };
 
+// src/commands/bridge/resume-applier.ts
+import { adoption as adoption2 } from "@devpilot.sh/core";
+var DEFAULT_LIVE_WITHIN_MS = 5 * 6e4;
+var ResumeApplier = class {
+  constructor(opts) {
+    this.opts = opts;
+    this.log = opts.onLog ?? (() => {
+    });
+    this.doFetch = opts.fetchImpl ?? fetch;
+    this.liveWithinMs = opts.liveWithinMs ?? DEFAULT_LIVE_WITHIN_MS;
+  }
+  /** Whether this applier handles a given command. */
+  static handles(command) {
+    return command.command === "resume";
+  }
+  /**
+   * Apply one resume.
+   *
+   * Acknowledges only AFTER the runner accepts, matching the ordering rule in
+   * `command-applier.ts`: a decision a person made must not be silently dropped
+   * because a laptop was asleep. The cost is that an accepted-but-unacknowledged
+   * resume is retried, which the runner's own idempotency on `sessionId`
+   * absorbs rather than starting a second agent on the same repo.
+   */
+  async apply(command) {
+    const adoptionKey = command.payload?.adoptionKey;
+    if (!adoptionKey) {
+      await this.fail(
+        command,
+        "That resume carried no session key, so this machine cannot tell which conversation it means."
+      );
+      return;
+    }
+    const target = this.opts.resolveTarget(adoptionKey);
+    if (!target) {
+      await this.fail(
+        command,
+        "This machine is not tracking that session, so there is nothing to resume. It may belong to a different machine in the fleet."
+      );
+      return;
+    }
+    const observation = adoption2.probeTranscript(target.transcriptPath, target.sessionUuid);
+    if (!observation) {
+      await this.fail(command, "That session\u2019s transcript is no longer on this machine.");
+      return;
+    }
+    if (Date.now() - observation.lastActivityMs < this.liveWithinMs) {
+      await this.fail(
+        command,
+        "That session is still running. Two agents writing one transcript would corrupt it \u2014 open it in Claude Code, or wait for it to stop."
+      );
+      return;
+    }
+    const message = command.payload?.message?.trim();
+    try {
+      const res = await this.doFetch(`${this.opts.sessionApiUrl.replace(/\/$/, "")}/v1/sessions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...this.opts.sessionApiKey ? { authorization: `Bearer ${this.opts.sessionApiKey}` } : {}
+        },
+        body: JSON.stringify({
+          sessionId: command.sessionId,
+          repo: target.repo,
+          /**
+           * `--resume` continues the conversation, so a prompt is optional in a
+           * way it never is for a fresh dispatch. With nothing to say, ask the
+           * agent to take stock rather than sending an empty string — an empty
+           * turn produces an empty answer, and the point of picking this up is
+           * to find out where it got to.
+           */
+          prompt: message || "Summarise where this session got to and what remains, then stop and wait.",
+          resumeSessionId: target.sessionUuid,
+          callbackUrl: this.opts.callbackUrl
+        })
+      });
+      if (!res.ok && res.status !== 409) {
+        const body = await res.text().catch(() => "");
+        await this.fail(
+          command,
+          `The local session runner refused: ${res.status} ${body.slice(0, 200)}`
+        );
+        return;
+      }
+      await this.opts.client.acknowledgeCommands([command.id], "applied");
+      this.log(
+        `took the wheel on ${target.repo}${message ? " with an instruction" : ""} \u2014 it now reports as a DevPilot run`
+      );
+    } catch (err) {
+      this.log(
+        `could not reach the session runner (${err instanceof Error ? err.message : String(err)}) \u2014 the resume stays queued`
+      );
+    }
+  }
+  async fail(command, reason) {
+    await this.opts.client.acknowledgeCommands([command.id], "failed", reason);
+    this.log(`resume refused \u2014 ${reason}`);
+  }
+};
+
 // src/commands/bridge/introspect.ts
 import chalk9 from "chalk";
-import { adoption as adoption2 } from "@devpilot.sh/core";
+import { adoption as adoption3 } from "@devpilot.sh/core";
 async function runIntrospection(options) {
   let result;
   try {
@@ -2093,7 +2228,7 @@ async function runIntrospection(options) {
     return;
   }
   const live = result.discovered.reduce((n, r) => n + r.liveSessionCount, 0);
-  const owners = adoption2.groupByOwner(result.discovered);
+  const owners = adoption3.groupByOwner(result.discovered);
   console.log(
     chalk9.cyan(
       `   Looked around this machine: ${result.projectDirCount} projects, ${owners.size} owner${owners.size === 1 ? "" : "s"}, ${result.discovered.reduce((n, r) => n + r.sessionCount, 0)} sessions`
@@ -2315,11 +2450,6 @@ var connectCommand = new Command6("connect").description("Connect this machine t
     resolveItemId: (sessionId) => conductorWatcher.itemFor(sessionId),
     onLog: (line) => console.log(chalk10.blue(`   ${line}`))
   }) : null;
-  if (commandApplier) {
-    const tick = () => void commandApplier.sweep();
-    setInterval(tick, 15e3).unref?.();
-    tick();
-  }
   const readopted = conductorWatcher?.restore() ?? 0;
   if (readopted > 0) {
     console.log(
@@ -2359,6 +2489,51 @@ var connectCommand = new Command6("connect").description("Connect this machine t
       console.log("");
     }
     observer.start();
+  }
+  const resumeApplier = observer && options.sessionApiUrl ? new ResumeApplier({
+    client: client2,
+    sessionApiUrl: options.sessionApiUrl,
+    sessionApiKey: options.sessionApiKey,
+    callbackUrl: `${client2.hostedUrl()}/api/orchestrator`,
+    resolveTarget: (key) => {
+      const at = observer.targetFor(key);
+      return at ? { ...at, cwd: "" } : void 0;
+    },
+    onLog: (line) => console.log(chalk10.blue(`   ${line}`))
+  }) : null;
+  if (commandApplier || resumeApplier) {
+    const pump = async () => {
+      let commands;
+      try {
+        commands = await client2.pollSessionCommands();
+      } catch {
+        return;
+      }
+      for (const command of commands) {
+        if (ResumeApplier.handles(command)) {
+          if (resumeApplier) {
+            await resumeApplier.apply(command);
+          } else {
+            await client2.acknowledgeCommands(
+              [command.id],
+              "failed",
+              "This machine has no session runner, so it cannot take the wheel. Start one with `devpilot session-runner` and reconnect."
+            );
+          }
+        } else if (commandApplier) {
+          await commandApplier.applyOne(command);
+        } else {
+          await client2.acknowledgeCommands(
+            [command.id],
+            "failed",
+            "This bridge is not running a conductor, so it cannot apply that decision."
+          );
+        }
+      }
+    };
+    const tick = () => void pump();
+    setInterval(tick, 15e3).unref?.();
+    tick();
   }
   if (options.discover !== false) {
     await runIntrospection({
@@ -3181,7 +3356,7 @@ function sessionPreamble() {
   ].join("\n");
 }
 async function runClaudeSession(options) {
-  const { workdir, prompt: prompt2, sessionLink: sessionLink2, model, claudePath, permissionMode, timeoutMs, onLog, onSpawn } = options;
+  const { workdir, prompt: prompt2, sessionLink: sessionLink2, model, claudePath, permissionMode, timeoutMs, resumeSessionId, onLog, onSpawn } = options;
   const before = await snapshot(workdir);
   const startedAt = Date.now();
   const args = [
@@ -3193,6 +3368,7 @@ async function runClaudeSession(options) {
     permissionMode
   ];
   if (model) args.push("--model", model);
+  if (resumeSessionId) args.push("--resume", resumeSessionId);
   let mcpDir;
   let effectivePrompt = prompt2;
   if (sessionLink2) {
@@ -3425,7 +3601,15 @@ var SessionRunner = class {
         sessionLink: request.sessionLink,
         model: request.model,
         claudePath: this.config.claudePath,
+        /**
+         * Permission mode is the OPERATOR's, never the caller's — TRD 23 S-04.
+         *
+         * A request that could raise it would let someone in the cockpit
+         * escalate what an agent may do on another person's laptop. It stays
+         * with whoever started the bridge.
+         */
         permissionMode: this.config.permissionMode,
+        resumeSessionId: request.resumeSessionId,
         timeoutMs: this.config.timeoutMs,
         onLog: (line) => this.config.log(`[${session.externalSessionId}] ${line}`),
         onSpawn: (kill) => {

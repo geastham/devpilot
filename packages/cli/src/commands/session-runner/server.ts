@@ -175,7 +175,15 @@ export class SessionRunner {
         sessionLink: request.sessionLink,
         model: request.model,
         claudePath: this.config.claudePath,
+        /**
+         * Permission mode is the OPERATOR's, never the caller's — TRD 23 S-04.
+         *
+         * A request that could raise it would let someone in the cockpit
+         * escalate what an agent may do on another person's laptop. It stays
+         * with whoever started the bridge.
+         */
         permissionMode: this.config.permissionMode,
+        resumeSessionId: request.resumeSessionId,
         timeoutMs: this.config.timeoutMs,
         onLog: (line) => this.config.log(`[${session.externalSessionId}] ${line}`),
         onSpawn: (kill) => {
