@@ -60,7 +60,6 @@ function applier(
   return new ResumeApplier({
     client: client(),
     sessionApiUrl: 'http://127.0.0.1:3900',
-    callbackUrl: 'https://devpilot.sh/api/orchestrator',
     cockpitUrl,
     resolveTarget: () => target,
     fetchImpl: ((url: string, init: RequestInit) => {
@@ -150,7 +149,6 @@ describe('ResumeApplier', () => {
   it('refuses to continue without a session runner, and says to plan instead', async () => {
     const noRunner = new ResumeApplier({
       client: client(),
-      callbackUrl: 'https://devpilot.sh/api/orchestrator',
       cockpitUrl: 'http://127.0.0.1:3000',
       resolveTarget: () => held(),
       fetchImpl: (() => {
@@ -281,6 +279,17 @@ describe('ResumeApplier', () => {
   it('defaults to continuing when no mode is given', async () => {
     await applier(held()).apply(command());
     expect(posts[0].url).toContain('/v1/sessions');
+  });
+
+  /**
+   * Found by running it for real: this pointed at `/api/orchestrator`, which
+   * does not exist, so every callback 404'd. An adopted session is reported by
+   * the observation sweep — the resumed run appends to the same transcript the
+   * sweep is already watching — so the right number of reporting paths is one.
+   */
+  it('asks the runner for no callbacks', async () => {
+    await applier(held()).apply(command());
+    expect(posts[0].body.callbackUrl).toBe('');
   });
 
   /** T23-AC-06 — the uuid is resolved here and never sent upward. */
