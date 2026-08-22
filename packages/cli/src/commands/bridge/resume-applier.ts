@@ -1,5 +1,6 @@
 import { adoption } from '@devpilot.sh/core';
 import type { BridgeClient, SessionCommandMessage } from '@devpilot.sh/bridge-client';
+import { planFromSession } from './conductor-handler';
 
 /**
  * Picking up the wheel on a session DevPilot did not start — TRD 23 §7.2.
@@ -35,6 +36,11 @@ export interface ResumeTarget {
   repo: string;
   /** Absolute working directory the session ran in. */
   cwd: string;
+  /** What the cockpit calls this session; the planner's item title. */
+  title?: string;
+  summary?: string;
+  branch?: string;
+  touchedPaths?: string[];
 }
 
 export interface ResumeApplierOptions {
@@ -46,6 +52,15 @@ export interface ResumeApplierOptions {
   callbackUrl: string;
   /** `adoptionKey → where that conversation lives on this machine`. */
   resolveTarget: (adoptionKey: string) => ResumeTarget | undefined;
+  /**
+   * Local cockpit base URL (`devpilot serve`).
+   *
+   * Required only for `plan`. The conductor graph lives in the Next app rather
+   * than in core — langchain is deliberately kept out of the package every CLI
+   * install pulls down — so planning is an HTTP call to the cockpit, exactly as
+   * the dispatch path does it.
+   */
+  cockpitUrl?: string;
   /** Treated as still running within this window. Default 5 minutes. */
   liveWithinMs?: number;
   onLog?: (line: string) => void;
@@ -125,6 +140,54 @@ export class ResumeApplier {
     }
 
     const message = command.payload?.message?.trim();
+
+    /**
+     * Plan, rather than continue — TRD 23 §3.5.
+     *
+     * Handled before the runner call because it is a different request, not a
+     * variation on one: the person asked what the work SHOULD be, and the
+     * answer is a decomposition they approve before anything runs.
+     */
+    if (command.payload?.mode === 'plan') {
+      if (!this.opts.cockpitUrl) {
+        await this.fail(
+          command,
+          'Planning needs the local cockpit. Start it with `devpilot serve`, reconnect the ' +
+            'bridge with --cockpit-url, or take the wheel without planning.',
+        );
+        return;
+      }
+      try {
+        const summary = await planFromSession({
+          client: this.opts.client,
+          cockpitUrl: this.opts.cockpitUrl,
+          sessionId: command.sessionId,
+          repo: target.repo,
+          title: target.title || `Continue work in ${target.repo}`,
+          message,
+          summary: target.summary,
+          branch: target.branch,
+          touchedPaths: target.touchedPaths,
+          fetchImpl: this.doFetch,
+          onLog: this.log,
+        });
+        await this.opts.client.acknowledgeCommands([command.id], 'applied');
+        this.log(`planned ${target.repo}: ${summary}`);
+      } catch (err) {
+        /**
+         * FAILED, not left pending, unlike an unreachable runner. A planning
+         * call that got as far as the cockpit and came back with an error —
+         * no API key, a refused model, a graph failure — will fail the same way
+         * on every retry, and a command that retries forever is worse than one
+         * that says why it stopped.
+         */
+        await this.fail(
+          command,
+          `Planning failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      return;
+    }
 
     try {
       const res = await this.doFetch(`${this.opts.sessionApiUrl.replace(/\/$/, '')}/v1/sessions`, {

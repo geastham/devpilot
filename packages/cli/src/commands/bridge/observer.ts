@@ -66,7 +66,18 @@ export class SessionObserver {
    * can only point at a row; this is the state that says what that means here,
    * and it never leaves the process.
    */
-  private targets = new Map<string, { transcriptPath: string; sessionUuid: string; repo: string }>();
+  private targets = new Map<
+    string,
+    {
+      transcriptPath: string;
+      sessionUuid: string;
+      repo: string;
+      title?: string;
+      summary?: string;
+      branch?: string;
+      touchedPaths?: string[];
+    }
+  >();
   private readonly intervalMs: number;
   private readonly sinceMs: number;
   private readonly summariseBudget: number;
@@ -85,7 +96,15 @@ export class SessionObserver {
    * rather than guessing.
    */
   targetFor(adoptionKey: string):
-    | { transcriptPath: string; sessionUuid: string; repo: string }
+    | {
+        transcriptPath: string;
+        sessionUuid: string;
+        repo: string;
+        title?: string;
+        summary?: string;
+        branch?: string;
+        touchedPaths?: string[];
+      }
     | undefined {
     return this.targets.get(adoptionKey);
   }
@@ -156,6 +175,12 @@ export class SessionObserver {
             transcriptPath: at.transcriptPath,
             sessionUuid: at.sessionUuid,
             repo: c.repo,
+            // Carried so a planning handoff has a brief to work from without
+            // going back to the hosted plane for what this machine just read.
+            title: c.title,
+            summary: c.summary,
+            branch: c.branch,
+            touchedPaths: c.touchedPaths,
           });
         }
       });

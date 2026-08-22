@@ -22,6 +22,9 @@ function client() {
       acks.push({ ids, status, error });
       return true;
     }),
+    reportSessionStatus: vi.fn(async () => undefined),
+    mirrorSessionPlan: vi.fn(async () => true),
+    hostedUrl: () => 'https://devpilot.sh',
   } as never;
 }
 
@@ -52,11 +55,13 @@ function command(over: Record<string, unknown> = {}) {
 function applier(
   target: ResumeTarget | undefined,
   fetchImpl: typeof fetch = vi.fn(async () => new Response('', { status: 201 })) as never,
+  cockpitUrl?: string,
 ) {
   return new ResumeApplier({
     client: client(),
     sessionApiUrl: 'http://127.0.0.1:3900',
     callbackUrl: 'https://devpilot.sh/api/orchestrator',
+    cockpitUrl,
     resolveTarget: () => target,
     fetchImpl: ((url: string, init: RequestInit) => {
       posts.push({ url: String(url), body: JSON.parse(String(init.body ?? '{}')) });
@@ -167,6 +172,79 @@ describe('ResumeApplier', () => {
     }) as never;
     await applier(held(), down).apply(command());
     expect(acks, 'a transient failure must not consume the decision').toHaveLength(0);
+  });
+
+  /**
+   * TRD 23 §3.5 — planning is a DIFFERENT request, not a variation on resume.
+   * The person asked what the work should be, and the answer is a
+   * decomposition they approve before anything runs.
+   */
+  it('refuses to plan without a local cockpit, rather than quietly continuing', async () => {
+    await applier(held()).apply(
+      command({ payload: { adoptionKey: 'a'.repeat(64), mode: 'plan' } }),
+    );
+    expect(posts, 'must not fall back to resuming the conversation').toHaveLength(0);
+    expect(acks[0].status).toBe('failed');
+    expect(acks[0].error).toContain('devpilot serve');
+  });
+
+  it('plans through the cockpit instead of the runner', async () => {
+    const cockpit = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/api/items')) {
+        return new Response(JSON.stringify({ id: 'item_1' }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ status: 'awaiting_review', awaiting: 'review' }), {
+        status: 200,
+      });
+    }) as never;
+
+    await applier(held(), cockpit, 'http://127.0.0.1:3000').apply(
+      command({ payload: { adoptionKey: 'a'.repeat(64), mode: 'plan', message: 'Finish it.' } }),
+    );
+
+    const urls = posts.map((p) => p.url);
+    expect(urls.some((u) => u.includes('/api/items'))).toBe(true);
+    expect(urls.some((u) => u.includes('/v1/sessions')), 'planning must not also resume').toBe(
+      false,
+    );
+    expect(acks[0].status).toBe('applied');
+  });
+
+  it('puts the instruction at the top of the brief the planner reads', async () => {
+    const cockpit = vi.fn(async (url: string) =>
+      String(url).endsWith('/api/items')
+        ? new Response(JSON.stringify({ id: 'item_1' }), { status: 200 })
+        : new Response(JSON.stringify({ awaiting: 'review' }), { status: 200 }),
+    ) as never;
+
+    await applier(
+      { ...held(), summary: 'Session opened with: rework ingest', touchedPaths: ['src/a.ts'] },
+      cockpit,
+      'http://127.0.0.1:3000',
+    ).apply(
+      command({
+        payload: { adoptionKey: 'a'.repeat(64), mode: 'plan', message: 'Finish the migration.' },
+      }),
+    );
+
+    const brief = String((posts[0].body as { description?: string }).description ?? '');
+    expect(brief.indexOf('Finish the migration.')).toBeLessThan(brief.indexOf('Where this came from'));
+    expect(brief).toContain('src/a.ts');
+  });
+
+  /** A planning failure repeats; a queued command that retries forever is worse. */
+  it('fails a planning error rather than leaving it queued', async () => {
+    const broken = vi.fn(async () => new Response('PLAN_AI_UNAVAILABLE', { status: 503 })) as never;
+    await applier(held(), broken, 'http://127.0.0.1:3000').apply(
+      command({ payload: { adoptionKey: 'a'.repeat(64), mode: 'plan' } }),
+    );
+    expect(acks[0].status).toBe('failed');
+    expect(acks[0].error).toContain('Planning failed');
+  });
+
+  it('defaults to continuing when no mode is given', async () => {
+    await applier(held()).apply(command());
+    expect(posts[0].url).toContain('/v1/sessions');
   });
 
   /** T23-AC-06 — the uuid is resolved here and never sent upward. */
