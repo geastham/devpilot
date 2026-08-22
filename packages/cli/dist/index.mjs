@@ -2299,7 +2299,9 @@ var ResumeApplier = class {
            */
           prompt: message || "Summarise where this session got to and what remains, then stop and wait.",
           resumeSessionId: target.sessionUuid,
-          callbackUrl: this.opts.callbackUrl
+          // Empty is the established "no callbacks" value; the dispatch path
+          // passes the same and relies on polling instead.
+          callbackUrl: this.opts.callbackUrl ?? ""
         })
       });
       if (!res.ok && res.status !== 409) {
@@ -2617,7 +2619,9 @@ var connectCommand = new Command6("connect").description("Connect this machine t
     client: client2,
     sessionApiUrl: options.sessionApiUrl,
     sessionApiKey: options.sessionApiKey,
-    callbackUrl: `${client2.hostedUrl()}/api/orchestrator`,
+    // Deliberately none: an adopted session is reported by the
+    // observation sweep, which is already watching its transcript.
+    callbackUrl: "",
     // Planning is an HTTP call to the local cockpit; without one the
     // applier refuses `plan` and says so rather than silently
     // continuing the conversation instead.

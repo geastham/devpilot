@@ -364,13 +364,30 @@ being dropped for the reason in §3.4.
 hosted guard. The narrow exception is asserted directly: admitting `resume` must
 not admit `approve`/`replan`/`abort`.
 
-**NOT proven — carried forward:**
+**PROVEN END TO END, 22 Aug 2026.** A bridge on 0.5.13 with a session runner,
+a held session observed from a real repo, the button clicked in the production
+cockpit:
 
-- **No resume has run end to end against a live bridge.** The applier is
-  unit-tested against a stubbed runner and cockpit; nobody has clicked the
-  button and watched an agent pick a session up. That is the next thing worth
-  doing and the only claim in this TRD that rests on reasoning rather than
-  observation.
+```
+bridge: took the wheel on openconjecture/trd23-verify with an instruction
+        — it now reports as a DevPilot run
+
+transcript (ONE file, four turns):
+  user      Reply with exactly: STAGE-ONE. Do not use any tools.
+  assistant STAGE-ONE
+  user      What word did you reply with earlier? Reply with only that word.
+  assistant STAGE-ONE
+```
+
+The agent picked up the same conversation, remembered its own earlier answer,
+and appended to the same transcript — so the cockpit row stayed continuous.
+
+That run also found the one thing unit tests could not: `callbackUrl` pointed
+at `/api/orchestrator`, which does not exist, so every callback 404'd. Fixed by
+sending none — an adopted session is reported by the observation sweep, which is
+already watching that transcript.
+
+**NOT proven — carried forward:**
 - **The planning brief has never been read by the conductor.** `buildSessionBrief`
   is asserted for shape and ordering, not for whether the planner produces a
   good decomposition from it.

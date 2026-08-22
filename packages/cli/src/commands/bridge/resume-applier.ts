@@ -53,8 +53,22 @@ export interface ResumeApplierOptions {
    */
   sessionApiUrl?: string;
   sessionApiKey?: string;
-  /** Where the runner should report back to. */
-  callbackUrl: string;
+  /**
+   * Where the runner should report back to — usually nowhere.
+   *
+   * An adopted session's status comes from the OBSERVATION SWEEP, not from
+   * callbacks: the resumed run appends to the same transcript, so the next
+   * sweep sees it live and reports it, and sees it quiet and settles it. That
+   * is already the mechanism keeping every adopted row current.
+   *
+   * The first version pointed this at `/api/orchestrator`, which does not
+   * exist — the hosted routes are `/api/sessions/:id/status` — so every
+   * callback 404'd. Pointing it at the real route would not have worked either:
+   * the runner authenticates callbacks with `X-DevPilot-Callback-Token`, and
+   * the hosted routes read `Authorization: Bearer`. Two reporting paths where
+   * one already works is not worth reconciling.
+   */
+  callbackUrl?: string;
   /** `adoptionKey → where that conversation lives on this machine`. */
   resolveTarget: (adoptionKey: string) => ResumeTarget | undefined;
   /**
@@ -242,7 +256,9 @@ export class ResumeApplier {
             message ||
             'Summarise where this session got to and what remains, then stop and wait.',
           resumeSessionId: target.sessionUuid,
-          callbackUrl: this.opts.callbackUrl,
+          // Empty is the established "no callbacks" value; the dispatch path
+          // passes the same and relies on polling instead.
+          callbackUrl: this.opts.callbackUrl ?? '',
         }),
       });
 
