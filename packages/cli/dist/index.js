@@ -42,7 +42,7 @@ var import_commander18 = require("commander");
 var import_update_notifier = __toESM(require("update-notifier"));
 
 // src/version.ts
-var VERSION = "0.5.5";
+var VERSION = "0.5.7";
 
 // src/commands/init.ts
 var import_commander = require("commander");
@@ -1675,7 +1675,6 @@ function tailTranscript(transcriptPath, state, cwd) {
       state.remainder = "";
     }
     if (size === state.byteOffset) {
-      (0, import_node_fs2.closeSync)(fd);
       return [];
     }
     const buf = Buffer.alloc(size - state.byteOffset);
@@ -1708,7 +1707,7 @@ function tailTranscript(transcriptPath, state, cwd) {
       if (path && path.startsWith("/")) path = null;
       if (state.lastEventMs !== null) {
         const gap = ms - state.lastEventMs;
-        state.activeMs += gap > 0 && gap < IDLE_MS ? gap : PAUSE_BEAT_MS;
+        state.activeMs += gap >= IDLE_MS ? PAUSE_BEAT_MS : Math.max(gap, 0);
       }
       state.lastEventMs = ms;
       events.push({
@@ -1791,8 +1790,9 @@ var AdoptionWatcher = class {
       if (mtimeMs > entry.lastMtimeMs) {
         entry.lastMtimeMs = mtimeMs;
         entry.lastReportedAt = new Date(now).toISOString();
+        const canStream = typeof this.config.client.streamEvents === "function";
         entry.tail ?? (entry.tail = initialTailState());
-        const derived = tailTranscript(entry.transcriptPath, entry.tail, entry.cwd);
+        const derived = canStream ? tailTranscript(entry.transcriptPath, entry.tail, entry.cwd) : [];
         this.persist();
         if (derived.length > 0) {
           const sent = await this.config.client.streamEvents(entry.sessionId, derived);
@@ -1802,13 +1802,14 @@ var AdoptionWatcher = class {
           const latest = derived[derived.length - 1];
           const files = /* @__PURE__ */ new Set();
           for (const e of derived) if (e.path) files.add(e.path);
-          await this.config.client.reportTelemetry(entry.sessionId, {
-            toolCalls: entry.tail.seq,
-            filesTouched: [...files].slice(0, 500),
-            currentAction: latest.path ? `${latest.tool} \xB7 ${latest.path.split("/").slice(-2).join("/")}` : latest.tool,
-            elapsedMs: entry.tail.activeMs,
-            idleMs: Math.max(0, now - mtimeMs)
-          });
+          if (typeof this.config.client.reportTelemetry === "function")
+            await this.config.client.reportTelemetry(entry.sessionId, {
+              toolCalls: entry.tail.seq,
+              filesTouched: [...files].slice(0, 500),
+              currentAction: latest.path ? `${latest.tool} \xB7 ${latest.path.split("/").slice(-2).join("/")}` : latest.tool,
+              elapsedMs: entry.tail.activeMs,
+              idleMs: Math.max(0, now - mtimeMs)
+            });
         }
         try {
           await this.config.client.reportSessionStatus(entry.sessionId, {
