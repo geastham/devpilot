@@ -130,12 +130,13 @@ const DEFAULT_TIMEOUT_MS = 15 * 60_000;
 async function call<T>(
   url: string,
   init: RequestInit,
-  timeoutMs: number
+  timeoutMs: number,
+  fetchImpl: typeof fetch = fetch
 ): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
+    const res = await fetchImpl(url, {
       ...init,
       signal: controller.signal,
       headers: { 'Content-Type': 'application/json', ...(init.headers ?? {}) },
@@ -404,4 +405,161 @@ export function createConductorDispatchHandler(
       throw new Error(reason);
     }
   };
+}
+
+
+/**
+ * Hand an observed session's work to the planner — TRD 23 §3.5.
+ *
+ * The other half of "take the wheel". Resuming carries the conversation on;
+ * this asks what the work should BE, which is the thing the cockpit can do and
+ * `claude.ai/code` cannot: it has the fleet, the repo, and a planning agent.
+ *
+ * ## Why this plans from the session rather than resuming it
+ *
+ * A resumed turn produces an answer. A planned one produces a decomposition you
+ * approve before anything runs, which is the interaction DESIGN.md §6 calls the
+ * highest-stakes one in the product. Those are different requests and the UI
+ * offers both; this is the second.
+ *
+ * The planner's input is everything the session already told us — its title,
+ * what it opened with, the branch, the files it touched — plus whatever the
+ * person typed on pickup. That last part matters most: "finish the migration
+ * and run the tests" is a far better planning brief than any amount of derived
+ * metadata.
+ *
+ * ## Why it does not wait for approval
+ *
+ * Same reason `createConductorDispatchHandler` does not: the conductor stops at
+ * a human review interrupt, and holding a command open across that would hold
+ * it for however long a person takes to look. The unit of work is "get it onto
+ * the conductor's desk and say so".
+ */
+export interface PlanFromSessionOptions {
+  client: BridgeClient;
+  cockpitUrl: string;
+  sessionId: string;
+  repo: string;
+  title: string;
+  /** What the person typed on pickup, if anything. */
+  message?: string;
+  /** What the session opened with, as the observer recorded it. */
+  summary?: string;
+  branch?: string;
+  touchedPaths?: string[];
+  requestTimeoutMs?: number;
+  /** Injected in tests; the cockpit is a real HTTP call in production. */
+  fetchImpl?: typeof fetch;
+  onLog?: (line: string) => void;
+}
+
+/** The brief the planner reads. Evidence, then the instruction. */
+export function buildSessionBrief(o: PlanFromSessionOptions): string {
+  const lines: string[] = [];
+
+  if (o.message?.trim()) {
+    // First, and labelled: everything below is context, this is the request.
+    lines.push(`## What to do\n\n${o.message.trim()}`, '');
+  }
+
+  lines.push('## Where this came from', '');
+  lines.push(
+    `An agent session already running in \`${o.repo}\`${o.branch ? ` on \`${o.branch}\`` : ''}, ` +
+      'picked up from the DevPilot cockpit.',
+    ''
+  );
+  if (o.summary?.trim()) lines.push(o.summary.trim(), '');
+
+  if (o.touchedPaths?.length) {
+    lines.push('## Files it had already touched', '');
+    for (const f of o.touchedPaths.slice(0, 30)) lines.push(`- \`${f}\``);
+    if (o.touchedPaths.length > 30) lines.push(`- …and ${o.touchedPaths.length - 30} more`);
+    lines.push('');
+  }
+
+  if (!o.message?.trim()) {
+    // Without an instruction the planner needs to be told what question to
+    // answer, or it will invent one.
+    lines.push(
+      '## What to do',
+      '',
+      'Work out what remains to finish this piece of work, and plan it.'
+    );
+  }
+
+  return lines.join('\n');
+}
+
+export async function planFromSession(o: PlanFromSessionOptions): Promise<string> {
+  const log = o.onLog ?? (() => {});
+  const timeout = o.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const base = o.cockpitUrl.replace(/\/$/, '');
+
+  const item = await call<HorizonItem>(
+    `${base}/api/items`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        title: o.title,
+        repo: o.repo,
+        zone: 'REFINING',
+        description: buildSessionBrief(o),
+      }),
+    },
+    timeout,
+    o.fetchImpl
+  );
+  if (!item?.id) throw new Error('Cockpit did not return a created item id');
+
+  /**
+   * Narration is best-effort, here and below.
+   *
+   * The planning call is minutes of real work that costs tokens. Failing it
+   * because a progress message could not be delivered would throw that away for
+   * a display update — the same trade `mirrorSessionPlan` already refuses to
+   * make.
+   */
+  await say(o, 5, 'Planning what remains — this takes a minute and costs tokens.');
+
+  const state = await call<ConductorState>(
+    `${base}/api/items/${item.id}/conductor`,
+    { method: 'POST', body: JSON.stringify({}) },
+    timeout,
+    o.fetchImpl
+  );
+
+  const summary = describe(state, hostedBase(o.client), o.sessionId);
+
+  // Best-effort, exactly as in the dispatch path: losing real work because a
+  // display copy failed to upload would be an absurd trade.
+  if (state.review?.plan?.waves?.length && typeof o.client.mirrorSessionPlan === 'function') {
+    const mirrored = await o.client.mirrorSessionPlan(
+      o.sessionId,
+      toMirroredPlan(state.review.plan, item.id, state.review.score?.parallelizationScore)
+    );
+    log(`plan ${mirrored ? 'mirrored to the hosted cockpit' : 'not mirrored (hosted unreachable)'}`);
+  }
+
+  if (state.status === 'failed') throw new Error(summary);
+
+  await say(o, state.awaiting === 'review' ? 40 : 60, summary);
+
+  return summary;
+}
+
+/** Report progress, and never let a failed report cost a real planning run. */
+async function say(
+  o: PlanFromSessionOptions,
+  progressPercent: number,
+  message: string
+): Promise<void> {
+  try {
+    await o.client.reportSessionStatus(o.sessionId, {
+      status: 'running',
+      progressPercent,
+      message,
+    });
+  } catch (err) {
+    o.onLog?.(`could not report progress: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }

@@ -86,6 +86,20 @@ export interface SessionCommandMessage {
      * (TRD 23 §3.3).
      */
     adoptionKey?: string;
+    /**
+     * resume — what taking the wheel should DO.
+     *
+     * `continue` carries the conversation on, which is fast and direct.
+     * `plan` hands the work to the conductor and comes back with a
+     * decomposition to approve before anything runs — the interaction the
+     * cockpit exists for, and the one `claude.ai/code` cannot offer because it
+     * has neither the fleet nor a planning agent.
+     *
+     * Absent means `continue`: the older bridges that predate this field only
+     * know how to resume, and defaulting the other way would silently change
+     * what their button does.
+     */
+    mode?: 'continue' | 'plan';
   };
   createdAt?: string;
 }

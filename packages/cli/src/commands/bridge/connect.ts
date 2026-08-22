@@ -337,6 +337,10 @@ export const connectCommand = new Command('connect')
             sessionApiUrl: options.sessionApiUrl,
             sessionApiKey: options.sessionApiKey,
             callbackUrl: `${client.hostedUrl()}/api/orchestrator`,
+            // Planning is an HTTP call to the local cockpit; without one the
+            // applier refuses `plan` and says so rather than silently
+            // continuing the conversation instead.
+            cockpitUrl: options.cockpitUrl,
             resolveTarget: (key) => {
               const at = observer.targetFor(key);
               return at ? { ...at, cwd: '' } : undefined;

@@ -1051,11 +1051,11 @@ function toMirroredPlan(plan, itemId, parallelization) {
   };
 }
 var DEFAULT_TIMEOUT_MS = 15 * 6e4;
-async function call(url, init, timeoutMs) {
+async function call(url, init, timeoutMs, fetchImpl = fetch) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
+    const res = await fetchImpl(url, {
       ...init,
       signal: controller.signal,
       headers: { "Content-Type": "application/json", ...init.headers ?? {} }
@@ -1213,6 +1213,84 @@ function createConductorDispatchHandler(opts) {
       throw new Error(reason);
     }
   };
+}
+function buildSessionBrief(o) {
+  const lines = [];
+  if (o.message?.trim()) {
+    lines.push(`## What to do
+
+${o.message.trim()}`, "");
+  }
+  lines.push("## Where this came from", "");
+  lines.push(
+    `An agent session already running in \`${o.repo}\`${o.branch ? ` on \`${o.branch}\`` : ""}, picked up from the DevPilot cockpit.`,
+    ""
+  );
+  if (o.summary?.trim()) lines.push(o.summary.trim(), "");
+  if (o.touchedPaths?.length) {
+    lines.push("## Files it had already touched", "");
+    for (const f of o.touchedPaths.slice(0, 30)) lines.push(`- \`${f}\``);
+    if (o.touchedPaths.length > 30) lines.push(`- \u2026and ${o.touchedPaths.length - 30} more`);
+    lines.push("");
+  }
+  if (!o.message?.trim()) {
+    lines.push(
+      "## What to do",
+      "",
+      "Work out what remains to finish this piece of work, and plan it."
+    );
+  }
+  return lines.join("\n");
+}
+async function planFromSession(o) {
+  const log = o.onLog ?? (() => {
+  });
+  const timeout = o.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const base = o.cockpitUrl.replace(/\/$/, "");
+  const item = await call(
+    `${base}/api/items`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        title: o.title,
+        repo: o.repo,
+        zone: "REFINING",
+        description: buildSessionBrief(o)
+      })
+    },
+    timeout,
+    o.fetchImpl
+  );
+  if (!item?.id) throw new Error("Cockpit did not return a created item id");
+  await say(o, 5, "Planning what remains \u2014 this takes a minute and costs tokens.");
+  const state = await call(
+    `${base}/api/items/${item.id}/conductor`,
+    { method: "POST", body: JSON.stringify({}) },
+    timeout,
+    o.fetchImpl
+  );
+  const summary = describe(state, hostedBase(o.client), o.sessionId);
+  if (state.review?.plan?.waves?.length && typeof o.client.mirrorSessionPlan === "function") {
+    const mirrored = await o.client.mirrorSessionPlan(
+      o.sessionId,
+      toMirroredPlan(state.review.plan, item.id, state.review.score?.parallelizationScore)
+    );
+    log(`plan ${mirrored ? "mirrored to the hosted cockpit" : "not mirrored (hosted unreachable)"}`);
+  }
+  if (state.status === "failed") throw new Error(summary);
+  await say(o, state.awaiting === "review" ? 40 : 60, summary);
+  return summary;
+}
+async function say(o, progressPercent, message) {
+  try {
+    await o.client.reportSessionStatus(o.sessionId, {
+      status: "running",
+      progressPercent,
+      message
+    });
+  } catch (err) {
+    o.onLog?.(`could not report progress: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 // src/commands/bridge/connect.ts
@@ -2076,7 +2154,13 @@ var SessionObserver = class {
           this.targets.set(c.adoptionKey, {
             transcriptPath: at.transcriptPath,
             sessionUuid: at.sessionUuid,
-            repo: c.repo
+            repo: c.repo,
+            // Carried so a planning handoff has a brief to work from without
+            // going back to the hosted plane for what this machine just read.
+            title: c.title,
+            summary: c.summary,
+            branch: c.branch,
+            touchedPaths: c.touchedPaths
           });
         }
       });
@@ -2157,6 +2241,38 @@ var ResumeApplier = class {
       return;
     }
     const message = command.payload?.message?.trim();
+    if (command.payload?.mode === "plan") {
+      if (!this.opts.cockpitUrl) {
+        await this.fail(
+          command,
+          "Planning needs the local cockpit. Start it with `devpilot serve`, reconnect the bridge with --cockpit-url, or take the wheel without planning."
+        );
+        return;
+      }
+      try {
+        const summary = await planFromSession({
+          client: this.opts.client,
+          cockpitUrl: this.opts.cockpitUrl,
+          sessionId: command.sessionId,
+          repo: target.repo,
+          title: target.title || `Continue work in ${target.repo}`,
+          message,
+          summary: target.summary,
+          branch: target.branch,
+          touchedPaths: target.touchedPaths,
+          fetchImpl: this.doFetch,
+          onLog: this.log
+        });
+        await this.opts.client.acknowledgeCommands([command.id], "applied");
+        this.log(`planned ${target.repo}: ${summary}`);
+      } catch (err) {
+        await this.fail(
+          command,
+          `Planning failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+      return;
+    }
     try {
       const res = await this.doFetch(`${this.opts.sessionApiUrl.replace(/\/$/, "")}/v1/sessions`, {
         method: "POST",
@@ -2495,6 +2611,10 @@ var connectCommand = new Command6("connect").description("Connect this machine t
     sessionApiUrl: options.sessionApiUrl,
     sessionApiKey: options.sessionApiKey,
     callbackUrl: `${client2.hostedUrl()}/api/orchestrator`,
+    // Planning is an HTTP call to the local cockpit; without one the
+    // applier refuses `plan` and says so rather than silently
+    // continuing the conversation instead.
+    cockpitUrl: options.cockpitUrl,
     resolveTarget: (key) => {
       const at = observer.targetFor(key);
       return at ? { ...at, cwd: "" } : void 0;
