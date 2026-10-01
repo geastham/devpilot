@@ -275,10 +275,10 @@ import { execFileSync } from "child_process";
 import { readFileSync as readFileSync2 } from "fs";
 import { join as join4 } from "path";
 function readStdin(timeoutMs) {
-  return new Promise((resolve7) => {
-    if (process.stdin.isTTY) return resolve7("");
+  return new Promise((resolve8) => {
+    if (process.stdin.isTTY) return resolve8("");
     let data = "";
-    const done = () => resolve7(data);
+    const done = () => resolve8(data);
     const timer = setTimeout(done, timeoutMs);
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => data += chunk);
@@ -334,11 +334,11 @@ var init_statusline_fast = __esm({
 });
 
 // src/cli.ts
-import { Command as Command20 } from "commander";
+import { Command as Command22 } from "commander";
 import updateNotifier from "update-notifier";
 
 // src/version.ts
-var VERSION = "0.7.1";
+var VERSION = "0.8.0";
 
 // src/commands/init.ts
 import { Command } from "commander";
@@ -1562,10 +1562,10 @@ function prompt(question) {
     input: process.stdin,
     output: process.stdout
   });
-  return new Promise((resolve7) => {
+  return new Promise((resolve8) => {
     rl.question(question, (answer) => {
       rl.close();
-      resolve7(answer.trim());
+      resolve8(answer.trim());
     });
   });
 }
@@ -1767,7 +1767,7 @@ async function configureOrchestrator(cwd, configPath, nonInteractive = false) {
 }
 
 // src/commands/bridge.ts
-import { Command as Command11 } from "commander";
+import { Command as Command13 } from "commander";
 
 // src/commands/bridge/connect.ts
 import os from "os";
@@ -1872,8 +1872,8 @@ function createBridgeDispatchHandler(opts) {
         linearTicketId: linearIdentifier,
         callbackUrl: opts.callbackUrl ?? ""
       });
-      const settled = new Promise((resolve7) => {
-        inFlight.set(sessionId, resolve7);
+      const settled = new Promise((resolve8) => {
+        inFlight.set(sessionId, resolve8);
       });
       const response = await svc.dispatch(request);
       if (!response.accepted) {
@@ -1910,6 +1910,17 @@ function createBridgeDispatchHandler(opts) {
       }
       throw new Error(reason);
     }
+  };
+}
+function createWatchOnlyDispatchHandler(opts) {
+  return async function decline(message) {
+    const reason = `${opts.machineName} is connected to watch sessions only and does not run dispatched work. On that machine, start \`devpilot serve\` and reconnect its bridge with \`--plan --repos ${message.repo}\`, or route ${message.repo} to a machine that does.`;
+    opts.onLog?.(`${message.linearIdentifier} declined: this bridge is watching only`);
+    try {
+      await opts.client.reportSessionStatus(message.sessionId, { status: "error", progressPercent: 0, message: reason });
+    } catch {
+    }
+    throw new Error(reason);
   };
 }
 
@@ -3857,7 +3868,37 @@ function stableMachineName() {
   }
   return name;
 }
-var connectCommand = new Command8("connect").description("Connect this machine to a DevPilot bridge and run dispatched work locally").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-n, --name <name>", "Name for this machine (defaults to a stable name for this machine)").option("-r, --repos <repos>", "Comma-separated repos this machine handles").option("-m, --mode <mode>", "Local orchestrator mode (http|claude-session)", "http").option(
+function resolveLocalMode(options) {
+  if (options.plan) return { kind: "conductor" };
+  const mode = options.mode ?? (options.httpUrl ? "http" : options.sessionApiUrl ? "claude-session" : void 0);
+  if (!mode) return { kind: "watch-only" };
+  if (mode === "ao-cli") {
+    return {
+      kind: "error",
+      message: "--mode ao-cli is deprecated and non-functional.",
+      hints: [
+        "`ao` is now a daemon on 127.0.0.1:3001; point http mode at it:",
+        "  devpilot bridge connect --mode http --http-url http://127.0.0.1:3001"
+      ]
+    };
+  }
+  if (mode === "http") {
+    return options.httpUrl ? { kind: "orchestrator", mode } : { kind: "error", message: "--mode http requires --http-url", hints: ["For the ao daemon: --http-url http://127.0.0.1:3001"] };
+  }
+  if (mode === "claude-session") {
+    return options.sessionApiUrl ? { kind: "orchestrator", mode } : {
+      kind: "error",
+      message: "--mode claude-session requires --session-api-url",
+      hints: [
+        "Start the runner, then point at it:",
+        "  devpilot session-runner --port 3900 --token <t>",
+        "  \u2026 --session-api-url http://127.0.0.1:3900 --session-api-key <t>"
+      ]
+    };
+  }
+  return { kind: "error", message: `Unknown --mode "${mode}".`, hints: ["Modes: http, claude-session. Leave it out to watch sessions only."] };
+}
+var connectCommand = new Command8("connect").description("Connect this machine to a DevPilot bridge and run dispatched work locally").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-n, --name <name>", "Name for this machine (defaults to a stable name for this machine)").option("-r, --repos <repos>", "Comma-separated repos this machine handles").option("-m, --mode <mode>", "How dispatched work is run here (http|claude-session). Omit to watch sessions only").option(
   "--transport <transport>",
   "realtime | poll \u2014 polling is fully correct, just higher latency",
   process.env.DEVPILOT_BRIDGE_TRANSPORT || "realtime"
@@ -3903,33 +3944,20 @@ var connectCommand = new Command8("connect").description("Connect this machine t
   }
   const repos = options.repos?.split(",").map((r) => r.trim()).filter(Boolean) ?? [];
   const maxConcurrentJobs = Math.max(1, parseInt(options.maxJobs, 10) || 4);
+  const machineName = options.name ?? stableMachineName();
   console.log(chalk12.cyan("\u{1F309} DevPilot bridge"));
   console.log(chalk12.gray(`   ${options.url}`));
-  console.log(chalk12.gray(`   machine: ${options.name}`));
+  console.log(chalk12.gray(`   machine: ${machineName}`));
   console.log("");
-  const usesLocalOrchestrator = !options.plan;
-  if (usesLocalOrchestrator && options.mode === "ao-cli") {
-    console.error(chalk12.red("\u2717 --mode ao-cli is deprecated and non-functional."));
-    console.error(chalk12.gray("  `ao` is now a daemon on 127.0.0.1:3001; point http mode at it:"));
-    console.error(chalk12.gray("    devpilot bridge connect --mode http --http-url http://127.0.0.1:3001"));
-    process.exit(1);
-  }
-  if (usesLocalOrchestrator && options.mode === "http" && !options.httpUrl) {
-    console.error(chalk12.red("\u2717 --mode http requires --http-url"));
-    console.error(chalk12.gray("  For the ao daemon: --http-url http://127.0.0.1:3001"));
-    process.exit(1);
-  }
-  if (usesLocalOrchestrator && options.mode === "claude-session" && !options.sessionApiUrl) {
-    console.error(chalk12.red("\u2717 --mode claude-session requires --session-api-url"));
-    console.error(chalk12.gray("  Start the runner, then point at it:"));
-    console.error(chalk12.gray("    devpilot session-runner --port 3900 --token <t>"));
-    console.error(chalk12.gray("    \u2026 --session-api-url http://127.0.0.1:3900 --session-api-key <t>"));
+  const local = resolveLocalMode(options);
+  if (local.kind === "error") {
+    console.error(chalk12.red(`\u2717 ${local.message}`));
+    for (const hint of local.hints) console.error(chalk12.gray(`  ${hint}`));
     process.exit(1);
   }
   const client2 = new BridgeClient2({ bridgeUrl: options.url, token: options.token });
   let registration;
   try {
-    const machineName = options.name ?? stableMachineName();
     registration = await client2.register({ name: machineName, repos, maxConcurrentJobs });
   } catch (err) {
     console.error(chalk12.red("\u2717 Registration failed"));
@@ -3944,10 +3972,16 @@ var connectCommand = new Command8("connect").description("Connect this machine t
       console.log(chalk12.gray(`   remembered in ${bridgeCredentialsPath()} \u2014 reconnect with no flags`));
     }
   }
-  console.log(chalk12.gray(`   repos: ${repos.join(", ") || "(none)"}`));
-  if (repos.length === 0) {
-    console.log(chalk12.yellow("   \u26A0 No repos specified \u2014 nothing can route to this machine."));
-    console.log(chalk12.gray("     Re-run with --repos owner/name to receive dispatches."));
+  if (local.kind === "watch-only") {
+    console.log(chalk12.gray("   mode: watching \u2014 the agent sessions on this machine are reported to your cockpit."));
+    console.log(chalk12.gray("         It does not run dispatched tickets. To accept them, start `devpilot serve`"));
+    console.log(chalk12.gray("         and add --plan --repos owner/name."));
+  } else {
+    console.log(chalk12.gray(`   repos: ${repos.join(", ") || "(none)"}`));
+    if (repos.length === 0) {
+      console.log(chalk12.yellow("   \u26A0 No repos specified \u2014 nothing can route to this machine."));
+      console.log(chalk12.gray("     Re-run with --repos owner/name to receive dispatches."));
+    }
   }
   console.log("");
   const useRealtime = options.transport !== "poll" && registration.realtime !== null;
@@ -3997,7 +4031,7 @@ var connectCommand = new Command8("connect").description("Connect this machine t
   }
   const observer = options.observe !== false ? new SessionObserver({
     client: client2,
-    machineName: options.name ?? stableMachineName(),
+    machineName,
     repos,
     // A session placed on a board is already followed by the adoption
     // watcher; everything else gets its instruments from the observer.
@@ -4073,7 +4107,7 @@ var connectCommand = new Command8("connect").description("Connect this machine t
   if (options.discover !== false) {
     await runIntrospection({
       client: client2,
-      machineName: options.name ?? stableMachineName(),
+      machineName,
       repos,
       adopt: Boolean(options.adopt),
       allRepos: Boolean(options.adoptAllRepos),
@@ -4089,14 +4123,18 @@ var connectCommand = new Command8("connect").description("Connect this machine t
       jwt: registration.realtime.jwt
     } : null,
     maxConcurrent: maxConcurrentJobs,
-    handler: options.plan ? createConductorDispatchHandler({
+    handler: local.kind === "conductor" ? createConductorDispatchHandler({
       client: client2,
       cockpitUrl: options.cockpitUrl,
       watcher: conductorWatcher,
       onLog: (line) => console.log(chalk12.blue(`   ${line}`))
+    }) : local.kind === "watch-only" ? createWatchOnlyDispatchHandler({
+      client: client2,
+      machineName,
+      onLog: (line) => console.log(chalk12.blue(`   ${line}`))
     }) : createBridgeDispatchHandler({
       client: client2,
-      orchestratorMode: options.mode,
+      orchestratorMode: local.mode,
       httpUrl: options.httpUrl,
       sessionApiUrl: options.sessionApiUrl,
       sessionApiKey: options.sessionApiKey,
@@ -4114,8 +4152,12 @@ var connectCommand = new Command8("connect").description("Connect this machine t
   });
   await loop.start();
   heartbeat.start();
-  console.log(chalk12.green(`\u2713 Listening (${useRealtime ? "realtime" : "poll"})`));
-  console.log(chalk12.gray("   Agents run on THIS machine. Ctrl+C to disconnect."));
+  console.log(chalk12.green(local.kind === "watch-only" ? "\u2713 Watching" : `\u2713 Listening (${useRealtime ? "realtime" : "poll"})`));
+  console.log(
+    chalk12.gray(
+      local.kind === "watch-only" ? "   Nothing leaves this machine but counts, tool names and file paths. Ctrl+C to disconnect." : "   Agents run on THIS machine. Ctrl+C to disconnect."
+    )
+  );
   console.log("");
   let shuttingDown = false;
   const shutdown = async () => {
@@ -4156,111 +4198,1082 @@ var disconnectCommand = new Command9("disconnect").description("Forget the bridg
   console.log(chalk13.gray("  The token still works for anyone who has a copy of it. To end that,"));
   console.log(chalk13.gray("  revoke it in the dashboard under Settings \u2192 Tokens \u2014 it stops being"));
   console.log(chalk13.gray("  accepted on the very next request."));
-  console.log(chalk13.gray("  A bridge that is running now keeps running until you stop it (Ctrl+C)."));
+  console.log(chalk13.gray("  A bridge that is running now keeps running until you stop it: Ctrl+C in"));
+  console.log(chalk13.gray("  its terminal, `devpilot bridge stop` if it was started in the background,"));
+  console.log(chalk13.gray("  `devpilot bridge uninstall` if it runs as the login service."));
   console.log("");
 });
 
 // src/commands/bridge/status.ts
+import { Command as Command11 } from "commander";
+import chalk15 from "chalk";
+
+// src/commands/bridge/service.ts
+import { spawn as spawn2, spawnSync as spawnSync2 } from "child_process";
+import {
+  accessSync,
+  appendFileSync as appendFileSync3,
+  closeSync as closeSync2,
+  constants,
+  copyFileSync,
+  existsSync as existsSync13,
+  mkdirSync as mkdirSync11,
+  openSync as openSync2,
+  readFileSync as readFileSync13,
+  readSync as readSync2,
+  renameSync as renameSync3,
+  rmSync as rmSync3,
+  statSync as statSync3,
+  truncateSync,
+  writeFileSync as writeFileSync12
+} from "fs";
+import { homedir as homedir6 } from "os";
+import { delimiter, dirname as dirname8, isAbsolute as isAbsolute2, join as join13 } from "path";
+import {
+  DEFAULT_BRIDGE_URL as DEFAULT_BRIDGE_URL3,
+  bridgeCredentialsPath as bridgeCredentialsPath3,
+  clearBridgeCredentials as clearBridgeCredentials2,
+  loadBridgeCredentials as loadBridgeCredentials3,
+  resolveBridgeCredentials as resolveBridgeCredentials3,
+  saveBridgeCredentials as saveBridgeCredentials2
+} from "@devpilot.sh/bridge-client";
+var LAUNCHD_LABEL = "sh.devpilot.bridge";
+var SYSTEMD_UNIT = "devpilot-bridge.service";
+var STATE_DIR_ENV = "DEVPILOT_BRIDGE_STATE_DIR";
+var REGISTERED_MARK = "\u2713 Registered";
+var LOG_CAP_BYTES = 5 * 1024 * 1024;
+function bridgePaths(home = homedir6(), env = process.env) {
+  const stateDir = env[STATE_DIR_ENV]?.trim() || join13(home, ".devpilot", "bridge");
+  const configHome = env.XDG_CONFIG_HOME?.trim() || join13(home, ".config");
+  return {
+    home,
+    stateDir,
+    statePath: join13(stateDir, "state.json"),
+    serviceRecordPath: join13(stateDir, "service.json"),
+    logPath: join13(stateDir, "bridge.log"),
+    plistPath: join13(home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`),
+    unitPath: join13(configHome, "systemd", "user", SYSTEMD_UNIT),
+    credentialsPath: bridgeCredentialsPath3(home)
+  };
+}
+function realSystem() {
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  return {
+    platform: process.platform,
+    uid,
+    spawnDetached(command, args, options) {
+      mkdirSync11(dirname8(options.logPath), { recursive: true, mode: 448 });
+      const fd = openSync2(options.logPath, "a");
+      try {
+        const child = spawn2(command, args, {
+          // Its own session, so closing the terminal (SIGHUP to the
+          // foreground process group) does not take it down with it.
+          detached: true,
+          stdio: ["ignore", fd, fd],
+          env: options.env,
+          cwd: options.cwd,
+          windowsHide: true
+        });
+        child.on("error", () => void 0);
+        child.unref();
+        return child.pid ?? null;
+      } finally {
+        closeSync2(fd);
+      }
+    },
+    isAlive(pid) {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (error) {
+        return error.code === "EPERM";
+      }
+    },
+    commandLine(pid) {
+      const result = process.platform === "win32" ? spawnSync2(
+        "powershell.exe",
+        ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`],
+        { encoding: "utf8", timeout: 1e4 }
+      ) : (
+        // `-ww`: without it `ps` may cut the line at the terminal's width,
+        // and the part cut off is the part being looked for.
+        spawnSync2("ps", ["-ww", "-o", "command=", "-p", String(pid)], { encoding: "utf8", timeout: 1e4 })
+      );
+      if (result.error || result.status !== 0) return null;
+      return result.stdout.trim() || null;
+    },
+    startTime(pid) {
+      if (process.platform === "win32") return null;
+      const result = spawnSync2("ps", ["-o", "lstart=", "-p", String(pid)], {
+        encoding: "utf8",
+        timeout: 1e4,
+        // `lstart` is formatted in the user's locale; pin it so Date can read it.
+        env: { ...process.env, LC_ALL: "C" }
+      });
+      if (result.error || result.status !== 0) return null;
+      const at = new Date(result.stdout.trim());
+      return Number.isNaN(at.getTime()) ? null : at.toISOString();
+    },
+    kill(pid, signal) {
+      try {
+        process.kill(pid, signal);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    bridgeProcesses() {
+      if (process.platform === "win32") return [];
+      const result = spawnSync2("ps", ["-ww", "-U", String(uid), "-o", "pid=,command="], {
+        encoding: "utf8",
+        timeout: 1e4,
+        maxBuffer: 16 * 1024 * 1024
+      });
+      if (result.error || result.status !== 0) return [];
+      return result.stdout.split("\n").flatMap((line) => {
+        const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+        return match && /devpilot\S*\s+bridge\s+connect\b/.test(match[2]) ? [Number(match[1])] : [];
+      });
+    },
+    run(command, args) {
+      const result = spawnSync2(command, args, { encoding: "utf8", timeout: 3e4 });
+      if (result.error) return { status: null, stdout: "", stderr: result.error.message };
+      return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+    }
+  };
+}
+var sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+function splitConnectArgs(args) {
+  const out = { noSave: false, forwarded: [] };
+  const taken = [
+    { key: "url", long: "--url", short: "-u" },
+    { key: "token", long: "--token", short: "-t" },
+    { key: "sessionApiKey", long: "--session-api-key" }
+  ];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--no-save") {
+      out.noSave = true;
+      continue;
+    }
+    const flag = taken.find(
+      (t) => arg === t.long || arg.startsWith(`${t.long}=`) || t.short !== void 0 && arg.startsWith(t.short) && !arg.startsWith("--")
+    );
+    if (!flag) {
+      out.forwarded.push(arg);
+      continue;
+    }
+    let value;
+    if (arg === flag.long || arg === flag.short) {
+      value = args[i + 1];
+      i += 1;
+    } else if (arg.startsWith(`${flag.long}=`)) {
+      value = arg.slice(flag.long.length + 1);
+    } else {
+      value = arg.slice(flag.short.length);
+    }
+    if (!value || value.startsWith("-")) {
+      out.invalid = `${flag.long} needs a value.`;
+      return out;
+    }
+    out[flag.key] = value;
+  }
+  if (out.forwarded.some((arg) => /dp_orch_/.test(arg))) {
+    out.invalid = "A token was given to an option other than --token. Nothing was started.";
+    out.forwarded = [];
+  }
+  return out;
+}
+function redact(text) {
+  return text.replace(/dp_orch_[A-Za-z0-9_-]+/g, "dp_orch_\u2026");
+}
+function readJson(path) {
+  try {
+    return JSON.parse(readFileSync13(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+function writeJson(path, value) {
+  mkdirSync11(dirname8(path), { recursive: true, mode: 448 });
+  const tmp = `${path}.tmp`;
+  writeFileSync12(tmp, JSON.stringify(value, null, 2) + "\n");
+  renameSync3(tmp, path);
+}
+function readState(paths) {
+  const state = readJson(paths.statePath);
+  return state && typeof state.pid === "number" && state.pid > 0 ? state : null;
+}
+function isBridgeProcess(pid, sys) {
+  if (!sys.isAlive(pid)) return false;
+  const command = sys.commandLine(pid);
+  return command !== null && /\bbridge\s+connect\b/.test(command);
+}
+function unmanagedBridges(sys, managed) {
+  return sys.bridgeProcesses().filter((pid) => pid !== process.pid && !managed.includes(pid));
+}
+function liveState(paths, sys) {
+  const state = readState(paths);
+  return state && isBridgeProcess(state.pid, sys) ? state : null;
+}
+function rotateLog(logPath, capBytes = LOG_CAP_BYTES) {
+  try {
+    if (statSync3(logPath).size <= capBytes) return false;
+    copyFileSync(logPath, `${logPath}.1`);
+    truncateSync(logPath, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function openLog(logPath, heading) {
+  rotateLog(logPath);
+  appendFileSync3(logPath, `[${(/* @__PURE__ */ new Date()).toISOString()}] ${heading}
+`, { mode: 384 });
+  return logSize(logPath);
+}
+function logSize(logPath) {
+  try {
+    return statSync3(logPath).size;
+  } catch {
+    return 0;
+  }
+}
+var stripAnsi = (text) => text.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
+function readLogFrom(logPath, offset) {
+  let fd;
+  try {
+    const size = statSync3(logPath).size;
+    const from = size < offset ? 0 : offset;
+    if (size === from) return { text: "", offset: size };
+    fd = openSync2(logPath, "r");
+    const buffer = Buffer.alloc(size - from);
+    const read = readSync2(fd, buffer, 0, buffer.length, from);
+    return { text: stripAnsi(buffer.subarray(0, read).toString("utf8")), offset: from + read };
+  } catch {
+    return { text: "", offset };
+  } finally {
+    if (fd !== void 0) closeSync2(fd);
+  }
+}
+function tailLog(logPath, count, options = {}) {
+  if (count <= 0) return [];
+  const size = logSize(logPath);
+  const window = 256 * 1024;
+  const { text } = readLogFrom(logPath, Math.max(0, size - window));
+  let lines = text.split("\n");
+  if (size > window) lines.shift();
+  while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+  if (options.skipBlank) lines = lines.filter((line) => line.trim() !== "");
+  return lines.slice(-count).map(redact);
+}
+function failureLines(text, max = 8) {
+  const lines = text.split("\n").map((line) => line.trimEnd()).filter((line) => line.trim() !== "");
+  const first = lines.findIndex((line) => /^\s*(✗|error:)/.test(line));
+  return (first === -1 ? lines.slice(-max) : lines.slice(first, first + max)).map(redact);
+}
+var DEFAULT_WAIT = { waitMs: 3e4, pollMs: 250, settleMs: 1500 };
+async function awaitRegistered(logPath, offset, alive, wait) {
+  const deadline = Date.now() + wait.waitMs;
+  for (; ; ) {
+    const { text } = readLogFrom(logPath, offset);
+    if (text.includes(REGISTERED_MARK)) {
+      await sleep(wait.settleMs);
+      const after = readLogFrom(logPath, offset).text;
+      return alive(after) ? { ok: true } : { ok: false, reason: "exited", lines: failureLines(after) };
+    }
+    if (!alive(text)) {
+      return { ok: false, reason: "exited", lines: failureLines(readLogFrom(logPath, offset).text) };
+    }
+    if (Date.now() >= deadline) return { ok: false, reason: "timeout", lines: failureLines(text) };
+    await sleep(wait.pollMs);
+  }
+}
+function prepareCredentials(split, env, credentialsPath) {
+  const resolved = resolveBridgeCredentials3({ url: split.url, token: split.token }, env, credentialsPath);
+  if (!resolved.token) return { ok: false, outcome: { status: "no-credentials", url: resolved.url } };
+  const url = resolved.url ?? DEFAULT_BRIDGE_URL3;
+  if (resolved.source === "saved") return { ok: true, url, saved: false, rollback: () => void 0 };
+  const previous = loadBridgeCredentials3(credentialsPath);
+  if (!saveBridgeCredentials2({ url, token: resolved.token }, credentialsPath)) {
+    return { ok: false, outcome: { status: "credentials-unwritable", path: credentialsPath } };
+  }
+  return {
+    ok: true,
+    url,
+    saved: true,
+    rollback: () => {
+      if (previous) saveBridgeCredentials2(previous, credentialsPath);
+      else clearBridgeCredentials2(credentialsPath);
+    }
+  };
+}
+function childEnv(env, sessionApiKey) {
+  const out = { ...env };
+  delete out.DEVPILOT_BRIDGE_URL;
+  delete out.DEVPILOT_BRIDGE_TOKEN;
+  out.FORCE_COLOR = "0";
+  if (sessionApiKey) out.DEVPILOT_SESSION_API_KEY = sessionApiKey;
+  return out;
+}
+function serviceKind(platform) {
+  if (platform === "darwin") return "launchd";
+  if (platform === "linux") return "systemd";
+  return null;
+}
+function findOnPath(name, envPath) {
+  for (const dir of (envPath ?? "").split(delimiter)) {
+    if (!dir || !isAbsolute2(dir)) continue;
+    const candidate = join13(dir, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (statSync3(candidate).isFile()) return candidate;
+    } catch {
+    }
+  }
+  return null;
+}
+function servicePathEnv(input) {
+  const entries = [
+    dirname8(input.node),
+    input.claude ? dirname8(input.claude) : "",
+    ...(input.envPath ?? "").split(":"),
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin"
+  ];
+  const seen = /* @__PURE__ */ new Set();
+  return entries.filter((entry) => entry.startsWith("/") && !seen.has(entry) && Boolean(seen.add(entry))).join(":");
+}
+var xml = (value) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+function launchdPlist(spec) {
+  const programArguments = [spec.node, spec.script, "bridge", "connect", ...spec.args].map((arg) => `    <string>${xml(arg)}</string>`).join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${LAUNCHD_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+${programArguments}
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>WorkingDirectory</key>
+  <string>${xml(spec.home)}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${xml(spec.path)}</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>${xml(spec.logPath)}</string>
+  <key>StandardErrorPath</key>
+  <string>${xml(spec.logPath)}</string>
+</dict>
+</plist>
+`;
+}
+function systemdWord(value, options = { dollars: true }) {
+  let escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%");
+  if (options.dollars) escaped = escaped.replace(/\$/g, "$$$$");
+  return /^[\w@%+=:,./-]+$/.test(escaped) ? escaped : `"${escaped}"`;
+}
+function systemdUnit(spec) {
+  const exec = [spec.node, spec.script, "bridge", "connect", ...spec.args].map((arg) => systemdWord(arg)).join(" ");
+  const literal = (value) => value.replace(/%/g, "%%");
+  return `[Unit]
+Description=DevPilot bridge (devpilot bridge connect)
+
+[Service]
+ExecStart=${exec}
+WorkingDirectory=${literal(spec.home)}
+Environment=${systemdWord(`PATH=${spec.path}`, { dollars: false })}
+Restart=always
+RestartSec=30
+StandardOutput=append:${literal(spec.logPath)}
+StandardError=append:${literal(spec.logPath)}
+
+[Install]
+WantedBy=default.target
+`;
+}
+function inspectService(paths, sys) {
+  const kind = serviceKind(sys.platform);
+  if (!kind) {
+    return { supported: false, kind: null, path: null, installed: false, loaded: false, pid: null, args: null, url: null };
+  }
+  const path = kind === "launchd" ? paths.plistPath : paths.unitPath;
+  if (!existsSync13(path)) {
+    return { supported: true, kind, path, installed: false, loaded: false, pid: null, args: null, url: null };
+  }
+  const record = readJson(paths.serviceRecordPath);
+  const info = {
+    supported: true,
+    kind,
+    path,
+    installed: true,
+    loaded: false,
+    pid: null,
+    args: record?.args ?? null,
+    url: record?.url ?? null
+  };
+  if (kind === "launchd") {
+    const result = sys.run("launchctl", ["print", `gui/${sys.uid}/${LAUNCHD_LABEL}`]);
+    info.loaded = result.status === 0;
+    const pid = /^\s*pid = (\d+)/m.exec(result.stdout);
+    if (info.loaded && pid) info.pid = Number(pid[1]);
+  } else {
+    const result = sys.run("systemctl", ["--user", "show", SYSTEMD_UNIT, "--property=ActiveState,MainPID,UnitFileState"]);
+    const field = (name) => new RegExp(`^${name}=(.*)$`, "m").exec(result.stdout)?.[1]?.trim() ?? "";
+    const active = field("ActiveState");
+    info.loaded = result.status === 0 && (field("UnitFileState") === "enabled" || active === "active" || active === "activating");
+    const pid = Number(field("MainPID"));
+    if (info.loaded && pid > 0) info.pid = pid;
+  }
+  return info;
+}
+var NO_SAVE_MESSAGE = [
+  "--no-save cannot be used with a background bridge",
+  "It reads its token from the saved file, so there is nowhere else to keep it.",
+  "`devpilot bridge connect --no-save` runs one in the foreground without saving."
+].join("\n");
+async function terminate(pid, sys, termWaitMs, pollMs) {
+  const goneWithin = async (ms) => {
+    const deadline = Date.now() + ms;
+    while (sys.isAlive(pid)) {
+      if (Date.now() >= deadline) return false;
+      await sleep(pollMs);
+    }
+    return true;
+  };
+  sys.kill(pid, "SIGTERM");
+  if (await goneWithin(termWaitMs)) return { forced: false, gone: true };
+  sys.kill(pid, "SIGKILL");
+  return { forced: true, gone: await goneWithin(2e3) };
+}
+async function startBridge(input, sys) {
+  const { paths } = input;
+  const wait = { ...DEFAULT_WAIT, ...input.wait };
+  const split = splitConnectArgs(input.args);
+  if (split.invalid) return { status: "invalid-args", message: split.invalid };
+  if (split.noSave) return { status: "invalid-args", message: NO_SAVE_MESSAGE };
+  const running = liveState(paths, sys);
+  if (running) return { status: "already-running", pid: running.pid, startedAt: running.startedAt };
+  const service2 = inspectService(paths, sys);
+  if (service2.installed) {
+    return { status: "service-installed", kind: service2.kind, path: service2.path, loaded: service2.loaded };
+  }
+  const credentials = prepareCredentials(split, input.env, paths.credentialsPath);
+  if (!credentials.ok) return credentials.outcome;
+  const others = unmanagedBridges(sys, []);
+  mkdirSync11(paths.stateDir, { recursive: true, mode: 448 });
+  rmSync3(paths.statePath, { force: true });
+  const offset = openLog(paths.logPath, `devpilot bridge start (cli ${input.cliVersion})`);
+  const pid = sys.spawnDetached(input.node, [input.script, "bridge", "connect", ...split.forwarded], {
+    logPath: paths.logPath,
+    env: childEnv(input.env, split.sessionApiKey),
+    // Not the directory `start` happened to be run in: that one can be
+    // deleted under a process meant to run for weeks.
+    cwd: paths.home
+  });
+  if (pid === null) {
+    credentials.rollback();
+    return { status: "spawn-failed", node: input.node };
+  }
+  const state = {
+    pid,
+    startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    url: credentials.url,
+    args: split.forwarded,
+    node: input.node,
+    script: input.script,
+    logPath: paths.logPath,
+    cliVersion: input.cliVersion
+  };
+  writeJson(paths.statePath, state);
+  const registration = await awaitRegistered(paths.logPath, offset, () => sys.isAlive(pid), wait);
+  if (!registration.ok) {
+    if (sys.isAlive(pid)) await terminate(pid, sys, 5e3, wait.pollMs);
+    rmSync3(paths.statePath, { force: true });
+    credentials.rollback();
+    return { status: "failed", reason: registration.reason, lines: registration.lines, logPath: paths.logPath };
+  }
+  return {
+    status: "started",
+    pid,
+    url: credentials.url,
+    args: split.forwarded,
+    logPath: paths.logPath,
+    savedCredentials: credentials.saved,
+    others
+  };
+}
+async function stopBridge(paths, sys, options = {}) {
+  const state = readState(paths);
+  if (state && isBridgeProcess(state.pid, sys)) {
+    const { forced, gone } = await terminate(state.pid, sys, options.termWaitMs ?? 1e4, options.pollMs ?? 100);
+    if (!gone) return { status: "still-running", pid: state.pid };
+    rmSync3(paths.statePath, { force: true });
+    return { status: "stopped", pid: state.pid, forced };
+  }
+  rmSync3(paths.statePath, { force: true });
+  if (state && sys.isAlive(state.pid)) return { status: "not-ours", pid: state.pid };
+  const service2 = inspectService(paths, sys);
+  if (service2.installed && service2.loaded) return { status: "service-managed", kind: service2.kind };
+  return state ? { status: "not-running", stalePid: state.pid } : { status: "not-running" };
+}
+function bridgeStatus(paths, sys, options = {}) {
+  const saved = loadBridgeCredentials3(paths.credentialsPath);
+  const recorded = readState(paths);
+  const live = recorded && isBridgeProcess(recorded.pid, sys) ? recorded : null;
+  const service2 = inspectService(paths, sys);
+  const servicePid = service2.pid !== null && sys.isAlive(service2.pid) ? service2.pid : null;
+  const managedBy = live ? "background" : servicePid !== null ? "service" : null;
+  return {
+    running: managedBy !== null,
+    managedBy,
+    pid: live ? live.pid : servicePid,
+    since: live ? live.startedAt : servicePid !== null ? sys.startTime(servicePid) : null,
+    args: live ? live.args : servicePid !== null ? service2.args : null,
+    credentials: { saved: saved !== null, url: saved?.url ?? null, path: paths.credentialsPath },
+    background: live ? { pid: live.pid, startedAt: live.startedAt, url: live.url, args: live.args, cliVersion: live.cliVersion } : null,
+    stale: recorded && !live ? { pid: recorded.pid, startedAt: recorded.startedAt } : null,
+    unmanaged: unmanagedBridges(sys, [live?.pid ?? null, service2.pid]),
+    service: service2,
+    log: { path: paths.logPath, exists: existsSync13(paths.logPath), tail: tailLog(paths.logPath, options.tail ?? 5, { skipBlank: true }) }
+  };
+}
+var SESSION_KEY_MESSAGE = [
+  "--session-api-key cannot be given to the login service",
+  "A service has no shell environment to carry it in, so the key would have to be",
+  "written into the service file. `devpilot bridge start` takes it, and passes it to",
+  "the bridge in its environment without writing it anywhere."
+].join("\n");
+function loadService(kind, path, sys) {
+  if (kind === "launchd") {
+    const bootstrap = sys.run("launchctl", ["bootstrap", `gui/${sys.uid}`, path]);
+    if (bootstrap.status === 0) return bootstrap;
+    const legacy = sys.run("launchctl", ["load", "-w", path]);
+    return legacy.status === 0 ? legacy : { ...legacy, stderr: `${bootstrap.stderr.trim()}
+${legacy.stderr.trim()}`.trim() };
+  }
+  const reload = sys.run("systemctl", ["--user", "daemon-reload"]);
+  if (reload.status !== 0) return reload;
+  return sys.run("systemctl", ["--user", "enable", "--now", SYSTEMD_UNIT]);
+}
+function unloadService(kind, path, sys) {
+  if (kind === "launchd") {
+    const bootout = sys.run("launchctl", ["bootout", `gui/${sys.uid}/${LAUNCHD_LABEL}`]);
+    if (bootout.status === 0) return bootout;
+    return sys.run("launchctl", ["unload", path]);
+  }
+  return sys.run("systemctl", ["--user", "disable", "--now", SYSTEMD_UNIT]);
+}
+function removeServiceFile(kind, path, paths, sys) {
+  rmSync3(path, { force: true });
+  rmSync3(paths.serviceRecordPath, { force: true });
+  if (kind === "systemd") sys.run("systemctl", ["--user", "daemon-reload"]);
+}
+async function installService(input, sys) {
+  const { paths } = input;
+  const wait = { ...DEFAULT_WAIT, ...input.wait };
+  const kind = serviceKind(sys.platform);
+  if (!kind) return { status: "unsupported", platform: sys.platform };
+  const path = kind === "launchd" ? paths.plistPath : paths.unitPath;
+  const split = splitConnectArgs(input.args);
+  if (split.invalid) return { status: "invalid-args", message: split.invalid };
+  if (split.noSave) return { status: "invalid-args", message: NO_SAVE_MESSAGE };
+  if (split.sessionApiKey) return { status: "invalid-args", message: SESSION_KEY_MESSAGE };
+  const running = liveState(paths, sys);
+  if (running) return { status: "background-running", pid: running.pid };
+  const existing = inspectService(paths, sys);
+  if (existing.installed) return { status: "already-installed", kind, path, loaded: existing.loaded };
+  const credentials = prepareCredentials(split, input.env, paths.credentialsPath);
+  if (!credentials.ok) return credentials.outcome;
+  const spec = {
+    home: paths.home,
+    node: input.node,
+    script: input.script,
+    args: split.forwarded,
+    logPath: paths.logPath,
+    path: servicePathEnv({ node: input.node, claude: input.claudePath, envPath: input.env.PATH })
+  };
+  const others = unmanagedBridges(sys, []);
+  mkdirSync11(paths.stateDir, { recursive: true, mode: 448 });
+  const offset = openLog(paths.logPath, `devpilot bridge install (${kind}, cli ${input.cliVersion})`);
+  mkdirSync11(dirname8(path), { recursive: true });
+  writeFileSync12(path, kind === "launchd" ? launchdPlist(spec) : systemdUnit(spec), { mode: 420 });
+  const loaded = loadService(kind, path, sys);
+  if (loaded.status !== 0) {
+    removeServiceFile(kind, path, paths, sys);
+    credentials.rollback();
+    return {
+      status: "load-failed",
+      kind,
+      message: redact(loaded.stderr.trim() || `${kind === "launchd" ? "launchctl" : "systemctl"} could not be run`)
+    };
+  }
+  const record = {
+    kind,
+    path,
+    installedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    url: credentials.url,
+    args: split.forwarded,
+    node: input.node,
+    script: input.script,
+    cliVersion: input.cliVersion
+  };
+  writeJson(paths.serviceRecordPath, record);
+  const registration = await awaitRegistered(paths.logPath, offset, (log) => !/^\s*(✗|error:)/m.test(log), wait);
+  if (!registration.ok) {
+    unloadService(kind, path, sys);
+    removeServiceFile(kind, path, paths, sys);
+    credentials.rollback();
+    return { status: "failed", reason: registration.reason, lines: registration.lines, logPath: paths.logPath };
+  }
+  return {
+    status: "installed",
+    kind,
+    path,
+    url: credentials.url,
+    args: split.forwarded,
+    logPath: paths.logPath,
+    savedCredentials: credentials.saved,
+    others
+  };
+}
+function uninstallService(paths, sys) {
+  const kind = serviceKind(sys.platform);
+  if (!kind) return { status: "unsupported", platform: sys.platform };
+  const path = kind === "launchd" ? paths.plistPath : paths.unitPath;
+  if (!existsSync13(path)) {
+    rmSync3(paths.serviceRecordPath, { force: true });
+    return { status: "not-installed", kind, path };
+  }
+  const unloaded = unloadService(kind, path, sys);
+  if (unloaded.status !== 0 && inspectService(paths, sys).loaded) {
+    return {
+      status: "unload-failed",
+      kind,
+      path,
+      message: redact(unloaded.stderr.trim() || `${kind === "launchd" ? "launchctl" : "systemctl"} did not unload it`)
+    };
+  }
+  removeServiceFile(kind, path, paths, sys);
+  return { status: "uninstalled", kind, path };
+}
+
+// src/commands/bridge/background.ts
 import { Command as Command10 } from "commander";
 import chalk14 from "chalk";
-var statusCommand2 = new Command10("status").description("Check bridge connection status").option("-u, --bridge-url <url>", "Bridge service URL", process.env.DEVPILOT_BRIDGE_URL).option("-i, --orchestrator-id <id>", "Orchestrator ID").option("-k, --api-key <key>", "API key", process.env.DEVPILOT_BRIDGE_API_KEY).action(async (options) => {
-  if (!options.bridgeUrl) {
-    console.error(chalk14.red("\u2717 Error: Bridge URL required"));
-    console.error(chalk14.gray("   Use: devpilot bridge status -u <url>"));
-    process.exit(1);
+import { existsSync as existsSync14, statSync as statSync4 } from "fs";
+import { resolve as resolve5 } from "path";
+function displayPath(path, home) {
+  return path === home ? "~" : path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
+}
+function shellJoin(args) {
+  return args.map((arg) => /^[\w@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`).join(" ");
+}
+function launchInput(args) {
+  return {
+    paths: bridgePaths(),
+    args,
+    node: process.execPath,
+    script: resolve5(process.argv[1] ?? "devpilot"),
+    env: process.env,
+    cliVersion: VERSION
+  };
+}
+function printLogLines(lines) {
+  if (lines.length === 0) {
+    console.error(chalk14.gray("   (it wrote nothing to the log)"));
+    return;
   }
-  console.log(chalk14.cyan("\u{1F309} DevPilot Bridge Status"));
+  for (const line of lines) console.error(chalk14.gray(`   \u2502 ${line}`));
+}
+function printRefusal(message) {
+  const [first, ...rest] = message.split("\n");
+  console.error(chalk14.red(`\u2717 ${first}`));
+  for (const line of rest) console.error(chalk14.gray(`  ${line}`));
+}
+function printOtherBridges(pids) {
+  if (pids.length === 0) return;
+  const which = pids.length === 1 ? `pid ${pids[0]} is` : `pids ${pids.join(", ")} are`;
   console.log("");
-  try {
-    const healthRes = await fetch(`${options.bridgeUrl}/health`);
-    const health = await healthRes.json();
-    console.log(chalk14.white("Bridge Status:"));
-    if (health.status === "ok") {
-      console.log(chalk14.gray("  Status: ") + chalk14.green("\u2713 Online"));
-    } else {
-      console.log(chalk14.gray("  Status: ") + chalk14.red("\u2717 Offline"));
-    }
-    console.log("");
-    if (options.orchestratorId) {
-      const orchRes = await fetch(
-        `${options.bridgeUrl}/api/orchestrators/${options.orchestratorId}`,
-        {
-          headers: {
-            "Authorization": `Bearer ${options.apiKey}`
-          }
-        }
-      );
-      if (orchRes.ok) {
-        const orch = await orchRes.json();
-        console.log(chalk14.white("Orchestrator Status:"));
-        console.log(chalk14.gray("  ID: ") + chalk14.cyan(orch.id));
-        console.log(chalk14.gray("  Name: ") + chalk14.white(orch.name));
-        if (orch.isOnline) {
-          console.log(chalk14.gray("  Online: ") + chalk14.green("\u2713"));
-        } else {
-          console.log(chalk14.gray("  Online: ") + chalk14.red("\u2717"));
-        }
-        console.log(chalk14.gray("  Active Jobs: ") + chalk14.yellow(orch.activeJobs));
-        console.log(chalk14.gray("  Last Heartbeat: ") + chalk14.white(orch.lastHeartbeat || "Never"));
-        console.log(chalk14.gray("  Repos: ") + chalk14.cyan(orch.repos?.join(", ") || "None"));
-      } else {
-        console.log(chalk14.white("Orchestrator Status:"));
-        console.log(chalk14.gray("  ") + chalk14.red("Not found or unauthorized"));
-      }
-    }
-  } catch (error) {
-    console.error(chalk14.red("\u2717 Error checking status:"));
-    console.error(chalk14.red(`   ${error instanceof Error ? error.message : error}`));
-    process.exit(1);
+  console.log(chalk14.yellow(`   \u26A0 ${which} also running \`devpilot bridge connect\` on this machine`));
+  console.log(chalk14.gray("     \u2014 started in a terminal, or by something other than this command. If it"));
+  console.log(chalk14.gray("     connects to the same bridge, stop it: two bridges each report every session."));
+}
+function printNoCredentials(url, command) {
+  if (url) {
+    console.error(chalk14.red(`\u2717 No token is saved for ${url}`));
+  } else {
+    console.error(chalk14.red("\u2717 No bridge credentials are saved on this machine"));
   }
+  console.error(chalk14.gray("  Mint a token in the dashboard under Settings \u2192 Tokens, then:"));
+  console.error(chalk14.gray(`    devpilot bridge ${command} --token <token>`));
+  console.error(chalk14.gray("  It is saved to ~/.devpilot/bridge.json (readable by you only) and is not"));
+  console.error(chalk14.gray("  passed on the command line of the bridge that is started."));
+}
+var FORWARDED_HELP = `
+Takes the same options as \`devpilot bridge connect\` (--repos, --plan, --name,
+--no-observe, \u2026) and starts the bridge with them. \`--url\` and \`--token\` are
+saved to ~/.devpilot/bridge.json and are not passed on.`;
+var startCommand = new Command10("start").description("Start the bridge in the background, detached from this terminal").argument("[connect options...]", "Options for `devpilot bridge connect`").allowUnknownOption().addHelpText("after", FORWARDED_HELP).action(async (_forwarded, _options, command) => {
+  const input = launchInput(command.args);
+  const { home } = input.paths;
+  const outcome = await startBridge(input, realSystem());
+  switch (outcome.status) {
+    case "started":
+      console.log(chalk14.green(`\u2713 Bridge started in the background`) + chalk14.gray(` (pid ${outcome.pid})`));
+      console.log(chalk14.gray(`   ${outcome.url}`));
+      if (outcome.args.length > 0) console.log(chalk14.gray(`   with: ${shellJoin(outcome.args)}`));
+      if (outcome.savedCredentials) {
+        console.log(chalk14.gray(`   token saved in ${displayPath(input.paths.credentialsPath, home)}`));
+      }
+      console.log(chalk14.gray(`   log:  ${displayPath(outcome.logPath, home)}`));
+      console.log("");
+      console.log(chalk14.gray("   It keeps running after this terminal closes, until the machine restarts or"));
+      console.log(chalk14.gray("   you run `devpilot bridge stop`. To have it start at login as well, stop it"));
+      console.log(chalk14.gray("   and run `devpilot bridge install`."));
+      printOtherBridges(outcome.others);
+      return;
+    case "already-running":
+      console.error(chalk14.red(`\u2717 A background bridge is already running (pid ${outcome.pid}, since ${outcome.startedAt})`));
+      console.error(chalk14.gray("  `devpilot bridge status` shows what it was started with."));
+      console.error(chalk14.gray("  `devpilot bridge stop` stops it, if you want to start it differently."));
+      break;
+    case "service-installed":
+      console.error(
+        chalk14.red(
+          outcome.loaded ? "\u2717 The login service is installed and already runs the bridge" : "\u2717 The login service is installed, and will run the bridge at your next login"
+        )
+      );
+      console.error(chalk14.gray(`  ${displayPath(outcome.path, home)}`));
+      console.error(chalk14.gray("  Two bridges on one machine would each report every session."));
+      console.error(chalk14.gray("  `devpilot bridge status` shows it; `devpilot bridge uninstall` removes it,"));
+      console.error(chalk14.gray("  after which `devpilot bridge start` works."));
+      break;
+    case "no-credentials":
+      printNoCredentials(outcome.url, "start");
+      break;
+    case "credentials-unwritable":
+      console.error(chalk14.red(`\u2717 Could not save the token to ${displayPath(outcome.path, home)}`));
+      console.error(chalk14.gray("  A background bridge reads it from there. Check that the directory is writable."));
+      break;
+    case "invalid-args":
+      printRefusal(outcome.message);
+      break;
+    case "spawn-failed":
+      console.error(chalk14.red(`\u2717 Could not start ${outcome.node}`));
+      break;
+    case "failed":
+      console.error(
+        chalk14.red(
+          outcome.reason === "exited" ? "\u2717 The bridge exited instead of connecting. Nothing is running." : "\u2717 The bridge did not register within 30 seconds, so it was stopped. Nothing is running."
+        )
+      );
+      printLogLines(outcome.lines);
+      console.error(chalk14.gray(`  Full log: ${displayPath(outcome.logPath, home)}`));
+      console.error(chalk14.gray("  `devpilot bridge connect` with the same options shows the same thing in the foreground."));
+      break;
+  }
+  process.exitCode = 1;
+});
+var stopCommand = new Command10("stop").description("Stop the bridge that `devpilot bridge start` started").action(async () => {
+  const outcome = await stopBridge(bridgePaths(), realSystem());
+  switch (outcome.status) {
+    case "stopped":
+      console.log(chalk14.green("\u2713 Bridge stopped") + chalk14.gray(` (pid ${outcome.pid})`));
+      if (outcome.forced) {
+        console.log(chalk14.yellow("   It did not exit within 10 seconds of being asked and was killed."));
+        console.log(chalk14.gray("   A run that was in flight may not have reported how it ended."));
+      }
+      return;
+    case "not-running":
+      if (outcome.stalePid) {
+        console.log(chalk14.gray(`No bridge is running. The one recorded (pid ${outcome.stalePid}) had already exited;`));
+        console.log(chalk14.gray("the record was cleared."));
+      } else {
+        console.log(chalk14.gray("No background bridge is running."));
+      }
+      return;
+    case "not-ours":
+      console.log(chalk14.gray(`No bridge is running. Pid ${outcome.pid} was recorded, but that number now belongs`));
+      console.log(chalk14.gray("to another process, which was left alone. The record was cleared."));
+      return;
+    case "service-managed":
+      console.log(chalk14.gray("No background bridge is running \u2014 the login service is running the bridge."));
+      console.log(chalk14.gray("`devpilot bridge uninstall` stops it and removes the service."));
+      return;
+    case "still-running":
+      console.error(chalk14.red(`\u2717 Pid ${outcome.pid} is still running after SIGKILL.`));
+      process.exitCode = 1;
+      return;
+  }
+});
+var logsCommand = new Command10("logs").description("Print the background bridge\u2019s log").option("-f, --follow", "Keep printing as the bridge writes").option("-n, --lines <n>", "How many lines to print", "50").action(async (options) => {
+  const paths = bridgePaths();
+  rotateLog(paths.logPath);
+  if (!existsSync14(paths.logPath)) {
+    console.log(chalk14.gray(`No log yet at ${displayPath(paths.logPath, paths.home)}.`));
+    console.log(chalk14.gray("It is written by `devpilot bridge start` and by the login service."));
+    if (!options.follow) return;
+  }
+  const count = Math.max(0, parseInt(options.lines, 10) || 0);
+  for (const line of tailLog(paths.logPath, count)) console.log(line);
+  if (!options.follow) return;
+  let offset = existsSync14(paths.logPath) ? statSync4(paths.logPath).size : 0;
+  setInterval(() => {
+    const next = readLogFrom(paths.logPath, offset);
+    offset = next.offset;
+    if (next.text) process.stdout.write(redact(next.text));
+  }, 500);
+  await new Promise(() => {
+  });
+});
+
+// src/commands/bridge/status.ts
+function ago(iso, now = Date.now()) {
+  const seconds = Math.max(0, Math.floor((now - new Date(iso).getTime()) / 1e3));
+  if (Number.isNaN(seconds)) return "";
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ${minutes % 60}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+function printStatus(status, home) {
+  const label = (text) => chalk15.gray(text.padEnd(15));
+  const short = (path) => displayPath(path, home);
+  const next = (text) => console.log(" ".repeat(17) + chalk15.gray(text));
+  console.log(chalk15.cyan("\u{1F309} DevPilot bridge"));
+  console.log("");
+  if (status.credentials.saved) {
+    console.log(`  ${label("Credentials")}saved for ${chalk15.white(status.credentials.url)}`);
+    next(short(status.credentials.path));
+  } else {
+    console.log(`  ${label("Credentials")}${chalk15.yellow("none saved")}`);
+    next("`devpilot bridge start --token <token>` saves one and starts the bridge");
+  }
+  if (status.running) {
+    const how = status.managedBy === "service" ? "under the login service" : "in the background";
+    const since = status.since ? `, up ${ago(status.since)} (since ${status.since})` : "";
+    console.log(`  ${label("Bridge")}${chalk15.green("running")} ${how} \u2014 pid ${status.pid}${since}`);
+    if (status.args) next(status.args.length > 0 ? `started with: ${shellJoin(status.args)}` : "started with no options");
+  } else {
+    console.log(`  ${label("Bridge")}${chalk15.red("not running")}`);
+    if (status.stale) {
+      next(`the one started ${status.stale.startedAt} (pid ${status.stale.pid}) has exited \u2014 the log below says why`);
+    }
+    if (status.service.installed && status.service.loaded) {
+      next("the login service is loaded but has no process: it is exiting and being restarted");
+    } else if (!status.service.installed) {
+      next("`devpilot bridge start` starts it; `devpilot bridge install` also starts it at every login");
+    }
+  }
+  if (status.unmanaged.length > 0) {
+    const pids = status.unmanaged.join(", ");
+    console.log(`  ${label("Other bridge")}${chalk15.yellow(`pid ${pids}`)} \u2014 \`bridge connect\` started some other way (a terminal, usually)`);
+    next("not counted above, and not stopped by `devpilot bridge stop`: stop it where it was started");
+  }
+  const service2 = status.service;
+  if (!service2.supported) {
+    console.log(`  ${label("Login service")}not supported on this platform (\`devpilot bridge start\` still works)`);
+  } else if (!service2.installed) {
+    console.log(`  ${label("Login service")}not installed`);
+  } else {
+    const state = service2.loaded ? chalk15.green("installed and loaded") : chalk15.yellow("installed, not loaded");
+    console.log(`  ${label("Login service")}${state} (${service2.kind})`);
+    next(short(service2.path));
+    if (!service2.loaded) next("it loads at the next login; `devpilot bridge uninstall` removes it");
+  }
+  console.log(`  ${label("Log")}${short(status.log.path)}${status.log.exists ? "" : chalk15.gray(" (nothing written yet)")}`);
+  if (status.log.tail.length > 0) {
+    console.log("");
+    for (const line of status.log.tail) console.log(chalk15.gray(`    \u2502 ${line}`));
+    console.log(chalk15.gray("    `devpilot bridge logs -f` follows it"));
+  }
+  console.log("");
+}
+var statusCommand2 = new Command11("status").description("Show whether a bridge is running on this machine, and how").option("--json", "Print the status as JSON").action((options) => {
+  const paths = bridgePaths();
+  rotateLog(paths.logPath);
+  const status = bridgeStatus(paths, realSystem());
+  if (options.json) console.log(JSON.stringify(status, null, 2));
+  else printStatus(status, paths.home);
+  process.exitCode = status.running ? 0 : 1;
+});
+
+// src/commands/bridge/install.ts
+import { Command as Command12 } from "commander";
+import chalk16 from "chalk";
+var SERVICE_NAME = {
+  launchd: "launchd LaunchAgent",
+  systemd: "systemd user unit"
+};
+function printUnsupported(platform) {
+  console.error(chalk16.red(`\u2717 The login service is not supported on ${platform}`));
+  console.error(chalk16.gray("  It is written for launchd (macOS) and systemd (Linux)."));
+  console.error(chalk16.gray("  `devpilot bridge start` works here: it keeps the bridge running after the"));
+  console.error(chalk16.gray("  terminal closes, and needs running again after a restart."));
+}
+var FORWARDED_HELP2 = `
+Takes the same options as \`devpilot bridge connect\` (--repos, --plan, --name,
+--no-observe, \u2026); the service runs the bridge with them. \`--url\` and \`--token\`
+are saved to ~/.devpilot/bridge.json and are not written into the service file.
+
+The service does not inherit your shell's environment. Anything you set through
+a DEVPILOT_* variable for \`connect\` has to be given here as a flag.`;
+var installCommand = new Command12("install").description("Install the bridge as a login service, so it starts again after a restart").argument("[connect options...]", "Options for `devpilot bridge connect`").allowUnknownOption().addHelpText("after", FORWARDED_HELP2).action(async (_forwarded, _options, command) => {
+  const input = launchInput(command.args);
+  const { home } = input.paths;
+  const outcome = await installService(
+    { ...input, claudePath: findOnPath("claude", process.env.PATH) },
+    realSystem()
+  );
+  switch (outcome.status) {
+    case "installed":
+      console.log(chalk16.green("\u2713 Bridge installed as a login service") + chalk16.gray(` (${SERVICE_NAME[outcome.kind]})`));
+      console.log(chalk16.gray(`   ${displayPath(outcome.path, home)}`));
+      console.log(chalk16.gray(`   ${outcome.url}`));
+      if (outcome.args.length > 0) console.log(chalk16.gray(`   with: ${shellJoin(outcome.args)}`));
+      if (outcome.savedCredentials) {
+        console.log(chalk16.gray(`   token saved in ${displayPath(input.paths.credentialsPath, home)}`));
+      }
+      console.log(chalk16.gray(`   log:  ${displayPath(outcome.logPath, home)}`));
+      console.log("");
+      console.log(chalk16.gray("   It is running now, starts at login, and is restarted if it exits."));
+      if (outcome.kind === "systemd") {
+        console.log(chalk16.gray("   A user unit runs only while you are logged in. On a machine that should"));
+        console.log(chalk16.gray("   run it with nobody logged in: `loginctl enable-linger $USER`."));
+      }
+      console.log(chalk16.gray("   `devpilot bridge status` shows it; `devpilot bridge uninstall` removes it."));
+      printOtherBridges(outcome.others);
+      return;
+    case "unsupported":
+      printUnsupported(outcome.platform);
+      break;
+    case "already-installed":
+      console.error(chalk16.red("\u2717 The login service is already installed"));
+      console.error(chalk16.gray(`  ${displayPath(outcome.path, home)}`));
+      if (!outcome.loaded) console.error(chalk16.gray("  It is not loaded right now; it would be at your next login."));
+      console.error(chalk16.gray("  To change what it runs with: `devpilot bridge uninstall`, then install again."));
+      break;
+    case "background-running":
+      console.error(chalk16.red(`\u2717 A background bridge is running (pid ${outcome.pid})`));
+      console.error(chalk16.gray("  Two bridges on one machine would each report every session."));
+      console.error(chalk16.gray("  Run `devpilot bridge stop`, then install."));
+      break;
+    case "no-credentials":
+      printNoCredentials(outcome.url, "install");
+      break;
+    case "credentials-unwritable":
+      console.error(chalk16.red(`\u2717 Could not save the token to ${displayPath(outcome.path, home)}`));
+      console.error(chalk16.gray("  The service reads it from there. Check that the directory is writable."));
+      break;
+    case "invalid-args":
+      printRefusal(outcome.message);
+      break;
+    case "load-failed":
+      console.error(chalk16.red(`\u2717 ${outcome.kind === "launchd" ? "launchd" : "systemd"} would not load the service. Nothing was installed.`));
+      for (const line of outcome.message.split("\n")) console.error(chalk16.gray(`   \u2502 ${line}`));
+      console.error(chalk16.gray("  `devpilot bridge start` does not need it."));
+      break;
+    case "failed":
+      console.error(
+        chalk16.red(
+          outcome.reason === "exited" ? "\u2717 The service loaded, but the bridge it started could not connect. It was removed again." : "\u2717 The service loaded, but the bridge did not register within 30 seconds. It was removed again."
+        )
+      );
+      printLogLines(outcome.lines);
+      console.error(chalk16.gray(`  Full log: ${displayPath(outcome.logPath, home)}`));
+      break;
+  }
+  process.exitCode = 1;
+});
+var uninstallCommand = new Command12("uninstall").description("Stop the login service and remove it").action(() => {
+  const paths = bridgePaths();
+  const outcome = uninstallService(paths, realSystem());
+  if (outcome.status === "unsupported") {
+    printUnsupported(outcome.platform);
+    process.exitCode = 1;
+    return;
+  }
+  if (outcome.status === "not-installed") {
+    console.log(chalk16.gray("The login service is not installed."));
+    console.log(chalk16.gray(`  (nothing at ${displayPath(outcome.path, paths.home)})`));
+    console.log(chalk16.gray("  A bridge started with `devpilot bridge start` is stopped with `devpilot bridge stop`."));
+    return;
+  }
+  if (outcome.status === "unload-failed") {
+    console.error(chalk16.red(`\u2717 ${outcome.kind === "launchd" ? "launchd" : "systemd"} still has the service loaded. It was not removed.`));
+    for (const line of outcome.message.split("\n")) console.error(chalk16.gray(`   \u2502 ${line}`));
+    console.error(chalk16.gray(`  ${displayPath(outcome.path, paths.home)}`));
+    process.exitCode = 1;
+    return;
+  }
+  console.log(chalk16.green("\u2713 Login service removed") + chalk16.gray(` (${SERVICE_NAME[outcome.kind]})`));
+  console.log(chalk16.gray(`   ${displayPath(outcome.path, paths.home)}`));
+  console.log(chalk16.gray("   The saved token is untouched; `devpilot bridge disconnect` forgets it."));
 });
 
 // src/commands/bridge.ts
-var bridgeCommand = new Command11("bridge").description("Manage connection to DevPilot cloud bridge").addCommand(connectCommand).addCommand(disconnectCommand).addCommand(statusCommand2);
+var bridgeCommand = new Command13("bridge").description("Manage connection to DevPilot cloud bridge").addCommand(connectCommand).addCommand(startCommand).addCommand(stopCommand).addCommand(installCommand).addCommand(uninstallCommand).addCommand(statusCommand2).addCommand(logsCommand).addCommand(disconnectCommand);
 
 // src/commands/session.ts
-import { Command as Command15 } from "commander";
+import { Command as Command17 } from "commander";
 
 // src/commands/session/new.ts
 import os2 from "os";
-import { Command as Command12 } from "commander";
-import chalk15 from "chalk";
+import { Command as Command14 } from "commander";
+import chalk17 from "chalk";
 import { buildSessionHandoff, SESSION_LIMITS } from "@devpilot.sh/bridge-protocol";
 import {
-  DEFAULT_BRIDGE_URL as DEFAULT_BRIDGE_URL3,
+  DEFAULT_BRIDGE_URL as DEFAULT_BRIDGE_URL4,
   SharedSessionClient,
-  resolveBridgeCredentials as resolveBridgeCredentials3
+  resolveBridgeCredentials as resolveBridgeCredentials4
 } from "@devpilot.sh/bridge-client";
 var MODES = ["observe", "relay", "auto"];
-var newCommand = new Command12("new").description("Create a shared session and print the message to send your teammate").argument("<title>", "What this session is about (stored in plaintext \u2014 no secrets)").option("-u, --url <url>", "Bridge URL (defaults to the one this machine is connected to)").option("-t, --token <token>", "Machine token (defaults to the one this machine is connected with)").option("--issue <identifier>", "Linear issue identifier to attach, e.g. ENG-394").option(
+var newCommand = new Command14("new").description("Create a shared session and print the message to send your teammate").argument("<title>", "What this session is about (stored in plaintext \u2014 no secrets)").option("-u, --url <url>", "Bridge URL (defaults to the one this machine is connected to)").option("-t, --token <token>", "Machine token (defaults to the one this machine is connected with)").option("--issue <identifier>", "Linear issue identifier to attach, e.g. ENG-394").option(
   "--mode <mode>",
   "observe (agents post only when asked) | relay | auto (agents may reply, bounded)",
   "observe"
 ).option("--budget <n>", `Agent messages allowed in auto mode (default ${SESSION_LIMITS.autoDefaultBudget})`).option("--minutes <n>", `Minutes auto mode lasts (default ${SESSION_LIMITS.autoDefaultTtlMinutes})`).option("-n, --name <name>", "Your display name in the transcript", os2.hostname()).option("-m, --message <text>", "Post this as the first message (encrypted)").option("--link-only", "Print just the join link, for scripts").action(async (title, options) => {
-  const credentials = resolveBridgeCredentials3({ url: options.url, token: options.token });
+  const credentials = resolveBridgeCredentials4({ url: options.url, token: options.token });
   if (!credentials.token) {
-    console.error(chalk15.red("\u2717 No machine token"));
+    console.error(chalk17.red("\u2717 No machine token"));
     console.error(
-      chalk15.gray("  Connect this machine once with `devpilot bridge connect --token <token>` and it")
+      chalk17.gray("  Connect this machine once with `devpilot bridge connect --token <token>` and it")
     );
-    console.error(chalk15.gray("  is remembered, or pass --token / set DEVPILOT_BRIDGE_TOKEN."));
+    console.error(chalk17.gray("  is remembered, or pass --token / set DEVPILOT_BRIDGE_TOKEN."));
     process.exit(1);
   }
   if (!MODES.includes(options.mode)) {
-    console.error(chalk15.red(`\u2717 Unknown mode "${options.mode}" \u2014 use observe, relay or auto`));
+    console.error(chalk17.red(`\u2717 Unknown mode "${options.mode}" \u2014 use observe, relay or auto`));
     process.exit(1);
   }
   const mode = options.mode;
   const autoBudget = options.budget ? parseInt(options.budget, 10) : SESSION_LIMITS.autoDefaultBudget;
   const autoTtlMinutes = options.minutes ? parseInt(options.minutes, 10) : SESSION_LIMITS.autoDefaultTtlMinutes;
   if (mode === "auto" && !(autoBudget > 0 && autoTtlMinutes > 0)) {
-    console.error(chalk15.red("\u2717 auto mode needs a positive --budget and --minutes"));
+    console.error(chalk17.red("\u2717 auto mode needs a positive --budget and --minutes"));
     process.exit(1);
   }
   let created;
   try {
     created = await SharedSessionClient.create({
-      baseUrl: credentials.url ?? DEFAULT_BRIDGE_URL3,
+      baseUrl: credentials.url ?? DEFAULT_BRIDGE_URL4,
       token: credentials.token,
       title,
       displayName: options.name,
@@ -4271,8 +5284,8 @@ var newCommand = new Command12("new").description("Create a shared session and p
       autoTtlMinutes
     });
   } catch (err) {
-    console.error(chalk15.red("\u2717 Could not create the session"));
-    console.error(chalk15.gray(`  ${err instanceof Error ? err.message : String(err)}`));
+    console.error(chalk17.red("\u2717 Could not create the session"));
+    console.error(chalk17.gray(`  ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
   }
   const { client: client2, link } = created;
@@ -4282,79 +5295,79 @@ var newCommand = new Command12("new").description("Create a shared session and p
     return;
   }
   console.log("");
-  console.log(chalk15.cyan(`  ${title}`) + chalk15.gray(`  \xB7  ${mode}`));
+  console.log(chalk17.cyan(`  ${title}`) + chalk17.gray(`  \xB7  ${mode}`));
   console.log("");
-  console.log(chalk15.gray("  Send this to your teammate:"));
+  console.log(chalk17.gray("  Send this to your teammate:"));
   console.log("");
   for (const line of buildSessionHandoff({ title, link, mode, autoBudget, autoTtlMinutes }).split("\n")) {
     console.log(`  ${line}`);
   }
   console.log("");
-  console.log(chalk15.yellow("  Anyone with that link can read the whole transcript."));
-  console.log(chalk15.gray("  The key is after the #, and never reaches the bridge. To revoke the"));
-  console.log(chalk15.gray("  link, re-key the session from the dashboard; that ends access for it"));
-  console.log(chalk15.gray("  but cannot un-send what was already read."));
+  console.log(chalk17.yellow("  Anyone with that link can read the whole transcript."));
+  console.log(chalk17.gray("  The key is after the #, and never reaches the bridge. To revoke the"));
+  console.log(chalk17.gray("  link, re-key the session from the dashboard; that ends access for it"));
+  console.log(chalk17.gray("  but cannot un-send what was already read."));
   console.log("");
-  console.log(chalk15.gray(`  Follow it here with:  devpilot session tail "${chalk15.italic("<link>")}"`));
+  console.log(chalk17.gray(`  Follow it here with:  devpilot session tail "${chalk17.italic("<link>")}"`));
   console.log("");
 });
 
 // src/commands/session/join.ts
 import os3 from "os";
-import { Command as Command13 } from "commander";
-import chalk16 from "chalk";
+import { Command as Command15 } from "commander";
+import chalk18 from "chalk";
 import { SharedSessionClient as SharedSessionClient2 } from "@devpilot.sh/bridge-client";
-var joinCommand = new Command13("join").description("Join a shared session by link and post a message").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", os3.hostname()).option("-m, --message <text>", "Post this message after joining").action(async (url, options) => {
+var joinCommand = new Command15("join").description("Join a shared session by link and post a message").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", os3.hostname()).option("-m, --message <text>", "Post this message after joining").action(async (url, options) => {
   try {
     const client2 = await SharedSessionClient2.join({ link: url, displayName: options.name });
     const s = client2.session;
-    console.log(chalk16.cyan(`
+    console.log(chalk18.cyan(`
   ${s.title}`));
-    console.log(chalk16.gray(`  mode: ${s.mode}  \xB7  messages: ${s.lastSeq ?? 0}
+    console.log(chalk18.gray(`  mode: ${s.mode}  \xB7  messages: ${s.lastSeq ?? 0}
 `));
     if (options.message) {
       const posted = await client2.post(options.message);
-      console.log(chalk16.green(`  posted #${posted.seq}
+      console.log(chalk18.green(`  posted #${posted.seq}
 `));
     }
     const participants = await client2.who();
     for (const p of participants) {
-      const agent = p.agentKind ? chalk16.gray(` [${p.agentKind}]`) : "";
-      console.log(`  \xB7 ${p.displayName}${agent}${p.leftAt ? chalk16.gray(" (left)") : ""}`);
+      const agent = p.agentKind ? chalk18.gray(` [${p.agentKind}]`) : "";
+      console.log(`  \xB7 ${p.displayName}${agent}${p.leftAt ? chalk18.gray(" (left)") : ""}`);
     }
     console.log("");
   } catch (err) {
-    console.error(chalk16.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
+    console.error(chalk18.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
   }
 });
 
 // src/commands/session/tail.ts
 import os4 from "os";
-import { Command as Command14 } from "commander";
-import chalk17 from "chalk";
+import { Command as Command16 } from "commander";
+import chalk19 from "chalk";
 import { SharedSessionClient as SharedSessionClient3 } from "@devpilot.sh/bridge-client";
-var tailCommand = new Command14("tail").description("Follow a shared session transcript in the terminal").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", os4.hostname()).option("-i, --interval <seconds>", "Poll interval", "3").action(async (url, options) => {
+var tailCommand = new Command16("tail").description("Follow a shared session transcript in the terminal").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", os4.hostname()).option("-i, --interval <seconds>", "Poll interval", "3").action(async (url, options) => {
   const intervalMs = Math.max(1, parseInt(options.interval, 10) || 3) * 1e3;
   let client2;
   try {
     client2 = await SharedSessionClient3.join({ link: url, displayName: options.name });
   } catch (err) {
-    console.error(chalk17.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
+    console.error(chalk19.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
     return;
   }
   const names = /* @__PURE__ */ new Map();
   for (const p of await client2.who()) names.set(p.id, p.displayName);
-  console.log(chalk17.cyan(`
+  console.log(chalk19.cyan(`
   ${client2.session.title}`));
-  console.log(chalk17.gray(`  following \xB7 ctrl-c to stop
+  console.log(chalk19.gray(`  following \xB7 ctrl-c to stop
 `));
   let cursor = 0;
   let stopped = false;
   process.on("SIGINT", () => {
     stopped = true;
-    console.log(chalk17.gray("\n  stopped\n"));
+    console.log(chalk19.gray("\n  stopped\n"));
     process.exit(0);
   });
   while (!stopped) {
@@ -4368,49 +5381,49 @@ var tailCommand = new Command14("tail").description("Follow a shared session tra
         cursor = latestSeq;
       }
     } catch (err) {
-      console.error(chalk17.gray(`  \u2026 ${err instanceof Error ? err.message : String(err)}`));
+      console.error(chalk19.gray(`  \u2026 ${err instanceof Error ? err.message : String(err)}`));
     }
     await new Promise((r) => setTimeout(r, intervalMs));
   }
 });
 function format(e, names) {
   const who = e.participantId ? names.get(e.participantId) ?? e.participantId : "system";
-  const seq = chalk17.gray(`#${String(e.seq).padStart(3)}`);
+  const seq = chalk19.gray(`#${String(e.seq).padStart(3)}`);
   if (e.status === "system") {
     const reason = e.systemNotice?.reason ? ` (${e.systemNotice.reason})` : "";
-    return `  ${seq} ${chalk17.yellow(`\u2699 ${e.systemNotice?.type ?? e.text}${reason}`)}`;
+    return `  ${seq} ${chalk19.yellow(`\u2699 ${e.systemNotice?.type ?? e.text}${reason}`)}`;
   }
   if (e.status === "undecryptable") {
-    return `  ${seq} ${chalk17.gray(`${who}: <sealed under an earlier key \u2014 not readable with this link>`)}`;
+    return `  ${seq} ${chalk19.gray(`${who}: <sealed under an earlier key \u2014 not readable with this link>`)}`;
   }
-  return `  ${seq} ${chalk17.bold(who)}: ${e.text}`;
+  return `  ${seq} ${chalk19.bold(who)}: ${e.text}`;
 }
 
 // src/commands/session.ts
-var sessionCommand = new Command15("session").description("Shared, end-to-end encrypted sessions across machines").addCommand(newCommand).addCommand(joinCommand).addCommand(tailCommand);
+var sessionCommand = new Command17("session").description("Shared, end-to-end encrypted sessions across machines").addCommand(newCommand).addCommand(joinCommand).addCommand(tailCommand);
 
 // src/commands/sessions/index.ts
 import os5 from "os";
-import { homedir as homedir6 } from "os";
-import { join as join13, dirname as dirname8 } from "path";
-import { existsSync as existsSync13, readFileSync as readFileSync13, writeFileSync as writeFileSync12, mkdirSync as mkdirSync11 } from "fs";
-import { Command as Command16 } from "commander";
-import chalk18 from "chalk";
+import { homedir as homedir7 } from "os";
+import { join as join14, dirname as dirname9 } from "path";
+import { existsSync as existsSync15, readFileSync as readFileSync14, writeFileSync as writeFileSync13, mkdirSync as mkdirSync12 } from "fs";
+import { Command as Command18 } from "commander";
+import chalk20 from "chalk";
 import inquirer from "inquirer";
 import { BridgeClient as BridgeClient3 } from "@devpilot.sh/bridge-client";
 function stableMachineName2() {
-  const path = join13(homedir6(), ".devpilot", "machine.json");
+  const path = join14(homedir7(), ".devpilot", "machine.json");
   try {
-    if (existsSync13(path)) {
-      const saved = JSON.parse(readFileSync13(path, "utf8"));
+    if (existsSync15(path)) {
+      const saved = JSON.parse(readFileSync14(path, "utf8"));
       if (saved.name) return saved.name;
     }
   } catch {
   }
   const name = os5.hostname();
   try {
-    mkdirSync11(dirname8(path), { recursive: true });
-    writeFileSync12(path, JSON.stringify({ name }, null, 2), "utf8");
+    mkdirSync12(dirname9(path), { recursive: true });
+    writeFileSync13(path, JSON.stringify({ name }, null, 2), "utf8");
   } catch {
   }
   return name;
@@ -4434,22 +5447,22 @@ async function pipeline(options) {
     maxSummaries: Math.max(0, parseInt(options.maxSummaries, 10) || 25),
     summarize: true,
     onWarn: (message) => {
-      if (!options.json) console.log(chalk18.gray(`   ${message}`));
+      if (!options.json) console.log(chalk20.gray(`   ${message}`));
     }
   });
   return { machineName, result };
 }
 function destinationFor(outcome) {
-  if (!outcome) return chalk18.gray("\u2014");
+  if (!outcome) return chalk20.gray("\u2014");
   switch (outcome.status) {
     case "duplicate":
-      return chalk18.gray(`${outcome.linearIdentifier ?? "already adopted"} (tracked)`);
+      return chalk20.gray(`${outcome.linearIdentifier ?? "already adopted"} (tracked)`);
     case "attached":
-      return chalk18.green(`${outcome.linearIdentifier} (${outcome.matchedBy})`);
+      return chalk20.green(`${outcome.linearIdentifier} (${outcome.matchedBy})`);
     case "adopted":
-      return outcome.linearIdentifier ? chalk18.green(outcome.linearIdentifier) : chalk18.yellow("create");
+      return outcome.linearIdentifier ? chalk20.green(outcome.linearIdentifier) : chalk20.yellow("create");
     case "skipped":
-      return chalk18.yellow(outcome.reason ? `skip \u2014 ${outcome.reason.slice(0, 60)}` : "skip");
+      return chalk20.yellow(outcome.reason ? `skip \u2014 ${outcome.reason.slice(0, 60)}` : "skip");
   }
 }
 function rowsFrom(result, outcomes) {
@@ -4467,7 +5480,7 @@ function client(options) {
   return new BridgeClient3({ bridgeUrl: options.url, token: options.token });
 }
 var scanCommand = withCommonOptions(
-  new Command16("scan").description(
+  new Command18("scan").description(
     "List agent sessions on this machine and what adopting them would do. Writes nothing."
   )
 ).action(async (options) => {
@@ -4484,8 +5497,8 @@ var scanCommand = withCommonOptions(
       outcomes = response.outcomes;
     } catch (err) {
       if (!options.json) {
-        console.log(chalk18.yellow(`   Could not preview against the bridge: ${describe3(err)}`));
-        console.log(chalk18.gray("   Showing the local scan only."));
+        console.log(chalk20.yellow(`   Could not preview against the bridge: ${describe3(err)}`));
+        console.log(chalk20.gray("   Showing the local scan only."));
       }
     }
   }
@@ -4511,23 +5524,23 @@ var scanCommand = withCommonOptions(
   console.log("");
   if (!bridge) {
     console.log(
-      chalk18.gray(
+      chalk20.gray(
         "  No bridge credentials, so this is a local listing only. Pass --url and --token"
       )
     );
-    console.log(chalk18.gray("  to see which Linear issues these would attach to."));
+    console.log(chalk20.gray("  to see which Linear issues these would attach to."));
   } else if (result.candidates.length > 0) {
-    console.log(chalk18.gray("  Nothing was written. Run `devpilot sessions adopt` to act on this."));
+    console.log(chalk20.gray("  Nothing was written. Run `devpilot sessions adopt` to act on this."));
   }
   console.log("");
 });
 var adoptCommand = withCommonOptions(
-  new Command16("adopt").description("Put agent sessions running on this machine onto the board")
+  new Command18("adopt").description("Put agent sessions running on this machine onto the board")
 ).option("-y, --yes", "Skip the confirmation").action(async (options) => {
   const bridge = client(options);
   if (!bridge) {
-    console.error(chalk18.red("\u2717 Bridge URL and token required (--url / --token)"));
-    console.error(chalk18.gray("  Mint a token in the dashboard under Settings \u2192 Tokens."));
+    console.error(chalk20.red("\u2717 Bridge URL and token required (--url / --token)"));
+    console.error(chalk20.gray("  Mint a token in the dashboard under Settings \u2192 Tokens."));
     process.exit(1);
   }
   const { machineName, result } = await pipeline(options);
@@ -4535,7 +5548,7 @@ var adoptCommand = withCommonOptions(
     console.log("");
     console.log(renderPreview([], result));
     console.log("");
-    console.log(chalk18.gray("  No sessions to adopt."));
+    console.log(chalk20.gray("  No sessions to adopt."));
     console.log("");
     return;
   }
@@ -4547,7 +5560,7 @@ var adoptCommand = withCommonOptions(
       dryRun: true
     });
   } catch (err) {
-    console.error(chalk18.red(`\u2717 ${describe3(err)}`));
+    console.error(chalk20.red(`\u2717 ${describe3(err)}`));
     process.exit(1);
   }
   console.log("");
@@ -4556,12 +5569,12 @@ var adoptCommand = withCommonOptions(
   const willCreate = preview.outcomes.filter((o) => o.status === "adopted").length;
   const willAttach = preview.outcomes.filter((o) => o.status === "attached").length;
   if (willCreate === 0 && willAttach === 0) {
-    console.log(chalk18.gray("  Nothing new to adopt \u2014 everything here is already tracked."));
+    console.log(chalk20.gray("  Nothing new to adopt \u2014 everything here is already tracked."));
     console.log("");
     return;
   }
   console.log(
-    `  This creates ${chalk18.bold(String(willCreate))} Linear issue${willCreate === 1 ? "" : "s"} and attaches ${chalk18.bold(String(willAttach))} existing.`
+    `  This creates ${chalk20.bold(String(willCreate))} Linear issue${willCreate === 1 ? "" : "s"} and attaches ${chalk20.bold(String(willAttach))} existing.`
   );
   console.log("");
   if (!options.yes) {
@@ -4569,7 +5582,7 @@ var adoptCommand = withCommonOptions(
       { type: "confirm", name: "proceed", message: "Continue?", default: false }
     ]);
     if (!proceed) {
-      console.log(chalk18.gray("  Nothing was written."));
+      console.log(chalk20.gray("  Nothing was written."));
       return;
     }
   }
@@ -4581,18 +5594,18 @@ var adoptCommand = withCommonOptions(
       dryRun: false
     });
   } catch (err) {
-    console.error(chalk18.red(`\u2717 ${describe3(err)}`));
+    console.error(chalk20.red(`\u2717 ${describe3(err)}`));
     process.exit(1);
   }
   console.log("");
   for (const outcome of response.outcomes) {
     if (outcome.status === "skipped") {
-      console.log(chalk18.yellow(`   \u25CB skipped \u2014 ${outcome.reason ?? "no reason given"}`));
+      console.log(chalk20.yellow(`   \u25CB skipped \u2014 ${outcome.reason ?? "no reason given"}`));
     } else if (outcome.status === "duplicate") {
-      console.log(chalk18.gray(`   \xB7 ${outcome.linearIdentifier ?? "?"} already tracked`));
+      console.log(chalk20.gray(`   \xB7 ${outcome.linearIdentifier ?? "?"} already tracked`));
     } else {
       console.log(
-        chalk18.green(
+        chalk20.green(
           `   \u2713 ${outcome.linearIdentifier}${outcome.status === "attached" ? ` (attached, ${outcome.matchedBy})` : ""}`
         )
       );
@@ -4600,12 +5613,12 @@ var adoptCommand = withCommonOptions(
   }
   console.log("");
   console.log(
-    chalk18.green(
+    chalk20.green(
       `\u2713 ${response.adopted} adopted, ${response.attached} attached, ${response.duplicates} already tracked, ${response.skipped} skipped`
     )
   );
   console.log(
-    chalk18.gray(
+    chalk20.gray(
       "  These are observed, not dispatched: DevPilot is watching them and will not move a ticket."
     )
   );
@@ -4614,26 +5627,26 @@ var adoptCommand = withCommonOptions(
 function describe3(err) {
   return err instanceof Error ? err.message : String(err);
 }
-var sessionsCommand = new Command16("sessions").description("Agent sessions running on this machine").addCommand(scanCommand).addCommand(adoptCommand);
+var sessionsCommand = new Command18("sessions").description("Agent sessions running on this machine").addCommand(scanCommand).addCommand(adoptCommand);
 
 // src/commands/session-runner/index.ts
-import { Command as Command17 } from "commander";
-import chalk19 from "chalk";
-import { resolve as resolve6 } from "path";
+import { Command as Command19 } from "commander";
+import chalk21 from "chalk";
+import { resolve as resolve7 } from "path";
 
 // src/commands/session-runner/server.ts
 import { createServer } from "http";
 import { randomUUID as randomUUID2 } from "crypto";
-import { existsSync as existsSync16 } from "fs";
-import { basename as basename4, isAbsolute as isAbsolute2, resolve as resolve5 } from "path";
+import { existsSync as existsSync18 } from "fs";
+import { basename as basename4, isAbsolute as isAbsolute3, resolve as resolve6 } from "path";
 
 // src/commands/session-runner/claude-runner.ts
 init_statusline_store();
-import { spawn as spawn2, execFile as execFile2 } from "child_process";
+import { spawn as spawn3, execFile as execFile2 } from "child_process";
 import { promisify as promisify2 } from "util";
-import { mkdtempSync as mkdtempSync2, rmSync as rmSync3, writeFileSync as writeFileSync14, existsSync as existsSync14, readFileSync as readFileSync14, mkdirSync as mkdirSync12 } from "fs";
-import { tmpdir as tmpdir2, homedir as homedir7 } from "os";
-import { join as join15 } from "path";
+import { mkdtempSync as mkdtempSync2, rmSync as rmSync4, writeFileSync as writeFileSync15, existsSync as existsSync16, readFileSync as readFileSync15, mkdirSync as mkdirSync13 } from "fs";
+import { tmpdir as tmpdir2, homedir as homedir8 } from "os";
+import { join as join16 } from "path";
 
 // src/commands/session-runner/stream-events.ts
 var MAX_ACTIONS = 200;
@@ -4917,9 +5930,9 @@ function describeActivity(telemetry) {
 }
 
 // src/commands/session-runner/harness.ts
-import { mkdtempSync, writeFileSync as writeFileSync13 } from "fs";
+import { mkdtempSync, writeFileSync as writeFileSync14 } from "fs";
 import { tmpdir } from "os";
-import { join as join14 } from "path";
+import { join as join15 } from "path";
 function workHistorySource(callbackUrl, repo) {
   if (!callbackUrl || !repo) return null;
   try {
@@ -4945,8 +5958,8 @@ var TECHNIQUES = [
     watch: "tool-not-found errors, or a task that needed a project MCP server failing",
     args: (ctx) => {
       if (ctx.hasMcpConfig) return [];
-      const file = join14(ctx.scratchDir(), "mcp-none.json");
-      writeFileSync13(file, JSON.stringify({ mcpServers: {} }), { mode: 384 });
+      const file = join15(ctx.scratchDir(), "mcp-none.json");
+      writeFileSync14(file, JSON.stringify({ mcpServers: {} }), { mode: 384 });
       return ["--mcp-config", file, "--strict-mcp-config"];
     }
   },
@@ -4998,8 +6011,8 @@ var TECHNIQUES = [
     // or a shared session) keeps the total to exactly the ones named.
     args: (ctx) => {
       if (!ctx.codeGraph) return [];
-      const file = join14(ctx.scratchDir(), "mcp-code-graph.json");
-      writeFileSync13(file, JSON.stringify({ mcpServers: { codegraph: ctx.codeGraph } }), { mode: 384 });
+      const file = join15(ctx.scratchDir(), "mcp-code-graph.json");
+      writeFileSync14(file, JSON.stringify({ mcpServers: { codegraph: ctx.codeGraph } }), { mode: 384 });
       return ["--mcp-config", file];
     },
     applies: (ctx) => Boolean(ctx.codeGraph),
@@ -5017,8 +6030,8 @@ var TECHNIQUES = [
     watch: "no fall in retries or conflicts; the agent following an earlier agent's summary instead of reading the code",
     args: (ctx) => {
       if (!ctx.workHistory) return [];
-      const file = join14(ctx.scratchDir(), "mcp-work-history.json");
-      writeFileSync13(
+      const file = join15(ctx.scratchDir(), "mcp-work-history.json");
+      writeFileSync14(
         file,
         JSON.stringify({
           mcpServers: {
@@ -5096,7 +6109,7 @@ function resolveHarness(spec) {
         hasMcpConfig,
         codeGraph: codeGraph3,
         workHistory,
-        scratchDir: () => dir ?? (dir = mkdtempSync(join14(tmpdir(), "devpilot-harness-")))
+        scratchDir: () => dir ?? (dir = mkdtempSync(join15(tmpdir(), "devpilot-harness-")))
       };
       const applied = techniques.filter((t) => t.applies?.(ctx) ?? true);
       const args = applied.flatMap((t) => t.args(ctx));
@@ -5117,11 +6130,11 @@ var execFileAsync2 = promisify2(execFile2);
 var OWNED_SESSION_LIMIT = 5e3;
 function recordOwnedSession(sessionId) {
   try {
-    const dir = join15(homedir7(), ".devpilot");
-    const path = join15(dir, "owned-sessions.json");
+    const dir = join16(homedir8(), ".devpilot");
+    const path = join16(dir, "owned-sessions.json");
     let ids = [];
-    if (existsSync14(path)) {
-      const parsed = JSON.parse(readFileSync14(path, "utf8"));
+    if (existsSync16(path)) {
+      const parsed = JSON.parse(readFileSync15(path, "utf8"));
       if (Array.isArray(parsed.sessionIds)) {
         ids = parsed.sessionIds.filter((v) => typeof v === "string");
       }
@@ -5129,8 +6142,8 @@ function recordOwnedSession(sessionId) {
     if (ids.includes(sessionId)) return;
     ids.push(sessionId);
     if (ids.length > OWNED_SESSION_LIMIT) ids = ids.slice(-OWNED_SESSION_LIMIT);
-    mkdirSync12(dir, { recursive: true });
-    writeFileSync14(path, JSON.stringify({ version: 1, sessionIds: ids }, null, 2), "utf8");
+    mkdirSync13(dir, { recursive: true });
+    writeFileSync15(path, JSON.stringify({ version: 1, sessionIds: ids }, null, 2), "utf8");
   } catch {
   }
 }
@@ -5190,9 +6203,9 @@ function parseEnvelope(stdout) {
   return null;
 }
 function writeSessionMcpConfig(sessionLink2) {
-  const dir = mkdtempSync2(join15(tmpdir2(), "devpilot-mcp-"));
-  const file = join15(dir, "mcp.json");
-  writeFileSync14(
+  const dir = mkdtempSync2(join16(tmpdir2(), "devpilot-mcp-"));
+  const file = join16(dir, "mcp.json");
+  writeFileSync15(
     file,
     JSON.stringify(
       {
@@ -5264,8 +6277,8 @@ async function runClaudeSession(options) {
     ...harnessBuild?.allowedTools ?? []
   ];
   if (allowedTools.length > 0) args.push("--allowedTools", ...allowedTools);
-  const outcome = await new Promise((resolve7) => {
-    const child = spawn2(claudePath, args, {
+  const outcome = await new Promise((resolve8) => {
+    const child = spawn3(claudePath, args, {
       cwd: workdir,
       // The prompt goes in on stdin, not argv. A composed prompt carries
       // newlines, backticks and quotes, and is easily tens of kilobytes — well
@@ -5315,18 +6328,18 @@ async function runClaudeSession(options) {
     });
     child.on("error", (error2) => {
       clearTimeout(timer);
-      resolve7({ code: null, stdout, stderr: `${stderr}
+      resolve8({ code: null, stdout, stderr: `${stderr}
 ${error2.message}`, timedOut, killed });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      resolve7({ code, stdout, stderr, timedOut, killed });
+      resolve8({ code, stdout, stderr, timedOut, killed });
     });
     child.stdin.write(effectivePrompt);
     child.stdin.end();
   }).finally(() => {
-    if (mcpDir) rmSync3(mcpDir, { recursive: true, force: true });
-    if (harnessBuild?.cleanupDir) rmSync3(harnessBuild.cleanupDir, { recursive: true, force: true });
+    if (mcpDir) rmSync4(mcpDir, { recursive: true, force: true });
+    if (harnessBuild?.cleanupDir) rmSync4(harnessBuild.cleanupDir, { recursive: true, force: true });
   });
   const after = await snapshot(workdir);
   const files = classify(before, after);
@@ -5358,8 +6371,8 @@ ${error2.message}`, timedOut, killed });
 
 // src/commands/session-runner/callbacks.ts
 var BACKOFF_MS = [1e3, 2e3, 4e3, 8e3, 16e3, 32e3, 6e4, 12e4, 24e4, 24e4];
-function sleep(ms) {
-  return new Promise((resolve7) => setTimeout(resolve7, ms));
+function sleep2(ms) {
+  return new Promise((resolve8) => setTimeout(resolve8, ms));
 }
 async function post(url, body, token, log) {
   const headers = { "Content-Type": "application/json" };
@@ -5382,7 +6395,7 @@ async function post(url, body, token, log) {
       const message = error instanceof Error ? error.message : String(error);
       log(`callback ${url} error: ${message} (attempt ${attempt + 1})`);
     }
-    if (attempt < BACKOFF_MS.length) await sleep(BACKOFF_MS[attempt]);
+    if (attempt < BACKOFF_MS.length) await sleep2(BACKOFF_MS[attempt]);
   }
   log(`callback ${url} GAVE UP after ${BACKOFF_MS.length + 1} attempts`);
   return false;
@@ -5397,9 +6410,9 @@ function sendCompletion(callbackUrl, report, token, log) {
 // src/commands/session-runner/isolation.ts
 import { execFile as execFile3 } from "child_process";
 import { createHash } from "crypto";
-import { existsSync as existsSync15, mkdirSync as mkdirSync13, realpathSync as realpathSync2, rmSync as rmSync4 } from "fs";
-import { homedir as homedir8 } from "os";
-import { basename as basename3, dirname as dirname9, join as join16 } from "path";
+import { existsSync as existsSync17, mkdirSync as mkdirSync14, realpathSync as realpathSync2, rmSync as rmSync5 } from "fs";
+import { homedir as homedir9 } from "os";
+import { basename as basename3, dirname as dirname10, join as join17 } from "path";
 import { promisify as promisify3 } from "util";
 var execFileAsync3 = promisify3(execFile3);
 var IsolationError = class extends Error {
@@ -5449,7 +6462,7 @@ function taskBranchName(runId, taskCode) {
   return `devpilot/${refSafe(runId)}/task-${refSafe(taskCode)}`;
 }
 function worktreeRoot(config) {
-  return config.worktreeRoot ?? join16(homedir8(), ".devpilot", "worktrees");
+  return config.worktreeRoot ?? join17(homedir9(), ".devpilot", "worktrees");
 }
 function repoKey(repoDir) {
   let real = repoDir;
@@ -5484,7 +6497,7 @@ async function identityArgs(cwd) {
 }
 async function removeWorktree(repoDir, dir) {
   await git3(repoDir, ["worktree", "remove", "--force", dir]).catch(() => void 0);
-  rmSync4(dir, { recursive: true, force: true });
+  rmSync5(dir, { recursive: true, force: true });
   await git3(repoDir, ["worktree", "prune"]).catch(() => void 0);
 }
 async function checkIsolatable(repoDir) {
@@ -5504,7 +6517,7 @@ async function checkIsolatable(repoDir) {
 async function prepareTaskWorkspace(repoDir, request, config = {}) {
   const runBranch = runBranchName(request.runId);
   const branch = taskBranchName(request.runId, request.taskCode);
-  const dir = join16(
+  const dir = join17(
     worktreeRoot(config),
     repoKey(repoDir),
     refSafe(request.runId),
@@ -5517,7 +6530,7 @@ async function prepareTaskWorkspace(repoDir, request, config = {}) {
         await git3(repoDir, ["branch", runBranch, "HEAD"]);
       }
       const baseSha = await revParse(repoDir, `refs/heads/${runBranch}`);
-      if (existsSync15(dir)) await removeWorktree(repoDir, dir);
+      if (existsSync17(dir)) await removeWorktree(repoDir, dir);
       const previous = await revParse(repoDir, `refs/heads/${branch}`);
       if (previous) {
         let kept = `${branch}-attempt-${previous.slice(0, 8)}`;
@@ -5526,7 +6539,7 @@ async function prepareTaskWorkspace(repoDir, request, config = {}) {
         }
         await git3(repoDir, ["branch", "-m", branch, kept]);
       }
-      mkdirSync13(dirname9(dir), { recursive: true });
+      mkdirSync14(dirname10(dir), { recursive: true });
       await git3(repoDir, ["worktree", "add", "-b", branch, dir, runBranch]);
       return { repoDir, dir, branch, runBranch, baseSha, taskCode: request.taskCode };
     } catch (error) {
@@ -5618,7 +6631,7 @@ async function finishTaskWorkspace(workspace, options) {
       );
     } finally {
       if (await gitOk(repoDir, ["worktree", "remove", dir])) {
-        rmSync4(dir, { recursive: true, force: true });
+        rmSync5(dir, { recursive: true, force: true });
       }
     }
   });
@@ -5634,7 +6647,7 @@ async function checkedOutAt(repoDir, branch) {
 }
 async function integrateRun(repoDir, request, config = {}) {
   const runBranch = runBranchName(request.runId);
-  const dir = join16(worktreeRoot(config), repoKey(repoDir), refSafe(request.runId), "_integrate");
+  const dir = join17(worktreeRoot(config), repoKey(repoDir), refSafe(request.runId), "_integrate");
   return withRepoLock(repoDir, async () => {
     await checkIsolatable(repoDir);
     const startSha = await revParse(repoDir, `refs/heads/${runBranch}`);
@@ -5658,8 +6671,8 @@ async function integrateRun(repoDir, request, config = {}) {
       conflicts: [],
       missing: []
     };
-    if (existsSync15(dir)) await removeWorktree(repoDir, dir);
-    mkdirSync13(dirname9(dir), { recursive: true });
+    if (existsSync17(dir)) await removeWorktree(repoDir, dir);
+    mkdirSync14(dirname10(dir), { recursive: true });
     try {
       await git3(repoDir, ["worktree", "add", "--detach", dir, runBranch]);
       const identity = await identityArgs(dir);
@@ -5802,10 +6815,10 @@ var SessionRunner = class {
   resolveWorkdir(repo) {
     const mapped = this.config.repoMap.get(repo);
     if (mapped) {
-      return existsSync16(mapped) ? { workdir: mapped } : { error: `Mapped path for '${repo}' does not exist: ${mapped}` };
+      return existsSync18(mapped) ? { workdir: mapped } : { error: `Mapped path for '${repo}' does not exist: ${mapped}` };
     }
-    const candidate = isAbsolute2(repo) ? repo : resolve5(this.config.workspace, basename4(repo));
-    if (!existsSync16(candidate)) {
+    const candidate = isAbsolute3(repo) ? repo : resolve6(this.config.workspace, basename4(repo));
+    if (!existsSync18(candidate)) {
       return {
         error: `No checkout for '${repo}'. Tried ${candidate}. Pass --repo ${repo}=/path/to/checkout, or set --workspace.`
       };
@@ -6264,11 +7277,11 @@ function parseRepoMap(values) {
     if (idx === -1) {
       throw new Error(`--repo expects <repo>=<path>, got '${entry}'`);
     }
-    map.set(entry.slice(0, idx).trim(), resolve6(entry.slice(idx + 1).trim()));
+    map.set(entry.slice(0, idx).trim(), resolve7(entry.slice(idx + 1).trim()));
   }
   return map;
 }
-var sessionRunnerCommand = new Command17("session-runner").description("Run Claude Code sessions dispatched by DevPilot (claude-session mode)").option("-p, --port <port>", "Port to listen on", "3900").option("--host <host>", "Interface to bind", "127.0.0.1").option("--token <token>", "Bearer token the dispatcher must present").option("-w, --workspace <dir>", "Directory containing repo checkouts", process.cwd()).option(
+var sessionRunnerCommand = new Command19("session-runner").description("Run Claude Code sessions dispatched by DevPilot (claude-session mode)").option("-p, --port <port>", "Port to listen on", "3900").option("--host <host>", "Interface to bind", "127.0.0.1").option("--token <token>", "Bearer token the dispatcher must present").option("-w, --workspace <dir>", "Directory containing repo checkouts", process.cwd()).option(
   "--repo <mapping>",
   "Explicit repo mapping, <owner/name>=<path> (repeatable)",
   (value, previous) => [...previous, value],
@@ -6294,7 +7307,7 @@ var sessionRunnerCommand = new Command17("session-runner").description("Run Clau
   try {
     repoMap = parseRepoMap(options.repo ?? []);
   } catch (error) {
-    console.error(chalk19.red(error instanceof Error ? error.message : String(error)));
+    console.error(chalk21.red(error instanceof Error ? error.message : String(error)));
     process.exitCode = 1;
     return;
   }
@@ -6302,7 +7315,7 @@ var sessionRunnerCommand = new Command17("session-runner").description("Run Clau
   try {
     harness = resolveHarness(options.harness);
   } catch (error) {
-    console.error(chalk19.red(error instanceof Error ? error.message : String(error)));
+    console.error(chalk21.red(error instanceof Error ? error.message : String(error)));
     process.exitCode = 1;
     return;
   }
@@ -6310,7 +7323,7 @@ var sessionRunnerCommand = new Command17("session-runner").description("Run Clau
     port: parseInt(options.port, 10),
     host: options.host,
     apiKey: options.token ?? process.env.DEVPILOT_SESSION_API_KEY,
-    workspace: resolve6(options.workspace),
+    workspace: resolve7(options.workspace),
     repoMap,
     claudePath: options.claudePath,
     permissionMode: options.permissionMode,
@@ -6321,58 +7334,58 @@ var sessionRunnerCommand = new Command17("session-runner").description("Run Clau
     // graph feature off.
     codeGraph: await findIndexer(),
     isolation: {
-      worktreeRoot: options.worktreeRoot ? resolve6(options.worktreeRoot) : void 0,
+      worktreeRoot: options.worktreeRoot ? resolve7(options.worktreeRoot) : void 0,
       setupCommand: options.worktreeSetup || void 0
     },
-    log: (line) => console.log(chalk19.dim(`[runner] ${line}`))
+    log: (line) => console.log(chalk21.dim(`[runner] ${line}`))
   };
   const runner = new SessionRunner(config);
   try {
     await runner.start();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(chalk19.red(`Failed to start session runner: ${message}`));
+    console.error(chalk21.red(`Failed to start session runner: ${message}`));
     process.exitCode = 1;
     return;
   }
   const base = `http://${config.host}:${config.port}`;
-  console.log(chalk19.bold("\n  DevPilot session runner\n"));
-  console.log(`  ${chalk19.dim("listening")}   ${base}`);
-  console.log(`  ${chalk19.dim("workspace")}   ${config.workspace}`);
-  console.log(`  ${chalk19.dim("claude")}      ${config.claudePath} (${config.permissionMode})`);
-  console.log(`  ${chalk19.dim("concurrency")} ${config.maxConcurrent}`);
-  console.log(`  ${chalk19.dim("harness")}     ${harness.stamp}`);
+  console.log(chalk21.bold("\n  DevPilot session runner\n"));
+  console.log(`  ${chalk21.dim("listening")}   ${base}`);
+  console.log(`  ${chalk21.dim("workspace")}   ${config.workspace}`);
+  console.log(`  ${chalk21.dim("claude")}      ${config.claudePath} (${config.permissionMode})`);
+  console.log(`  ${chalk21.dim("concurrency")} ${config.maxConcurrent}`);
+  console.log(`  ${chalk21.dim("harness")}     ${harness.stamp}`);
   for (const t of harness.techniques) {
-    console.log(`  ${chalk19.dim("           ")} ${t.id}: ${t.summary}`);
-    console.log(chalk19.dim(`               watch for ${t.watch}`));
+    console.log(`  ${chalk21.dim("           ")} ${t.id}: ${t.summary}`);
+    console.log(chalk21.dim(`               watch for ${t.watch}`));
   }
   console.log(
-    `  ${chalk19.dim("worktrees")}   ${config.isolation?.worktreeRoot ?? "~/.devpilot/worktrees"}` + (config.isolation?.setupCommand ? chalk19.dim(` (setup: ${config.isolation.setupCommand})`) : chalk19.dim(" (no --worktree-setup: tracked files only)"))
+    `  ${chalk21.dim("worktrees")}   ${config.isolation?.worktreeRoot ?? "~/.devpilot/worktrees"}` + (config.isolation?.setupCommand ? chalk21.dim(` (setup: ${config.isolation.setupCommand})`) : chalk21.dim(" (no --worktree-setup: tracked files only)"))
   );
   console.log(
-    `  ${chalk19.dim("code graph")}  ` + (config.codeGraph ? `codegraph ${config.codeGraph.version ?? ""}`.trim() + chalk19.dim(" (used for a repository once `devpilot graph enable` has indexed it)") : chalk19.dim(`not installed \u2014 optional: ${installHint()}`))
+    `  ${chalk21.dim("code graph")}  ` + (config.codeGraph ? `codegraph ${config.codeGraph.version ?? ""}`.trim() + chalk21.dim(" (used for a repository once `devpilot graph enable` has indexed it)") : chalk21.dim(`not installed \u2014 optional: ${installHint()}`))
   );
   if (wantsCodeGraph(harness) && !config.codeGraph) {
     console.log(
-      chalk19.yellow("  The harness asks for code-graph but the indexer is not installed; agents will run without it,")
+      chalk21.yellow("  The harness asks for code-graph but the indexer is not installed; agents will run without it,")
     );
-    console.log(chalk19.yellow("  and their readings will not carry the code-graph stamp."));
+    console.log(chalk21.yellow("  and their readings will not carry the code-graph stamp."));
   }
   if (repoMap.size > 0) {
-    for (const [repo, path] of repoMap) console.log(`  ${chalk19.dim("repo")}        ${repo} \u2192 ${path}`);
+    for (const [repo, path] of repoMap) console.log(`  ${chalk21.dim("repo")}        ${repo} \u2192 ${path}`);
   }
   if (!config.apiKey) {
-    console.log(chalk19.yellow("\n  No --token set: the dispatcher API is unauthenticated."));
+    console.log(chalk21.yellow("\n  No --token set: the dispatcher API is unauthenticated."));
   }
-  console.log(chalk19.dim("\n  Point DevPilot at it:"));
+  console.log(chalk21.dim("\n  Point DevPilot at it:"));
   console.log(
-    chalk19.dim(
+    chalk21.dim(
       `    DEVPILOT_ORCHESTRATOR_MODE=claude-session DEVPILOT_SESSION_API_URL=${base} devpilot serve
 `
     )
   );
   const shutdown = async () => {
-    console.log(chalk19.dim("\n[runner] shutting down\u2026"));
+    console.log(chalk21.dim("\n[runner] shutting down\u2026"));
     await runner.stop();
     process.exit(0);
   };
@@ -6381,9 +7394,9 @@ var sessionRunnerCommand = new Command17("session-runner").description("Run Clau
 });
 
 // src/commands/update.ts
-import { Command as Command18 } from "commander";
-import { execSync as execSync2, spawn as spawn3 } from "child_process";
-import chalk20 from "chalk";
+import { Command as Command20 } from "commander";
+import { execSync as execSync2, spawn as spawn4 } from "child_process";
+import chalk22 from "chalk";
 async function getLatestVersion() {
   try {
     const result = execSync2("npm view @devpilot.sh/cli version", {
@@ -6442,88 +7455,88 @@ function getUpdateCommand(pm) {
       return "npm install -g @devpilot.sh/cli@latest";
   }
 }
-var updateCommand = new Command18("update").description("Update DevPilot CLI to the latest version").option("-c, --check", "Only check for updates without installing").option("--force", "Force update even if already on latest version").action(async (options) => {
-  console.log(chalk20.cyan("Checking for updates..."));
+var updateCommand = new Command20("update").description("Update DevPilot CLI to the latest version").option("-c, --check", "Only check for updates without installing").option("--force", "Force update even if already on latest version").action(async (options) => {
+  console.log(chalk22.cyan("Checking for updates..."));
   const latestVersion = await getLatestVersion();
   if (!latestVersion) {
-    console.log(chalk20.yellow("Could not check for updates. Please check your network connection."));
-    console.log(chalk20.gray("You can manually update with: npm install -g @devpilot.sh/cli@latest"));
+    console.log(chalk22.yellow("Could not check for updates. Please check your network connection."));
+    console.log(chalk22.gray("You can manually update with: npm install -g @devpilot.sh/cli@latest"));
     return;
   }
   const comparison = compareVersions(latestVersion, VERSION);
   if (comparison === 0 && !options.force) {
-    console.log(chalk20.green(`You're already on the latest version (${VERSION})`));
+    console.log(chalk22.green(`You're already on the latest version (${VERSION})`));
     return;
   }
   if (comparison === -1 && !options.force) {
-    console.log(chalk20.yellow(`You're on a newer version (${VERSION}) than the latest release (${latestVersion})`));
-    console.log(chalk20.gray("This might be a pre-release or development version."));
+    console.log(chalk22.yellow(`You're on a newer version (${VERSION}) than the latest release (${latestVersion})`));
+    console.log(chalk22.gray("This might be a pre-release or development version."));
     return;
   }
   if (options.check) {
     if (comparison === 1) {
-      console.log(chalk20.yellow(`Update available: ${VERSION} \u2192 ${latestVersion}`));
-      console.log(chalk20.gray('Run "devpilot update" to install the latest version.'));
+      console.log(chalk22.yellow(`Update available: ${VERSION} \u2192 ${latestVersion}`));
+      console.log(chalk22.gray('Run "devpilot update" to install the latest version.'));
     }
     return;
   }
   const pm = detectPackageManager();
   const updateCmd = getUpdateCommand(pm);
-  console.log(chalk20.cyan(`Updating from ${VERSION} to ${latestVersion}...`));
-  console.log(chalk20.gray(`Using: ${updateCmd}`));
+  console.log(chalk22.cyan(`Updating from ${VERSION} to ${latestVersion}...`));
+  console.log(chalk22.gray(`Using: ${updateCmd}`));
   console.log("");
   try {
     const [cmd, ...args] = updateCmd.split(" ");
-    const child = spawn3(cmd, args, {
+    const child = spawn4(cmd, args, {
       stdio: "inherit",
       shell: true
     });
     child.on("close", (code) => {
       if (code === 0) {
         console.log("");
-        console.log(chalk20.green(`Successfully updated to ${latestVersion}`));
-        console.log(chalk20.gray('Run "devpilot --version" to verify.'));
+        console.log(chalk22.green(`Successfully updated to ${latestVersion}`));
+        console.log(chalk22.gray('Run "devpilot --version" to verify.'));
       } else {
         console.log("");
-        console.log(chalk20.red("Update failed. Please try manually:"));
-        console.log(chalk20.cyan(`  ${updateCmd}`));
+        console.log(chalk22.red("Update failed. Please try manually:"));
+        console.log(chalk22.cyan(`  ${updateCmd}`));
       }
     });
     child.on("error", (err) => {
-      console.log(chalk20.red(`Update failed: ${err.message}`));
-      console.log(chalk20.gray("Please try manually:"));
-      console.log(chalk20.cyan(`  ${updateCmd}`));
+      console.log(chalk22.red(`Update failed: ${err.message}`));
+      console.log(chalk22.gray("Please try manually:"));
+      console.log(chalk22.cyan(`  ${updateCmd}`));
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    console.log(chalk20.red(`Update failed: ${message}`));
-    console.log(chalk20.gray("Please try manually:"));
-    console.log(chalk20.cyan(`  ${updateCmd}`));
+    console.log(chalk22.red(`Update failed: ${message}`));
+    console.log(chalk22.gray("Please try manually:"));
+    console.log(chalk22.cyan(`  ${updateCmd}`));
   }
 });
 
 // src/commands/wiki.ts
-import { Command as Command19 } from "commander";
-import { existsSync as existsSync17, mkdirSync as mkdirSync14, readFileSync as readFileSync15, writeFileSync as writeFileSync15 } from "fs";
-import { join as join17 } from "path";
-import chalk21 from "chalk";
+import { Command as Command21 } from "commander";
+import { existsSync as existsSync19, mkdirSync as mkdirSync15, readFileSync as readFileSync16, writeFileSync as writeFileSync16 } from "fs";
+import { join as join18 } from "path";
+import chalk23 from "chalk";
 import { resolveWikiModel } from "@devpilot.sh/core/wave-planner";
-var wikiCommand = new Command19("wiki").description("LLM-compiled knowledge base \u2014 institutional memory for your codebase");
+var wikiCommand = new Command21("wiki").description("LLM-compiled knowledge base \u2014 institutional memory for your codebase");
 wikiCommand.command("init").description("Initialize the wiki system in the current repository").option("--wiki-dir <path>", "Wiki output directory", ".devpilot/wiki").action(async (options) => {
   const cwd = process.cwd();
-  const devpilotDir = join17(cwd, ".devpilot");
-  const wikiDir = join17(cwd, options.wikiDir);
-  if (!existsSync17(devpilotDir)) {
+  const devpilotDir = join18(cwd, ".devpilot");
+  const wikiDir = join18(cwd, options.wikiDir);
+  if (!existsSync19(devpilotDir)) {
     console.log(
-      chalk21.yellow("\u26A0\uFE0F  DevPilot not initialized. Run `devpilot init` first.")
+      chalk23.yellow("\u26A0\uFE0F  DevPilot not initialized. Run `devpilot init` first.")
     );
     return;
   }
-  if (!existsSync17(wikiDir)) {
-    mkdirSync14(wikiDir, { recursive: true });
+  if (!existsSync19(wikiDir)) {
+    mkdirSync15(wikiDir, { recursive: true });
   }
-  const indexPath = join17(wikiDir, "index.md");
-  if (!existsSync17(indexPath)) {
+  const indexPath = join18(wikiDir, "index.md");
+  if (!existsSync19(indexPath)) {
     const initialIndex = `# Wiki Index
 
 > Auto-generated wiki \u2014 compiled from session logs, commits, specs, and decisions.
@@ -6538,11 +7551,11 @@ This wiki will grow automatically as you work with DevPilot:
 
 Run \`devpilot wiki ingest\` to manually add sources, or let the session hook capture knowledge automatically.
 `;
-    writeFileSync15(indexPath, initialIndex);
+    writeFileSync16(indexPath, initialIndex);
   }
-  const logPath = join17(wikiDir, "log.md");
-  if (!existsSync17(logPath)) {
-    writeFileSync15(
+  const logPath = join18(wikiDir, "log.md");
+  if (!existsSync19(logPath)) {
+    writeFileSync16(
       logPath,
       `# Wiki Activity Log
 
@@ -6552,29 +7565,29 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
 `
     );
   }
-  const gitignorePath = join17(cwd, ".gitignore");
-  if (existsSync17(gitignorePath)) {
-    const gitignore = readFileSync15(gitignorePath, "utf-8");
+  const gitignorePath = join18(cwd, ".gitignore");
+  if (existsSync19(gitignorePath)) {
+    const gitignore = readFileSync16(gitignorePath, "utf-8");
     if (!gitignore.includes(".devpilot/wiki")) {
     }
   }
-  console.log(chalk21.green("\u2705 Wiki initialized!"));
+  console.log(chalk23.green("\u2705 Wiki initialized!"));
   console.log("");
-  console.log(chalk21.white("Wiki directory: ") + chalk21.cyan(wikiDir));
+  console.log(chalk23.white("Wiki directory: ") + chalk23.cyan(wikiDir));
   console.log("");
-  console.log(chalk21.white("Next steps:"));
+  console.log(chalk23.white("Next steps:"));
   console.log(
-    chalk21.gray("  1. ") + chalk21.cyan("devpilot wiki ingest --file <path>") + chalk21.gray(" to add source material")
+    chalk23.gray("  1. ") + chalk23.cyan("devpilot wiki ingest --file <path>") + chalk23.gray(" to add source material")
   );
   console.log(
-    chalk21.gray("  2. ") + chalk21.cyan('devpilot wiki query "How does auth work?"') + chalk21.gray(" to ask questions")
+    chalk23.gray("  2. ") + chalk23.cyan('devpilot wiki query "How does auth work?"') + chalk23.gray(" to ask questions")
   );
   console.log(
-    chalk21.gray("  3. ") + chalk21.cyan("devpilot wiki status") + chalk21.gray(" to check wiki health")
+    chalk23.gray("  3. ") + chalk23.cyan("devpilot wiki status") + chalk23.gray(" to check wiki health")
   );
   console.log("");
   console.log(
-    chalk21.gray(
+    chalk23.gray(
       "The wiki will grow automatically as agents work \u2014 each session compounds the knowledge base."
     )
   );
@@ -6582,29 +7595,29 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
 wikiCommand.command("ingest").description("Ingest a source document into the wiki").requiredOption("--type <type>", "Source type: session_log, commit, spec, decision, manual").requiredOption("--title <title>", "Human-readable title for the source").option("--file <path>", "Path to source file").option("--stdin", "Read source from stdin").option("--origin <origin>", "Origin identifier (e.g. session ID, commit SHA)").action(async (options) => {
   let content;
   if (options.file) {
-    if (!existsSync17(options.file)) {
-      console.log(chalk21.red(`\u274C File not found: ${options.file}`));
+    if (!existsSync19(options.file)) {
+      console.log(chalk23.red(`\u274C File not found: ${options.file}`));
       return;
     }
-    content = readFileSync15(options.file, "utf-8");
+    content = readFileSync16(options.file, "utf-8");
   } else if (options.stdin) {
-    content = readFileSync15(0, "utf-8");
+    content = readFileSync16(0, "utf-8");
   } else {
     console.log(
-      chalk21.red("\u274C Provide either --file <path> or --stdin")
+      chalk23.red("\u274C Provide either --file <path> or --stdin")
     );
     return;
   }
   const validTypes = ["session_log", "commit", "spec", "decision", "manual"];
   if (!validTypes.includes(options.type)) {
     console.log(
-      chalk21.red(
+      chalk23.red(
         `\u274C Invalid type "${options.type}". Must be one of: ${validTypes.join(", ")}`
       )
     );
     return;
   }
-  console.log(chalk21.gray(`Ingesting ${options.type}: "${options.title}"...`));
+  console.log(chalk23.gray(`Ingesting ${options.type}: "${options.title}"...`));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
@@ -6615,75 +7628,75 @@ wikiCommand.command("ingest").description("Ingest a source document into the wik
       options.title,
       options.origin
     );
-    console.log(chalk21.green("\u2705 Ingested successfully!"));
+    console.log(chalk23.green("\u2705 Ingested successfully!"));
     console.log(
-      chalk21.gray(`   Source ID: ${result.sourceId}`)
+      chalk23.gray(`   Source ID: ${result.sourceId}`)
     );
     if (result.articlesCreated.length > 0) {
       console.log(
-        chalk21.white(`   Articles created: `) + chalk21.cyan(result.articlesCreated.join(", "))
+        chalk23.white(`   Articles created: `) + chalk23.cyan(result.articlesCreated.join(", "))
       );
     }
     if (result.articlesUpdated.length > 0) {
       console.log(
-        chalk21.white(`   Articles updated: `) + chalk21.yellow(result.articlesUpdated.join(", "))
+        chalk23.white(`   Articles updated: `) + chalk23.yellow(result.articlesUpdated.join(", "))
       );
     }
     console.log(
-      chalk21.gray(`   Tokens used: ${result.tokensUsed}`)
+      chalk23.gray(`   Tokens used: ${result.tokensUsed}`)
     );
   } catch (error) {
     console.log(
-      chalk21.red(
+      chalk23.red(
         `\u274C Ingest failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
   }
 });
 wikiCommand.command("query <question>").description("Ask a question against the wiki").action(async (question) => {
-  console.log(chalk21.gray(`Searching wiki for: "${question}"...`));
+  console.log(chalk23.gray(`Searching wiki for: "${question}"...`));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const result = await compiler.query(question);
     console.log("");
-    console.log(chalk21.white(result.answer));
+    console.log(chalk23.white(result.answer));
     console.log("");
     if (result.citedArticles.length > 0) {
       console.log(
-        chalk21.gray("Cited: ") + chalk21.cyan(result.citedArticles.map((s) => `[[${s}]]`).join(", "))
+        chalk23.gray("Cited: ") + chalk23.cyan(result.citedArticles.map((s) => `[[${s}]]`).join(", "))
       );
     }
     if (result.newArticleSlug) {
       console.log(
-        chalk21.green(
+        chalk23.green(
           `\u{1F4DD} New article created from this query: [[${result.newArticleSlug}]]`
         )
       );
     }
-    console.log(chalk21.gray(`Tokens used: ${result.tokensUsed}`));
+    console.log(chalk23.gray(`Tokens used: ${result.tokensUsed}`));
   } catch (error) {
     console.log(
-      chalk21.red(
+      chalk23.red(
         `\u274C Query failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
   }
 });
 wikiCommand.command("lint").description("Check wiki health \u2014 find stale content, orphans, and gaps").action(async () => {
-  console.log(chalk21.gray("Linting wiki..."));
+  console.log(chalk23.gray("Linting wiki..."));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const result = await compiler.lint();
     if (result.findings.length === 0) {
-      console.log(chalk21.green("\u2705 Wiki is healthy \u2014 no issues found!"));
+      console.log(chalk23.green("\u2705 Wiki is healthy \u2014 no issues found!"));
       return;
     }
     console.log(
-      chalk21.yellow(`\u26A0\uFE0F  Found ${result.findings.length} issue(s):
+      chalk23.yellow(`\u26A0\uFE0F  Found ${result.findings.length} issue(s):
 `)
     );
     for (const finding of result.findings) {
@@ -6695,23 +7708,23 @@ wikiCommand.command("lint").description("Check wiki health \u2014 find stale con
         broken_link: "\u{1F494}"
       }[finding.type];
       console.log(
-        `  ${icon} ${chalk21.white(`[${finding.type}]`)} ${chalk21.cyan(`[[${finding.articleSlug}]]`)}`
+        `  ${icon} ${chalk23.white(`[${finding.type}]`)} ${chalk23.cyan(`[[${finding.articleSlug}]]`)}`
       );
-      console.log(chalk21.gray(`     ${finding.description}`));
-      console.log(chalk21.gray(`     \u2192 ${finding.suggestion}`));
+      console.log(chalk23.gray(`     ${finding.description}`));
+      console.log(chalk23.gray(`     \u2192 ${finding.suggestion}`));
       console.log("");
     }
     if (result.articlesMarkedStale.length > 0) {
       console.log(
-        chalk21.yellow(
+        chalk23.yellow(
           `Marked ${result.articlesMarkedStale.length} article(s) as stale.`
         )
       );
     }
-    console.log(chalk21.gray(`Tokens used: ${result.tokensUsed}`));
+    console.log(chalk23.gray(`Tokens used: ${result.tokensUsed}`));
   } catch (error) {
     console.log(
-      chalk21.red(
+      chalk23.red(
         `\u274C Lint failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -6723,46 +7736,46 @@ wikiCommand.command("status").description("Show wiki statistics").action(async (
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const status = await compiler.getStatus();
-    console.log(chalk21.white.bold("\n\u{1F4DA} Wiki Status\n"));
+    console.log(chalk23.white.bold("\n\u{1F4DA} Wiki Status\n"));
     console.log(
-      chalk21.gray("  Sources:    ") + chalk21.white(String(status.totalSources))
+      chalk23.gray("  Sources:    ") + chalk23.white(String(status.totalSources))
     );
     console.log(
-      chalk21.gray("  Articles:   ") + chalk21.white(String(status.totalArticles)) + chalk21.gray(" (") + chalk21.green(`${status.activeArticles} active`) + (status.staleArticles > 0 ? chalk21.yellow(`, ${status.staleArticles} stale`) : "") + (status.archivedArticles > 0 ? chalk21.gray(`, ${status.archivedArticles} archived`) : "") + chalk21.gray(")")
+      chalk23.gray("  Articles:   ") + chalk23.white(String(status.totalArticles)) + chalk23.gray(" (") + chalk23.green(`${status.activeArticles} active`) + (status.staleArticles > 0 ? chalk23.yellow(`, ${status.staleArticles} stale`) : "") + (status.archivedArticles > 0 ? chalk23.gray(`, ${status.archivedArticles} archived`) : "") + chalk23.gray(")")
     );
     if (Object.keys(status.categories).length > 0) {
-      console.log(chalk21.gray("\n  Categories:"));
+      console.log(chalk23.gray("\n  Categories:"));
       for (const [category, count] of Object.entries(status.categories).sort()) {
         console.log(
-          chalk21.gray("    ") + chalk21.cyan(category) + chalk21.gray(": ") + chalk21.white(String(count))
+          chalk23.gray("    ") + chalk23.cyan(category) + chalk23.gray(": ") + chalk23.white(String(count))
         );
       }
     }
     if (status.lastActivity) {
       console.log(
-        chalk21.gray("\n  Last activity: ") + chalk21.white(status.lastActivity.toISOString().split("T")[0])
+        chalk23.gray("\n  Last activity: ") + chalk23.white(status.lastActivity.toISOString().split("T")[0])
       );
     }
     console.log("");
   } catch (error) {
     console.log(
-      chalk21.red(
+      chalk23.red(
         `\u274C Status failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
   }
 });
 wikiCommand.command("flush").description("Export wiki to disk as markdown files").action(async () => {
-  console.log(chalk21.gray("Flushing wiki to disk..."));
+  console.log(chalk23.gray("Flushing wiki to disk..."));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const result = await compiler.flushToDisk();
-    console.log(chalk21.green(`\u2705 Wrote ${result.filesWritten} files to ${result.wikiDir}`));
+    console.log(chalk23.green(`\u2705 Wrote ${result.filesWritten} files to ${result.wikiDir}`));
   } catch (error) {
     console.log(
-      chalk21.red(
+      chalk23.red(
         `\u274C Flush failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -6778,7 +7791,7 @@ wikiCommand.command("index").description("Show the wiki table of contents").opti
       index = index.filter((e) => e.category === options.category);
     }
     if (index.length === 0) {
-      console.log(chalk21.gray("Wiki is empty. Run `devpilot wiki ingest` to add sources."));
+      console.log(chalk23.gray("Wiki is empty. Run `devpilot wiki ingest` to add sources."));
       return;
     }
     const byCategory = {};
@@ -6788,25 +7801,25 @@ wikiCommand.command("index").description("Show the wiki table of contents").opti
       }
       byCategory[entry.category].push(entry);
     }
-    console.log(chalk21.white.bold("\n\u{1F4D6} Wiki Index\n"));
+    console.log(chalk23.white.bold("\n\u{1F4D6} Wiki Index\n"));
     for (const [category, entries] of Object.entries(byCategory).sort()) {
       console.log(
-        chalk21.cyan.bold(
+        chalk23.cyan.bold(
           `  ${category.charAt(0).toUpperCase() + category.slice(1)}`
         )
       );
       for (const entry of entries) {
-        const statusColor = entry.status === "active" ? chalk21.green : entry.status === "stale" ? chalk21.yellow : chalk21.gray;
+        const statusColor = entry.status === "active" ? chalk23.green : entry.status === "stale" ? chalk23.yellow : chalk23.gray;
         const badge = statusColor(`[${entry.status}]`);
         console.log(
-          `    ${badge} ${chalk21.white(entry.title)} ${chalk21.gray(`[[${entry.slug}]]`)}`
+          `    ${badge} ${chalk23.white(entry.title)} ${chalk23.gray(`[[${entry.slug}]]`)}`
         );
       }
       console.log("");
     }
   } catch (error) {
     console.log(
-      chalk21.red(
+      chalk23.red(
         `\u274C Index failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -6819,30 +7832,30 @@ wikiCommand.command("read <slug>").description("Read a specific wiki article").a
     const compiler = createWikiCompiler(config);
     const article = await compiler.getArticle(slug);
     if (!article) {
-      console.log(chalk21.red(`\u274C Article not found: [[${slug}]]`));
+      console.log(chalk23.red(`\u274C Article not found: [[${slug}]]`));
       return;
     }
-    console.log(chalk21.white.bold(`
+    console.log(chalk23.white.bold(`
 # ${article.title}
 `));
     console.log(
-      chalk21.gray(
+      chalk23.gray(
         `Category: ${article.category} | Status: ${article.status} | v${article.version}`
       )
     );
     if (article.backlinks.length > 0) {
       console.log(
-        chalk21.gray(
+        chalk23.gray(
           `Related: ${article.backlinks.map((b) => `[[${b}]]`).join(", ")}`
         )
       );
     }
-    console.log(chalk21.gray("\u2500".repeat(60)));
+    console.log(chalk23.gray("\u2500".repeat(60)));
     console.log(article.content);
     console.log("");
   } catch (error) {
     console.log(
-      chalk21.red(
+      chalk23.red(
         `\u274C Read failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -6855,7 +7868,7 @@ function getWikiConfig() {
     model: resolveWikiModel(),
     maxTokens: parseInt(process.env.WIKI_MAX_TOKENS || "8192", 10),
     repo: getRepoName(cwd),
-    wikiDir: join17(cwd, ".devpilot", "wiki")
+    wikiDir: join18(cwd, ".devpilot", "wiki")
   };
 }
 function getRepoName(cwd) {
@@ -6878,7 +7891,7 @@ var pkg = {
   name: "@devpilot.sh/cli",
   version: VERSION
 };
-var cli = new Command20();
+var cli = new Command22();
 cli.name("devpilot").description("DevPilot CLI - Manage your AI coding agent fleet").version(VERSION);
 cli.addCommand(initCommand);
 cli.addCommand(setupCommand);

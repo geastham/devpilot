@@ -8,6 +8,7 @@ import { RunwayIndicator } from './RunwayIndicator';
 import Link from 'next/link';
 import { GitBranch, Columns2, Sparkles } from 'lucide-react';
 import { LayoutSwitcher } from './LayoutSwitcher';
+import { DevPilotLockup } from '@/components/brand/DevPilotMark';
 
 /**
  * The top-right cluster was four unlabelled glyphs — a two-rectangle icon, a
@@ -34,10 +35,7 @@ export function TopBar() {
       {/* Left: Logo & Runway */}
       <div className="flex items-center gap-6">
         {/* Logo */}
-        <div className="flex items-center gap-2">
-          <span className="text-accent-primary text-lg">⧡</span>
-          <span className="text-sm font-semibold text-text-primary">DevPilot</span>
-        </div>
+        <DevPilotLockup />
 
         {/* Runway Indicator */}
         <RunwayIndicator hours={runwayHours} status={runwayStatus} />

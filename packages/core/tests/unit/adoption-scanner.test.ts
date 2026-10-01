@@ -668,6 +668,65 @@ describe('scanSessions', () => {
   });
 });
 
+/**
+ * The bridge scans every minute for weeks from one process. What git said on
+ * one pass must not be what it is taken to say on the next.
+ */
+describe('a scan in a process that has scanned before', () => {
+  const scanAll = () =>
+    scanSessions({ root: join(workspace, 'long-lived-projects'), machineName: MACHINE, allRepos: true, includePaths: true });
+
+  it('finds a session whose directory was not a routable repository last time', () => {
+    const dir = join(workspace, 'repos', 'late-remote');
+    mkdirSync(dir, { recursive: true });
+    git(dir, ['init', '-q']);
+
+    const transcriptDir = join(workspace, 'long-lived-projects', 'slug-late');
+    mkdirSync(transcriptDir, { recursive: true });
+    writeFileSync(
+      join(transcriptDir, 'cccccccc-0000-0000-0000-000000000001.jsonl'),
+      [
+        JSON.stringify({ type: 'mode', mode: 'normal', sessionId: 'cccccccc-0000-0000-0000-000000000001' }),
+        JSON.stringify({
+          cwd: dir,
+          sessionId: 'cccccccc-0000-0000-0000-000000000001',
+          gitBranch: 'main',
+          timestamp: new Date().toISOString(),
+          isSidechain: false,
+          type: 'user',
+          origin: { kind: 'human' },
+          message: { role: 'user', content: 'start something' },
+        }),
+      ].join('\n') + '\n',
+    );
+
+    // No remote yet: nothing to report, which is right.
+    const before = scanAll();
+    expect(before.candidates).toHaveLength(0);
+    expect(before.skipped.map((s) => s.reason)).toContain('no-repo');
+
+    // The same answer came back for ever, from the cache, when this was
+    // memoized for the life of the process — whether the cause was a remote
+    // added later, as here, or one `git` call that timed out.
+    git(dir, ['remote', 'add', 'origin', 'https://github.com/acme/late.git']);
+    const after = scanAll();
+    expect(after.candidates.map((c) => c.repo)).toEqual(['acme/late']);
+  });
+
+  it('reports the branch and the changed files as they are now', () => {
+    const dir = join(workspace, 'repos', 'late-remote');
+    // A branch has a name git will report only once it has a commit.
+    git(dir, ['-c', 'user.email=t@t.t', '-c', 'user.name=t', 'commit', '--allow-empty', '-qm', 'init']);
+    expect(scanAll().candidates[0].branch).not.toBe('feature/second-pass');
+    git(dir, ['checkout', '-q', '-b', 'feature/second-pass']);
+    writeFileSync(join(dir, 'changed-later.ts'), 'export {};\n');
+
+    const [candidate] = scanAll().candidates;
+    expect(candidate.branch).toBe('feature/second-pass');
+    expect(candidate.touchedPaths).toContain('changed-later.ts');
+  });
+});
+
 describe('loadOwnedSessionIds', () => {
   it('returns an empty set when the ledger is absent', () => {
     expect(loadOwnedSessionIds(join(workspace, 'nothing.json')).size).toBe(0);

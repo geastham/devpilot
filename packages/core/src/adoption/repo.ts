@@ -33,7 +33,7 @@ const remoteCache = new Map<string, RepoIdentity | null>();
 const branchCache = new Map<string, string | null>();
 const statusCache = new Map<string, string[]>();
 
-/** Test seam and long-lived-process hygiene. */
+/** Forget what git said. Called at the start of every scan — see `scanSessions`. */
 export function clearRepoCache(): void {
   remoteCache.clear();
   branchCache.clear();

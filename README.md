@@ -171,6 +171,30 @@ devpilot serve         # the cockpit, on port 3847
 </details>
 
 <details>
+<summary><b>Watching the agents you already run</b></summary>
+
+<br>
+
+The smallest useful setup: no Linear, no planner, nothing dispatched. Create a workspace
+at [devpilot.sh](https://devpilot.sh), take the command its setup page gives you, and
+the Claude Code sessions on that machine show up in the hosted cockpit with what each one
+spent — tokens by kind, written changes, cost at API rates.
+
+```bash
+npm install -g @devpilot.sh/cli
+
+devpilot bridge connect --url https://devpilot.sh --token <from the setup page>
+devpilot bridge install        # keep it running across restarts (macOS, Linux)
+devpilot statusline install    # optional: subscription windows and cache misses
+```
+
+What leaves the machine is tool names, repo-relative file paths and counts — never a
+prompt, a response or a file's contents. See **[docs/BRIDGE.md](docs/BRIDGE.md)** and
+**[docs/STATUSLINE.md](docs/STATUSLINE.md)**.
+
+</details>
+
+<details>
 <summary><b>Connecting real agents and Linear</b></summary>
 
 <br>
@@ -180,6 +204,23 @@ a local orchestrator — see **[docs/AO-INTEGRATION.md](docs/AO-INTEGRATION.md)*
 horizon items into Linear tickets via the hosted bridge in
 **[docs/LINEAR-BRIDGE.md](docs/LINEAR-BRIDGE.md)**. Copy `.env.example` to `.env` for API
 keys.
+
+`devpilot bridge connect` is the process that connects a machine to the hosted bridge and
+reports the Claude Code sessions running on it. It runs in the foreground; to keep it
+running without a terminal:
+
+```bash
+devpilot bridge start --token <token>   # in the background, until the machine restarts
+devpilot bridge install                 # as a login service (launchd / systemd): survives a restart
+devpilot bridge status                  # is one running, and how; exit code 0 if so
+devpilot bridge logs -f
+devpilot bridge stop                    # or: devpilot bridge uninstall
+```
+
+`start` and `install` take the same options as `connect`. The token is saved to
+`~/.devpilot/bridge.json` and is not put on the bridge's command line or in the service
+file. Details, and how to upgrade the CLI under a running bridge, in
+**[docs/BRIDGE.md](docs/BRIDGE.md)**.
 
 </details>
 
@@ -361,6 +402,7 @@ to contribute something that matters.
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Current state and prioritized next work |
 | [docs/AO-INTEGRATION.md](docs/AO-INTEGRATION.md) | Wiring an agent orchestrator |
 | [docs/LINEAR-BRIDGE.md](docs/LINEAR-BRIDGE.md) | Linear sync via the hosted bridge |
+| [docs/BRIDGE.md](docs/BRIDGE.md) | Keeping the bridge running: foreground, background, login service; state, logs, upgrading |
 | [docs/ADOPTION.md](docs/ADOPTION.md) | Introspecting agent sessions DevPilot didn't start, and putting them on the board |
 | [spec/DESIGN.md](spec/DESIGN.md) | The full TRD — mental model, data model, every surface |
 | [spec/WAVE-PLANNER.md](spec/WAVE-PLANNER.md) | Wave planning algorithm and phases |

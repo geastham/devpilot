@@ -12571,6 +12571,7 @@ function heuristicTitle(observation) {
   return `Agent session ${observation.sessionUuid.slice(0, 8)}`;
 }
 function scanSessions(options) {
+  clearRepoCache();
   const root = options.root ?? defaultProjectsRoot();
   const nowMs = (options.now ?? /* @__PURE__ */ new Date()).getTime();
   const liveWithinMs = options.liveWithinMs ?? DEFAULT_LIVE_WITHIN_MS;

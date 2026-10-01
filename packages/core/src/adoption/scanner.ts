@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { AdoptionCandidate, DiscoveredRepo } from '@devpilot.sh/bridge-protocol';
 import { ADOPTION_LIMITS } from '@devpilot.sh/bridge-protocol';
 import { probeTranscript, type ProbeOptions, type SessionObservation } from './transcript';
-import { resolveBranch, resolveRepo, resolveTouchedPaths } from './repo';
+import { clearRepoCache, resolveBranch, resolveRepo, resolveTouchedPaths } from './repo';
 
 /**
  * The walk — TRD 21 §6.3.
@@ -234,6 +234,27 @@ export function heuristicTitle(observation: SessionObservation): string {
  * `git`, and does nothing else. Summarization and upload are the caller's.
  */
 export function scanSessions(options: ScanOptions): ScanResult {
+  /**
+   * What git said is good for one scan, not for the life of the process.
+   *
+   * The lookups in ./repo are memoized so that thirty project directories in
+   * five repositories cost five `git` calls a pass. They were memoized for
+   * ever, which was fine for a command that scans once and exits and wrong
+   * for the bridge, which scans every minute for weeks:
+   *
+   *   - a directory that answered "no repository" once — a remote added after
+   *     the session began, or one `git` call that timed out on a busy machine
+   *     — stayed "no repository" until the bridge was restarted, and every
+   *     session in it was invisible, with nothing logged;
+   *   - the branch a directory "is on right now" was the branch it was on when
+   *     the bridge started, and its uncommitted paths likewise.
+   *
+   * Seen as a first-run check that passed twice and then, on a loaded machine,
+   * reported no session at all for a transcript the same scanner listed a
+   * minute later from a fresh process.
+   */
+  clearRepoCache();
+
   const root = options.root ?? defaultProjectsRoot();
   const nowMs = (options.now ?? new Date()).getTime();
   const liveWithinMs = options.liveWithinMs ?? DEFAULT_LIVE_WITHIN_MS;

@@ -150,8 +150,8 @@ devpilot config linear --test
 ### Bridge Commands (Cloud Connection)
 
 ```bash
-# Connect to cloud bridge
-devpilot bridge connect --url <bridge-url> --api-key <key>
+# Connect to the hosted bridge (the token comes from the dashboard's setup page)
+devpilot bridge connect --url <bridge-url> --token <token>
 
 # Check connection status
 devpilot bridge status

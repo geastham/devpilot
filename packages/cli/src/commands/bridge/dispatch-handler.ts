@@ -235,3 +235,35 @@ export function createBridgeDispatchHandler(
     }
   };
 }
+
+/**
+ * The handler for a bridge that is watching only.
+ *
+ * Such a machine was not set up to run work, and normally none reaches it:
+ * nothing routes to a machine with no repos. But a route can be pointed at it
+ * from the dashboard, and then a ticket arrives here. Declining it in words is
+ * the whole job — the alternative is a ticket that sits claimed and silent
+ * until the stale sweep, with nothing anywhere saying why.
+ *
+ * Same failure protocol as above: report to the bridge, then throw, so the
+ * claim is released.
+ */
+export function createWatchOnlyDispatchHandler(opts: {
+  client: Pick<BridgeClient, 'reportSessionStatus'>;
+  machineName: string;
+  onLog?: (line: string) => void;
+}): (message: TaskDispatchMessage) => Promise<void> {
+  return async function decline(message: TaskDispatchMessage): Promise<void> {
+    const reason =
+      `${opts.machineName} is connected to watch sessions only and does not run dispatched work. ` +
+      'On that machine, start `devpilot serve` and reconnect its bridge with `--plan --repos ' +
+      `${message.repo}\`, or route ${message.repo} to a machine that does.`;
+    opts.onLog?.(`${message.linearIdentifier} declined: this bridge is watching only`);
+    try {
+      await opts.client.reportSessionStatus(message.sessionId, { status: 'error', progressPercent: 0, message: reason });
+    } catch {
+      /* the throw below still releases the claim */
+    }
+    throw new Error(reason);
+  };
+}
