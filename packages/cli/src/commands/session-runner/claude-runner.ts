@@ -5,7 +5,7 @@ import { tmpdir, homedir } from 'os';
 import { join } from 'path';
 import { recordWindowReading, statuslineDir } from '../../utils/statusline-store.js';
 import { TelemetryCollector, type SessionTelemetry } from './stream-events';
-import type { Harness } from './harness';
+import { sessionServerCommand, type Harness, type WorkHistorySource } from './harness';
 
 const execFileAsync = promisify(execFile);
 
@@ -219,9 +219,11 @@ function writeSessionMcpConfig(sessionLink: string): { dir: string; file: string
       {
         mcpServers: {
           'devpilot-session': {
-            command: 'npx',
-            args: ['-y', '@devpilot.sh/mcp-session'],
-            env: { DEVPILOT_SESSION_LINK: sessionLink },
+            ...sessionServerCommand(),
+            // `session` only: the whole of this server is granted to the agent
+            // below, and work history is a separate grant (the `work-history`
+            // technique) that a dispatch into a session must not carry with it.
+            env: { DEVPILOT_SESSION_LINK: sessionLink, DEVPILOT_MCP_TOOLS: 'session' },
           },
         },
       },
@@ -285,6 +287,11 @@ export interface RunClaudeOptions {
    * is one. Only used if the harness includes the `code-graph` technique.
    */
   codeGraph?: { command: string; args: string[]; env?: Record<string, string> } | null;
+  /**
+   * The local cockpit this run can ask for work history, when there is one.
+   * Only used if the harness includes the `work-history` technique.
+   */
+  workHistory?: WorkHistorySource | null;
   /** Where window readings are logged. Defaults to `~/.devpilot/statusline`; set in tests. */
   statuslineDir?: string;
   /**
@@ -349,22 +356,29 @@ export async function runClaudeSession(
   // be configured on the machine, which would vary per operator and could reach
   // systems the dispatch never intended to touch.
   let mcpDir: string | undefined;
-  let effectivePrompt = prompt;
   if (sessionLink) {
     const cfg = writeSessionMcpConfig(sessionLink);
     mcpDir = cfg.dir;
     args.push('--mcp-config', cfg.file, '--strict-mcp-config');
-    effectivePrompt = sessionPreamble() + prompt;
   }
 
   // The harness goes last so its arguments are easy to find in a process
   // listing, and after the session wiring so a technique can tell whether an
   // MCP config has already been supplied.
-  const harnessBuild = harness?.build({ hasMcpConfig: Boolean(sessionLink), codeGraph: options.codeGraph });
+  const harnessBuild = harness?.build({
+    hasMcpConfig: Boolean(sessionLink),
+    codeGraph: options.codeGraph,
+    workHistory: options.workHistory,
+  });
   // The stamp for this run, not for the runner: a technique that could not
   // take effect here (no index for this repository, say) is not in it.
   const stamp = harnessBuild?.stamp ?? harness?.stamp;
   if (harnessBuild) args.push(...harnessBuild.args);
+
+  // The session's instructions stay first — "join before anything else" has to
+  // be the first thing read — then whatever a technique needs the agent to
+  // know it has, then the task.
+  const effectivePrompt = (sessionLink ? sessionPreamble() : '') + (harnessBuild?.preamble ?? '') + prompt;
 
   /**
    * Grant the MCP tools this run was given — last, and exactly once.

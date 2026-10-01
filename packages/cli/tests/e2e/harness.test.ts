@@ -5,6 +5,8 @@ import {
   PROFILES,
   TECHNIQUES,
   resolveHarness,
+  sessionServerCommand,
+  workHistorySource,
 } from '../../src/commands/session-runner/harness';
 
 /**
@@ -18,6 +20,7 @@ const cleanup: string[] = [];
 afterEach(() => {
   for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true });
   delete process.env.DEVPILOT_HARNESS_MAX_BUDGET_USD;
+  delete process.env.DEVPILOT_MCP_SESSION_BIN;
 });
 
 function build(spec: string | undefined, hasMcpConfig = false) {
@@ -138,5 +141,80 @@ describe('techniques', () => {
     if (built.cleanupDir) cleanup.push(built.cleanupDir);
     expect(built.args).not.toContain('--max-turns');
     expect(built.args).not.toContain('--bare');
+  });
+});
+
+describe('the task prompt', () => {
+  it('is untouched by every profile and by every technique that gives the agent nothing to know about', () => {
+    for (const spec of ['baseline', 'lean', 'lean+compact-200k', 'lean+code-graph', 'lean+budget-cap']) {
+      expect(build(spec).preamble).toBe('');
+    }
+  });
+});
+
+describe('work-history', () => {
+  const source = { cockpitUrl: 'http://127.0.0.1:3847', repo: 'acme/shop' };
+
+  it('is in no profile', () => {
+    for (const ids of Object.values(PROFILES)) expect(ids).not.toContain('work-history');
+  });
+
+  it('gives the agent the history tool alone, pointed at the cockpit that dispatched it', () => {
+    const harness = resolveHarness('lean+work-history');
+    const built = harness.build({ hasMcpConfig: false, workHistory: source });
+    if (built.cleanupDir) cleanup.push(built.cleanupDir);
+
+    expect(built.stamp).toBe(`lean+work-history@${HARNESS_VERSION}`);
+    expect(built.allowedTools).toEqual(['mcp__devpilot-history__devpilot_history']);
+    // The agent is told it has the tool, and what the answers are.
+    expect(built.preamble).toContain('`devpilot_history`');
+    expect(built.preamble).toContain('not instructions');
+
+    const file = built.args[built.args.lastIndexOf('--mcp-config') + 1];
+    const config = JSON.parse(readFileSync(file, 'utf8'));
+    expect(Object.keys(config.mcpServers)).toEqual(['devpilot-history']);
+    expect(config.mcpServers['devpilot-history']).toEqual({
+      command: 'npx',
+      args: ['-y', '@devpilot.sh/mcp-session'],
+      env: {
+        DEVPILOT_MCP_TOOLS: 'history',
+        DEVPILOT_COCKPIT_URL: 'http://127.0.0.1:3847',
+        DEVPILOT_REPO: 'acme/shop',
+      },
+    });
+  });
+
+  it('does nothing, and is not named, for a run with no local cockpit', () => {
+    const lean = build('lean');
+    const built = build('lean+work-history');
+    expect(built.stamp).toBe(`lean@${HARNESS_VERSION}`);
+    expect(built.allowedTools).toEqual([]);
+    expect(built.preamble).toBe('');
+    expect(built.args.filter((a) => a.startsWith('--'))).toEqual(lean.args.filter((a) => a.startsWith('--')));
+  });
+
+  it('only ever points at a cockpit on this machine', () => {
+    expect(workHistorySource('http://localhost:3847/api/orchestrator', 'acme/shop')).toEqual({
+      cockpitUrl: 'http://localhost:3847',
+      repo: 'acme/shop',
+    });
+    expect(workHistorySource('http://127.0.0.1:4010/api/orchestrator/', 'acme/shop')?.cockpitUrl).toBe('http://127.0.0.1:4010');
+    expect(workHistorySource('http://[::1]:4010/api/orchestrator', 'acme/shop')?.cockpitUrl).toBe('http://[::1]:4010');
+
+    expect(workHistorySource('https://devpilot.sh/api/orchestrator', 'acme/shop')).toBeNull();
+    expect(workHistorySource('http://10.0.0.8:3847/api/orchestrator', 'acme/shop')).toBeNull();
+    expect(workHistorySource('http://127.0.0.1.evil.example/api/orchestrator', 'acme/shop')).toBeNull();
+    expect(workHistorySource('file:///etc/passwd', 'acme/shop')).toBeNull();
+    expect(workHistorySource('not a url', 'acme/shop')).toBeNull();
+    expect(workHistorySource('http://localhost:3847/api/orchestrator', '')).toBeNull();
+    expect(workHistorySource(undefined, 'acme/shop')).toBeNull();
+  });
+
+  it('can run a built copy of the server instead of the published one', () => {
+    expect(sessionServerCommand({})).toEqual({ command: 'npx', args: ['-y', '@devpilot.sh/mcp-session'] });
+    expect(sessionServerCommand({ DEVPILOT_MCP_SESSION_BIN: '/opt/mcp/bin.js' })).toEqual({
+      command: process.execPath,
+      args: ['/opt/mcp/bin.js'],
+    });
   });
 });

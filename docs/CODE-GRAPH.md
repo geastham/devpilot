@@ -35,6 +35,7 @@ The index is a SQLite file in `.codegraph/` in the checkout. `enable` adds
 | **Tests for a task.** Each worker is told which tests are reached from the files in its scope. | An index |
 | **Blast radius at review.** Per task: how many files depend on what it will change. | An index |
 | **The graph as an agent tool.** One MCP tool, `codegraph_explore`. | An index, and the runner started with `--harness <profile>+code-graph` |
+| **Work history.** What earlier tasks did to a file — see [below](#work-history). | Nothing: it is the cockpit's own record. For agents, `--harness <profile>+work-history` |
 
 None of it leaves the machine.
 
@@ -64,6 +65,40 @@ results: a query that named a symbol returned the right module, and the same
 question in plain English returned a different one; and each call returned
 about 5,000 tokens either way.
 
+## Work history
+
+A code graph can be rebuilt from the repository at any time. What cannot be is
+what happened: that the last task to change `retry.ts` collided with another on
+merge and was run again, or failed, or what its agent said it did. The cockpit
+already records all of that per task. This is the read side.
+
+```
+GET /api/history?repo=<owner/name>&paths=src/retry.ts,src/fetch.ts&limit=5
+```
+
+For each path: the most recent wave tasks that changed it, with the ticket,
+how the task ended and when, whether it was retried and why, whether its
+branch conflicted, its agent's summary, and its cost at API rates. A task
+counts for a file when the files it is recorded as having changed include it;
+where nothing recorded what it changed, when its plan assigned it the file —
+each entry says which (`matchedOn`).
+
+It needs no index and no indexer.
+
+**For agents.** `--harness <profile>+work-history` gives a dispatched agent one
+tool, `devpilot_history({ paths })`, served by `@devpilot.sh/mcp-session`. Three
+things about it:
+
+- **It is local.** The tool asks the cockpit that dispatched the task, and the
+  runner only wires it up when that cockpit is on a loopback address. Summaries
+  and errors are text agents wrote about your code; they are never sent to the
+  hosted plane.
+- **What it returns is labelled as untrusted.** An earlier agent's summary is
+  shown as a note about what happened, inside a delimited block the text cannot
+  close, and described to the reading agent as not being instructions.
+- **It is off by default and unmeasured.** Like `code-graph` it is in no
+  profile. The bet is on fewer retries and conflicts; compare the two stamps.
+
 ## Sharing with the hosted plane (premium, opt-in)
 
 ```
@@ -88,7 +123,7 @@ by default, per repository, and says what crosses before it does anything.
 
 The hosted graph follows the repository's default branch. It is a premium
 feature, free during early access: a workspace owner turns it on under
-Settings → Early access.
+Manage → Code graph.
 
 What it is for is what only the hosted plane can see — every machine at once:
 a warning when agents on two machines are working on connected code, and the

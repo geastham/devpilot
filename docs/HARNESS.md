@@ -58,6 +58,7 @@ that would show it has made things worse.
 | `compact-200k` | History is summarised at 200k tokens instead of near the window limit | context size | files re-read after a compaction; more turns; lower success |
 | `budget-cap` | A run stops once it has spent `DEVPILOT_HARNESS_MAX_BUDGET_USD` at API rates | tail cost | legitimate long tasks cut off |
 | `code-graph` | The agent gets one extra tool that answers "where is this and what depends on it" from an index of the repository — see [CODE-GRAPH.md](CODE-GRAPH.md) | the reading an agent does to find its way around | **more** tokens per written change, not fewer; retrieved context left in the window; answers about the wrong module |
+| `work-history` | The agent gets one extra tool, `devpilot_history`, that says what earlier tasks did to a file: which changed it, whether that task failed or collided on merge, what its agent reported — see [CODE-GRAPH.md](CODE-GRAPH.md#work-history) | retries and merge conflicts (tail cost) | no fall in retries or conflicts; the agent following an earlier agent's summary instead of reading the code |
 
 Profiles are named sets:
 

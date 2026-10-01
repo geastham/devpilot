@@ -134,7 +134,7 @@ export const WHAT_CROSSES = [
   '  · the contents of any file',
   '',
   'The hosted code graph is a premium feature, free during early access. Your',
-  'workspace must have it turned on (Settings → Early access).',
+  'workspace must have it turned on (Manage → Code graph).',
 ];
 
 function describePush(outcome: PushOutcome, identity: GraphIdentity): string[] {
@@ -158,7 +158,7 @@ function describePush(outcome: PushOutcome, identity: GraphIdentity): string[] {
       return [
         chalk.yellow('The hosted code graph is not turned on for this workspace.'),
         chalk.gray('  It is a premium feature, free during early access: turn it on under'),
-        chalk.gray('  Settings → Early access in the dashboard, then run this again.'),
+        chalk.gray('  Manage → Code graph in the dashboard (an owner or admin), then run this again.'),
       ];
     case 'failed':
       return [chalk.red(`Could not send the graph: ${outcome.message}`), chalk.gray(`  ${outcome.sent} batch(es) landed before it stopped. Running this again picks up from what is there.`)];

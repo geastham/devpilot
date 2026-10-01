@@ -19,8 +19,27 @@ import { codeGraph } from '@devpilot.sh/core';
 
 type Structure = ReturnType<typeof codeGraph.exportStructure>;
 
-/** Kept under the hosted route's own caps, with room to spare. */
-export const BATCH_LIMITS = { files: 400, nodes: 4_000, edges: 8_000, removePaths: 2_000 } as const;
+/**
+ * Kept under the hosted route's own caps, with room to spare.
+ *
+ * `bytes` is the one that is not a row count. The hosted plane's platform
+ * refuses a request body over 4.5 MB before the route sees it, and a batch at
+ * the row limits was measured at about 3.2 MB on a real index — close enough
+ * that long paths or qualified names would cross it. Rows are counted in bytes
+ * as they are added, and a batch is closed at 3 MB whatever its row counts.
+ */
+export const BATCH_LIMITS = {
+  files: 400,
+  nodes: 4_000,
+  edges: 8_000,
+  removePaths: 2_000,
+  bytes: 3_000_000,
+} as const;
+
+/** The bytes a value adds to a JSON body, near enough: its own encoding plus a separator. */
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8') + 1;
+}
 
 export interface GraphIdentity {
   repo: string;
@@ -90,16 +109,20 @@ export function batchesFor(
   const batches: GraphSyncBatch[] = [];
   const skipped: { path: string; nodes: number; edges: number }[] = [];
   let current = empty();
+  let currentBytes = 0;
   const flush = () => {
     batches.push(current);
     current = empty();
+    currentBytes = 0;
   };
 
   // Removals first: a path that was renamed is removed before its new name
   // arrives, and never the other way round.
   for (const path of plan.removed) {
-    if (current.removePaths.length >= BATCH_LIMITS.removePaths) flush();
+    const size = jsonBytes(path);
+    if (current.removePaths.length >= BATCH_LIMITS.removePaths || currentBytes + size > BATCH_LIMITS.bytes) flush();
     current.removePaths.push(path);
+    currentBytes += size;
   }
 
   for (const path of plan.changed) {
@@ -108,20 +131,27 @@ export function batchesFor(
     const nodes = nodesByFile.get(path) ?? [];
     const edges = edgesByFile.get(path) ?? [];
 
-    if (nodes.length > BATCH_LIMITS.nodes || edges.length > BATCH_LIMITS.edges) {
+    const entry = { path: file.path, contentHash: file.contentHash, language: file.language };
+    const size = jsonBytes(entry) + jsonBytes(nodes) + jsonBytes(edges);
+
+    // A file is sent whole or not at all: the hosted side replaces a file's
+    // rows as a unit, so half of one would leave it describing neither commit.
+    if (nodes.length > BATCH_LIMITS.nodes || edges.length > BATCH_LIMITS.edges || size > BATCH_LIMITS.bytes) {
       skipped.push({ path, nodes: nodes.length, edges: edges.length });
       continue;
     }
     if (
       current.upsertFiles.length >= BATCH_LIMITS.files ||
       current.nodes.length + nodes.length > BATCH_LIMITS.nodes ||
-      current.edges.length + edges.length > BATCH_LIMITS.edges
+      current.edges.length + edges.length > BATCH_LIMITS.edges ||
+      currentBytes + size > BATCH_LIMITS.bytes
     ) {
       flush();
     }
-    current.upsertFiles.push({ path: file.path, contentHash: file.contentHash, language: file.language });
+    current.upsertFiles.push(entry);
     current.nodes.push(...nodes);
     current.edges.push(...edges);
+    currentBytes += size;
   }
 
   current.final = true;

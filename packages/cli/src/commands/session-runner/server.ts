@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import { existsSync } from 'fs';
 import { basename, isAbsolute, resolve } from 'path';
 import { runClaudeSession } from './claude-runner';
+import { workHistorySource } from './harness';
 import { sendCompletion, sendStatus } from './callbacks';
 import { describeActivity, estimateProgress, type SessionTelemetry } from './stream-events';
 import {
@@ -272,6 +273,7 @@ export class SessionRunner {
         timeoutMs: this.config.timeoutMs,
         harness: this.config.harness,
         codeGraph,
+        workHistory: workHistorySource(callbackUrl, request.repo),
         onLog: (line) => this.config.log(`[${session.externalSessionId}] ${line}`),
         onSpawn: (kill) => {
           session.kill = kill;

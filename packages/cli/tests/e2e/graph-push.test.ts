@@ -180,6 +180,43 @@ describe('cutting it into requests', () => {
     expect(batches.flatMap((b) => b.upsertFiles.map((f) => f.path))).toEqual(['f0.ts', 'f1.ts']);
   });
 
+  /**
+   * The platform in front of the hosted route refuses a body over 4.5 MB before
+   * the route can answer, so a batch within every row limit can still be one
+   * that never arrives. Long qualified names are how that happens.
+   */
+  it('closes a request at the byte ceiling even when its row counts are small', () => {
+    // 3,600 symbols and 7,000 references: inside both row limits. With
+    // qualified names near the route's 600-character cap that is ~3.5 MB.
+    const local = structure(40, 90) as ReturnType<typeof structure> & { edges: unknown[] };
+    for (const node of local.nodes) node.qualifiedName = `${'deeply.nested.namespace.'.repeat(23)}${node.name}`;
+    local.edges = local.files.flatMap((f, i) =>
+      Array.from({ length: 175 }, (_, j) => ({
+        source: `n${i * 90 + (j % 90)}`, target: `n${(i * 90 + j * 7) % 3600}`, kind: 'calls', line: j + 1, filePath: f.path,
+      })),
+    );
+    expect(local.nodes.length).toBeLessThan(BATCH_LIMITS.nodes);
+    expect(local.edges.length).toBeLessThan(BATCH_LIMITS.edges);
+
+    const { batches, skipped } = batchesFor(local as never, { changed: local.files.map((f) => f.path), removed: [] }, identity);
+
+    expect(skipped).toEqual([]);
+    expect(batches.length).toBeGreaterThan(1);
+    for (const batch of batches) {
+      expect(batch.nodes.length).toBeLessThan(BATCH_LIMITS.nodes);
+      expect(Buffer.byteLength(JSON.stringify(batch), 'utf8')).toBeLessThan(BATCH_LIMITS.bytes + 2_000);
+    }
+    // Nothing was lost to the split, and no file was cut in two.
+    expect(batches.flatMap((b) => b.upsertFiles).length).toBe(40);
+    expect(batches.flatMap((b) => b.nodes).length).toBe(3_600);
+    expect(batches.flatMap((b) => b.edges).length).toBe(7_000);
+    for (const batch of batches) {
+      const files = new Set(batch.upsertFiles.map((f) => f.path));
+      expect(batch.nodes.every((n) => files.has(n.filePath))).toBe(true);
+      expect(batch.edges.every((e) => files.has(e.filePath))).toBe(true);
+    }
+  });
+
   it('puts removals in the first request', () => {
     const local = structure(1, 1);
     const { batches } = batchesFor(local as never, { changed: ['f0.ts'], removed: ['old-name.ts'] }, identity);
