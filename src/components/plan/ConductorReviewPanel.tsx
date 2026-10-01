@@ -24,6 +24,28 @@ import { useUIStore, useHorizonStore } from '@/stores';
  * with, rather than a parallel database flow that happens to look similar.
  */
 
+/**
+ * What a code graph said about the plan, as `/api/items/[id]/conductor`
+ * reports it (`CodeGraphReview` in core). Written out here, like `ReviewState`
+ * below, as the fields this panel reads off the response — the panel takes
+ * nothing from core, whose wave planner is server-side code.
+ */
+interface CodeGraphBlock {
+  used: boolean;
+  reason: string | null;
+  indexedAt: string | null;
+  truncated: boolean;
+  tasks: {
+    taskCode: string;
+    dependentCount: number;
+    dependents: string[];
+    more: number;
+    summary: string;
+    notSequencedOn: string[];
+  }[];
+  sequenced: { taskCode: string; wavesLater: number; because: string }[];
+}
+
 interface ReviewState {
   status?: string;
   awaiting?: 'review' | 'wave' | null;
@@ -39,12 +61,76 @@ interface ReviewState {
   completedWaves?: number[];
   lastDispatch?: { dispatched: number; queued: number } | null;
   errors?: string[];
+  /** Null when nobody asked — no plan yet, or one made before this existed. */
+  codeGraph?: CodeGraphBlock | null;
 }
 
 type Phase =
   | { kind: 'idle' }
   | { kind: 'working'; label: string }
   | { kind: 'error'; message: string; detail?: string };
+
+function BlastRadius({ graph }: { graph: CodeGraphBlock }) {
+  if (!graph.used) {
+    return (
+      <p className="rounded-lg border border-border-default bg-bg-surface p-3 text-xs leading-relaxed text-text-muted">
+        This plan was laid out without a code graph: {graph.reason ?? 'no reason was recorded'}.
+      </p>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-border-default bg-bg-surface p-3">
+      <p className="text-xs text-text-secondary">What depends on what this plan changes</p>
+
+      <ul className="mt-2 space-y-1">
+        {graph.tasks.map((task) => (
+          <li key={task.taskCode} className="text-xs">
+            {task.dependentCount > 0 ? (
+              <details>
+                <summary className="cursor-pointer text-text-primary">
+                  <span className="font-mono">{task.taskCode}</span> — {task.summary}
+                </summary>
+                <ul className="mt-1 space-y-0.5 pl-4 text-text-muted">
+                  {task.dependents.map((file) => (
+                    <li key={file} className="truncate font-mono" title={file}>
+                      {file}
+                    </li>
+                  ))}
+                  {task.more > 0 && <li>…and {task.more} more</li>}
+                </ul>
+              </details>
+            ) : (
+              <span className="text-text-muted">
+                <span className="font-mono">{task.taskCode}</span> — {task.summary}
+              </span>
+            )}
+            {task.notSequencedOn.map((note) => (
+              <p key={note} className="pl-4 text-text-muted">
+                {note}
+              </p>
+            ))}
+          </li>
+        ))}
+      </ul>
+
+      {graph.sequenced.map((move) => (
+        <p key={move.taskCode} className="mt-2 text-xs leading-relaxed text-text-primary">
+          {move.because}
+        </p>
+      ))}
+
+      {/* What this is worth. The index resolves some names by spelling, so a
+          list can hold a file that does not depend on the task's and miss one
+          that does; and it is as old as its last sync. */}
+      <p className="mt-2 text-xs leading-relaxed text-text-muted">
+        From the code index on the machine that runs the agents
+        {graph.indexedAt ? `, last written ${new Date(graph.indexedAt).toLocaleString()}` : ''}. It
+        can list a file that does not really depend on a task&apos;s, and miss one that does.
+      </p>
+    </div>
+  );
+}
 
 export function ConductorReviewPanel() {
   const isOpen = useUIStore((s) => s.isConfidencePanelOpen);
@@ -209,6 +295,14 @@ export function ConductorReviewPanel() {
                   planner could not improve it further — your call.
                 </p>
               )}
+
+              {/* Blast radius: what depends on the files each task changes.
+                  It is the question a reviewer is actually asking of a plan,
+                  and the plan's own text cannot answer it. When there was no
+                  code graph to ask, that is said too — one line, with the
+                  reason — rather than leaving an absence to be read as "no
+                  dependents". */}
+              {state?.codeGraph && <BlastRadius graph={state.codeGraph} />}
 
               <div className="space-y-2">
                 <label

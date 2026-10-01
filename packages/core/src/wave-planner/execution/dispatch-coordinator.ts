@@ -587,6 +587,11 @@ export class WaveDispatchCoordinator {
       );
     }
 
+    // Which tests the task's files reach, if a code graph can say. Asked
+    // before the session row exists, so the few seconds it may take are not
+    // spent with an ACTIVE row on the board for an agent nobody has started.
+    const reached = await this.reachedTests(service, ctx.repo, request.fileScope);
+
     // Create the DevPilot session row first so its id can seed the prompt and
     // correlate pushed callbacks.
     const [session] = await this.db.insert(rufloSessions)
@@ -632,6 +637,10 @@ export class WaveDispatchCoordinator {
         ctx.run.isolated &&
         request.predecessorContext.length > 0 &&
         request.predecessorContext.every((p) => p.merged === true),
+      // Present only when there is a list with something in it. Spread rather
+      // than passed as undefined so that, without a code graph, the input —
+      // and the prompt — are what they were.
+      ...(reached ? { reachedTests: reached.tests, reachedTestsTruncated: reached.truncated } : {}),
     });
 
     const dispatchReq: DispatchRequest = {
@@ -710,6 +719,44 @@ export class WaveDispatchCoordinator {
       externalJobId: response.orchestratorJobId ?? '',
       mode: service.mode,
     };
+  }
+
+  /**
+   * The test files reached from a task's files, or null when there is nothing
+   * to tell the worker: the task names no files, there is no code graph to
+   * ask, or it found none.
+   *
+   * Asked of the runner, like the plan's dependents, because the index lives
+   * in the checkout and only the runner knows where that is. The request
+   * names the repository and nothing about the task's run, so the answer
+   * cannot come from an isolated task's own worktree: it describes the
+   * repository as it was last indexed, not the run branch the task's checkout
+   * is cut from. That is one more reason the prompt presents the list as
+   * information.
+   *
+   * Never throws and never fails a dispatch. "Unavailable" is not logged or
+   * recorded per task: it is the normal state of a repository with no index,
+   * and the plan already says whether a graph was there when it was made.
+   */
+  private async reachedTests(
+    service: OrchestratorService,
+    repo: string,
+    files: string[]
+  ): Promise<{ tests: string[]; truncated: boolean } | null> {
+    if (files.length === 0) {
+      return null;
+    }
+
+    try {
+      const outcome = await service.graphAffectedTests({ repo, files });
+      if (!outcome.available || outcome.tests.length === 0) {
+        return null;
+      }
+      return { tests: outcome.tests, truncated: outcome.truncated };
+    } catch {
+      // The service answers rather than rejects; a stand-in for it might not.
+      return null;
+    }
   }
 
   /**

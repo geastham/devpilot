@@ -14,6 +14,10 @@ import type {
   IntegrateOutcome,
   IntegrateRequest,
   IsolationSupport,
+  GraphDependentsRequest,
+  GraphDependentsOutcome,
+  GraphAffectedTestsRequest,
+  GraphAffectedTestsOutcome,
 } from './types';
 
 /**
@@ -150,6 +154,18 @@ export interface IOrchestratorAdapter {
    * `isolationSupport` is.
    */
   integrate?(request: IntegrateRequest): Promise<IntegrateOutcome>;
+
+  /**
+   * What depends on these files, from the repository's code graph index.
+   *
+   * Optional, and absent means there is none to read: only `claude-session`
+   * implements it, because only a session runner has a checkout to read an
+   * index from. Must not reject; "no index" is `available: false`.
+   */
+  graphDependents?(request: GraphDependentsRequest): Promise<GraphDependentsOutcome>;
+
+  /** The test files reached from these files. Same terms as `graphDependents`. */
+  graphAffectedTests?(request: GraphAffectedTestsRequest): Promise<GraphAffectedTestsOutcome>;
 
   /**
    * Stop polling/cleanup resources

@@ -14,6 +14,7 @@ import {
   resolvePlannerModel,
   buildSpecContentForItem,
 } from '@devpilot.sh/core/wave-planner';
+import { getServerOrchestrator } from '@/lib/orchestrator';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -153,6 +154,10 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       ? buildSpecContentForItem({ title: item.title, description: item.description })
       : item.title;
 
+    // So the generator can ask the session runner for the code graph; see the
+    // same line in ../generate/route.ts.
+    getServerOrchestrator();
+
     // Reoptimize the wave plan
     const result = await generator.reoptimize(
       wavePlanId,
@@ -217,6 +222,9 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
         message: 'Wave plan reoptimized successfully',
         wavePlan: newWavePlan,
         previousWavePlanId: wavePlanId,
+        // Whether the new plan's waves were assigned with a code graph; when
+        // not, why not. (`wavePlan.codeGraph` is the same thing, as stored.)
+        codeGraph: result.codeGraph,
         metrics: result.metrics,
       });
     } else {

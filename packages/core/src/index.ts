@@ -23,5 +23,8 @@ export * as score from './score';
 // Fleet introspection — reading agent sessions DevPilot did not start (TRD 21)
 export * as adoption from './adoption';
 
+// Code graph — read-only readers over an external indexer's index (TRD 27)
+export * as codeGraph from './code-graph';
+
 // Version
 export const VERSION = '0.1.0';

@@ -35,10 +35,21 @@ import type {
   IntegrationResult,
   IsolationSupport,
   TaskIsolation,
+  GraphDependentsRequest,
+  GraphDependentsOutcome,
+  GraphAffectedTestsRequest,
+  GraphAffectedTestsOutcome,
 } from './types';
 
 /** The `/v1/health` capability a runner reports when it can isolate a task. */
 export const ISOLATION_CAPABILITY = 'isolation';
+
+/**
+ * The `/v1/health` capability a runner reports when it can read a code graph
+ * index. It says the runner has the routes — not that any repository has an
+ * index, which is answered per call.
+ */
+export const CODE_GRAPH_CAPABILITY = 'code-graph';
 
 /**
  * Parameters for creating a session-native dispatch.
@@ -111,7 +122,27 @@ export interface SessionTransport {
    * an answer (`ok: false`), because the caller has to do something with it.
    */
   integrate?(request: IntegrateRequest): Promise<IntegrateOutcome>;
+  /**
+   * Optional. What depends on these files (`POST /v1/graph/dependents`).
+   * Never rejects: every way of not having an answer is `available: false`
+   * with the reason, because the caller's plan is produced regardless.
+   */
+  graphDependents?(request: GraphDependentsRequest): Promise<GraphDependentsOutcome>;
+  /** Optional. The tests reached from these files (`POST /v1/graph/affected-tests`). Never rejects. */
+  graphAffectedTests?(request: GraphAffectedTestsRequest): Promise<GraphAffectedTestsOutcome>;
 }
+
+/**
+ * How long a code graph read may take before this side goes without it.
+ *
+ * Deliberately short — a sixth of a create. The read behind the route is a
+ * local SQLite query (the reader itself took 50 ms for five files of this
+ * repository's index, measured in process; the route is the runner's and was
+ * not), so five seconds is not a budget for the work. It is how long a hung
+ * runner may hold up a plan, or a task about to be dispatched, for the sake of
+ * something neither of them needs.
+ */
+export const GRAPH_TIMEOUT_MS = 5_000;
 
 /**
  * How long a merge may take before this side gives up on the answer.
@@ -144,7 +175,9 @@ export class HttpSessionTransport implements SessionTransport {
   constructor(
     private readonly baseUrl: string,
     private readonly apiKey?: string,
-    private readonly timeoutMs = 30000
+    private readonly timeoutMs = 30000,
+    /** How long a code graph read may take. A parameter so a test need not wait five seconds to see it expire. */
+    private readonly graphTimeoutMs = GRAPH_TIMEOUT_MS
   ) {}
 
   /** Extract the runner's session id from a create/idempotent response body. */
@@ -154,9 +187,18 @@ export class HttpSessionTransport implements SessionTransport {
   }
 
   async capabilities(): Promise<string[] | null> {
+    return this.readCapabilities();
+  }
+
+  /**
+   * `capabilities`, with a say over how long `/v1/health` may take. The code
+   * graph reads pass their own, much shorter, limit: they are optional, and
+   * must not wait the thirty seconds a dispatch is allowed.
+   */
+  private async readCapabilities(timeoutMs?: number): Promise<string[] | null> {
     if (this.knownCapabilities) return this.knownCapabilities;
     try {
-      const res = await this.fetch('/v1/health');
+      const res = await this.fetch('/v1/health', {}, timeoutMs);
       if (!res.ok) return null;
       const json = (await res.json()) as { capabilities?: unknown };
       // A runner from before capabilities has no such field: it answered, and
@@ -300,6 +342,135 @@ export class HttpSessionTransport implements SessionTransport {
         })`,
       };
     }
+  }
+
+  /**
+   * Ask the runner's code graph a question, or say why there is no answer.
+   *
+   * The same question is asked first as for isolation — does this runner say
+   * it can? — and for the same reason: a runner from before the capability
+   * answers an unknown route with a bare 404, which says nothing a person can
+   * act on, while "the runner predates the code graph" does.
+   *
+   * Unlike a refused create, none of the unhappy paths here is a failure of
+   * anything. They all come back as `available: false`, and nothing is retried.
+   * The capability cache is dropped on each of them all the same, including
+   * "not listed": the capability arrives with a runner upgrade, the cockpit
+   * outlives the runner it started beside, and asking `/v1/health` again is a
+   * cheap way not to go on quoting a runner that has been replaced. The cost
+   * is one extra local GET per question for as long as the runner is an older
+   * one — per plan, and per task dispatched.
+   */
+  private async askGraph<T>(
+    path: string,
+    request: unknown,
+    read: (json: Record<string, unknown>) => T | null
+  ): Promise<T | { available: false; reason: string }> {
+    const unavailable = (reason: string) => {
+      this.knownCapabilities = null;
+      return { available: false as const, reason };
+    };
+
+    // One limit for the whole exchange, not one each for the two requests in
+    // it: what is being bounded is how long the caller waits.
+    const deadline = Date.now() + this.graphTimeoutMs;
+
+    const capabilities = await this.readCapabilities(this.graphTimeoutMs);
+    if (capabilities === null) {
+      return unavailable('the session runner did not answer /v1/health, so it could not be asked for the code graph');
+    }
+    if (!capabilities.includes(CODE_GRAPH_CAPABILITY)) {
+      return unavailable(
+        `the session runner does not report the '${CODE_GRAPH_CAPABILITY}' capability (it predates the code graph)`
+      );
+    }
+
+    try {
+      const res = await this.fetch(
+        path,
+        { method: 'POST', body: JSON.stringify(request) },
+        Math.max(1, deadline - Date.now())
+      );
+      const text = await res.text().catch(() => '');
+
+      if (res.status !== 200) {
+        const refusal = HttpSessionTransport.readRefusal(text);
+        return unavailable(
+          refusal?.message ??
+            `the session runner answered ${res.status}${refusal?.error ? ` (${refusal.error})` : ''} when asked for the code graph`
+        );
+      }
+
+      let json: Record<string, unknown>;
+      try {
+        const parsed: unknown = JSON.parse(text);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+        json = parsed as Record<string, unknown>;
+      } catch {
+        return unavailable('the session runner answered the code graph request with something that is not JSON');
+      }
+
+      // The runner's own "no": no index for this repository, an index it
+      // cannot read. It answered, and it is the same runner — keep the cache.
+      if (json.available === false) {
+        return {
+          available: false,
+          reason: typeof json.reason === 'string' && json.reason ? json.reason : 'the session runner gave no reason',
+        };
+      }
+
+      const answer = json.available === true ? read(json) : null;
+      return (
+        answer ??
+        unavailable('the session runner answered the code graph request with something that is not a code graph answer')
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return unavailable(
+        error instanceof Error && error.name === 'AbortError'
+          ? `the session runner did not answer the code graph request within ${this.graphTimeoutMs / 1000}s`
+          : `the session runner could not be reached for the code graph (${message})`
+      );
+    }
+  }
+
+  async graphDependents(request: GraphDependentsRequest): Promise<GraphDependentsOutcome> {
+    return this.askGraph<GraphDependentsOutcome>('/v1/graph/dependents', request, (json) => {
+      const byFile = HttpSessionTransport.readFileLists(json.byFile);
+      if (!byFile) return null;
+      return {
+        available: true,
+        byFile,
+        truncated: json.truncated === true,
+        indexedAt: typeof json.indexedAt === 'string' ? json.indexedAt : null,
+      };
+    });
+  }
+
+  async graphAffectedTests(request: GraphAffectedTestsRequest): Promise<GraphAffectedTestsOutcome> {
+    return this.askGraph<GraphAffectedTestsOutcome>('/v1/graph/affected-tests', request, (json) => {
+      if (!Array.isArray(json.tests)) return null;
+      return {
+        available: true,
+        tests: json.tests.filter((t): t is string => typeof t === 'string'),
+        truncated: json.truncated === true,
+      };
+    });
+  }
+
+  /**
+   * `{ file: [file, …] }`, if that is what the value is. Shape-checked because
+   * it is acted on — these lists decide which tasks share a wave — and a list
+   * that is not a list of strings is dropped whole rather than half-read.
+   */
+  private static readFileLists(value: unknown): Record<string, string[]> | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const out: Record<string, string[]> = {};
+    for (const [file, list] of Object.entries(value as Record<string, unknown>)) {
+      if (!Array.isArray(list) || !list.every((entry) => typeof entry === 'string')) return null;
+      out[file] = list as string[];
+    }
+    return out;
   }
 
   /** A merge result, if that is what the body is. Shape-checked: it is acted on. */
@@ -586,6 +757,26 @@ export class ClaudeSessionAdapter
       };
     }
     return this.transport.integrate(request);
+  }
+
+  /**
+   * What depends on these files, from the runner's code graph index.
+   *
+   * A transport with no way to ask answers for itself here, in words, the same
+   * as `isolationSupport` does: a custom transport is not a runner that failed.
+   */
+  async graphDependents(request: GraphDependentsRequest): Promise<GraphDependentsOutcome> {
+    if (!this.transport.graphDependents) {
+      return { available: false, reason: 'the session transport in use cannot read a code graph' };
+    }
+    return this.transport.graphDependents(request);
+  }
+
+  async graphAffectedTests(request: GraphAffectedTestsRequest): Promise<GraphAffectedTestsOutcome> {
+    if (!this.transport.graphAffectedTests) {
+      return { available: false, reason: 'the session transport in use cannot read a code graph' };
+    }
+    return this.transport.graphAffectedTests(request);
   }
 
   async shutdown(): Promise<void> {

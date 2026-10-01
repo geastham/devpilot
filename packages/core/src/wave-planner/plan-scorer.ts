@@ -117,9 +117,19 @@ function computeFileConflictScore(
     return 1; // No files = no conflicts
   }
 
-  // Count file conflict adjustments
+  // Count the conflicts the assigner had to repair: tasks the plan put side
+  // by side that could not stay there.
+  //
+  // Both conflict types count, and count the same. This score asks how much of
+  // the planner's layout survived contact with the files, and a task moved
+  // because its file depends on one a neighbour changes is that as much as a
+  // task moved for a shared file is. Leaving DEPENDENCY_CONFLICT_BUMP out
+  // would make a plan read as cleaner exactly when a code graph had found more
+  // wrong with it. Such rows only exist when the assignment was made with
+  // dependent claims, so an assignment made without a code graph scores as it
+  // always did. CAPACITY_SPLIT is not a conflict and is not counted.
   const fileConflictAdjustments = assignment.adjustments.filter(
-    adj => adj.type === 'FILE_CONFLICT_BUMP'
+    adj => adj.type === 'FILE_CONFLICT_BUMP' || adj.type === 'DEPENDENCY_CONFLICT_BUMP'
   ).length;
 
   // Score is inversely proportional to conflicts

@@ -17,6 +17,19 @@ import type {
  * what makes the graph testable with six stub functions and no infrastructure.
  */
 
+/**
+ * How many waves the run has: the persisted plan's count when the host gave
+ * one, otherwise the planner's. The one place this is decided — the branch
+ * after `advance` and the `run:complete` event must not disagree about it.
+ */
+export function waveCount(state: ConductorStateType): number {
+  return state.totalWaves ?? state.plan?.waves.length ?? 0;
+}
+
+function usableWaveCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
+}
+
 function planInput(state: ConductorStateType): GeneratePlanInput {
   return {
     itemId: state.itemId,
@@ -122,13 +135,21 @@ export function makeNodes(ports: ConductorPorts, config: ConductorConfig) {
 
   /** Persist the approved plan so dispatch has an id to work against. */
   async function persist(state: ConductorStateType): Promise<ConductorUpdate> {
-    const { wavePlanId } = await ports.persistPlan(
+    const { wavePlanId, totalWaves } = await ports.persistPlan(
       state.plan!,
       state.score!,
       planInput(state)
     );
     emit({ type: 'plan:approved', wavePlanId });
-    return { wavePlanId, status: 'executing', currentWaveIndex: 0 };
+    return {
+      wavePlanId,
+      // Only a usable count is kept. Anything else — absent, zero, not a whole
+      // number — leaves the graph counting the planner's waves, which is what
+      // it did before a host could say.
+      totalWaves: usableWaveCount(totalWaves),
+      status: 'executing',
+      currentWaveIndex: 0,
+    };
   }
 
   /**
@@ -230,7 +251,7 @@ export function makeNodes(ports: ConductorPorts, config: ConductorConfig) {
     if (state.wavePlanId) {
       await ports.endRun?.(state.wavePlanId, { status: 'complete' });
     }
-    emit({ type: 'run:complete', waves: state.plan?.waves.length ?? 0 });
+    emit({ type: 'run:complete', waves: waveCount(state) });
     return { status: 'complete' };
   }
 

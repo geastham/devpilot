@@ -82,6 +82,57 @@ export interface IsolationSupport {
   reason?: string;
 }
 
+/**
+ * `POST /v1/graph/dependents`: for each file, the files that depend on it,
+ * read from the code graph index of the repository's checkout.
+ *
+ * The runner is asked because it is the only party that knows where a
+ * repository is checked out; the cockpit knows a repo by name.
+ */
+export interface GraphDependentsRequest {
+  repo: string;
+  /** Repo-relative paths. */
+  files: string[];
+  /** How many steps of "depends on" to follow. The runner's default is 1, its cap 3. */
+  depth?: number;
+  /** Per file. The runner's default is 200. */
+  limit?: number;
+}
+
+/**
+ * The answer to a dependents call.
+ *
+ * `available: false` is an ordinary answer, not an error, and it is the answer
+ * in every case where there is nothing to read: the repository has no index,
+ * the runner predates the code graph, the runner did not answer, the
+ * orchestrator is in a mode with no runner. `reason` says which, in words for
+ * a person, because the caller's only use for it is to say why a plan was made
+ * without the graph. Nothing may treat it as a failure: a plan is produced
+ * either way.
+ */
+export type GraphDependentsOutcome =
+  | {
+      available: true;
+      /** Under each file as it was asked about. Sorted; never the file itself. */
+      byFile: Record<string, string[]>;
+      /** True when at least one list was cut at the limit. */
+      truncated: boolean;
+      /** When the index was last written (ISO-8601), or null when it does not say. Its age, not its accuracy. */
+      indexedAt: string | null;
+    }
+  | { available: false; reason: string };
+
+/** `POST /v1/graph/affected-tests`: the test files reached from these files. */
+export interface GraphAffectedTestsRequest {
+  repo: string;
+  files: string[];
+}
+
+/** As `GraphDependentsOutcome`: `available: false` is an answer. */
+export type GraphAffectedTestsOutcome =
+  | { available: true; tests: string[]; truncated: boolean }
+  | { available: false; reason: string };
+
 export interface TaskSpec {
   prompt: string;
   filePaths: string[];

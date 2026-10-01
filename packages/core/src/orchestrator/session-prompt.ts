@@ -2,8 +2,9 @@
  * Session prompt envelope (spec/trd/01-TIER1-EXECUTION-LOOP.md §7.3).
  *
  * Composes the markdown task prompt handed to a Claude Code session at dispatch
- * time: the task, what the whole item is for, the files in scope, what the
- * tasks before it reported, and how the session should finish.
+ * time: the task, what the whole item is for, the files in scope, the tests a
+ * code graph reaches from them (when there is one), what the tasks before it
+ * reported, and how the session should finish.
  *
  * How it should finish depends on who reports to DevPilot (§7.2 allows either
  * "the session (or runner on its behalf)"), and that is the `reporting` input:
@@ -94,7 +95,21 @@ export interface SessionPromptInput {
    * them, and nothing checked.
    */
   predecessorsMerged?: boolean;
+  /**
+   * Test files reached from the files in `fileScope`, when a code graph could
+   * say (TRD 27 §5.2). The first `MAX_REACHED_TESTS_LISTED` are listed.
+   *
+   * Absent or empty adds nothing: the prompt is then, byte for byte, the one
+   * built before this field existed — which is every prompt for a repository
+   * with no index.
+   */
+  reachedTests?: string[];
+  /** True when the list handed in was itself cut short, so "all of them" cannot be claimed. */
+  reachedTestsTruncated?: boolean;
 }
+
+/** How many reached tests a worker is shown. The rest are counted, not listed. */
+export const MAX_REACHED_TESTS_LISTED = 10;
 
 /**
  * Which reporting mode an orchestrator mode needs.
@@ -128,6 +143,8 @@ export function buildSessionPrompt(input: SessionPromptInput): string {
     reporting = 'agent',
     goal,
     predecessorsMerged = false,
+    reachedTests,
+    reachedTestsTruncated = false,
   } = input;
 
   const sections: string[] = [];
@@ -161,6 +178,12 @@ export function buildSessionPrompt(input: SessionPromptInput): string {
         `outside it can collide with another agent's work:\n\n` +
         fileScope.map((f) => `- \`${f}\``).join('\n')
     );
+  }
+
+  // --- Tests Reached From Your Files ---------------------------------------
+  const reached = reachedTestsSection(reachedTests, reachedTestsTruncated);
+  if (reached) {
+    sections.push(reached);
   }
 
   // --- Context From Predecessors -------------------------------------------
@@ -216,6 +239,53 @@ export function buildSessionPrompt(input: SessionPromptInput): string {
   );
 
   return sections.join('\n\n');
+}
+
+/**
+ * The tests a code graph reaches from the task's files, or null for none.
+ *
+ * Worded as information on purpose, and it says so twice. Two things make an
+ * instruction wrong here. The list is a guess: it comes from an index that
+ * resolves some names by spelling, so it can include a test that has nothing
+ * to do with the task and miss one that does. And a worker often cannot run
+ * tests at all — a task's worktree has the tracked files and no installed
+ * dependencies unless the operator set that up. "Make these pass" would send
+ * an agent after failures it did not cause, in a checkout that cannot run
+ * them, and its final message — which the next task reads — would be about
+ * that.
+ *
+ * The paths are the repository's own, but they arrive from outside this
+ * process, so one that could break out of its code span or its line (a
+ * backtick, a control character) is left out rather than quoted, as is
+ * anything implausibly long.
+ */
+function reachedTestsSection(tests: string[] | undefined, truncated: boolean): string | null {
+  if (!tests || tests.length === 0) return null;
+
+  const usable = tests.filter(
+    (path) => path.length > 0 && path.length <= 300 && !/[`\u0000-\u001f\u007f]/.test(path)
+  );
+  if (usable.length === 0) return null;
+
+  const listed = usable.slice(0, MAX_REACHED_TESTS_LISTED);
+  const unlisted = usable.length - listed.length;
+  const more =
+    unlisted > 0
+      ? `\n\n…and ${truncated ? 'at least ' : ''}${unlisted} more not listed.`
+      : truncated
+        ? `\n\n…and more not listed.`
+        : '';
+
+  return (
+    `# Tests Reached From Your Files\n\n` +
+      `These test files are reached from the files in your scope: they use them, directly or ` +
+      `through other files, according to an index of the repository's code. This is ` +
+      `information about where a change here can show up — it is not a list of tests you are ` +
+      `being asked to run or to make pass. The index can be wrong in both directions, so a ` +
+      `file here may not depend on yours, and one that does may be missing:\n\n` +
+      listed.map((path) => `- \`${path}\``).join('\n') +
+      more
+  );
 }
 
 /**

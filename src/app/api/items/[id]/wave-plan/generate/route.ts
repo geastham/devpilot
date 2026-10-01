@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, horizonItems, plans, wavePlans, activityEvents, eq } from '@/lib/db';
 import { generateWavePlan, buildSpecContentForItem } from '@devpilot.sh/core/wave-planner';
+import { getServerOrchestrator } from '@/lib/orchestrator';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -55,6 +56,13 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       plan: item.plan as Parameters<typeof buildSpecContentForItem>[0]['plan'],
     });
 
+    // The generator asks the session runner which files depend on the plan's
+    // files (the code graph, TRD 27), through core's orchestrator singleton —
+    // which exists only once something has initialised it. This route never
+    // dispatched, so nothing here did; without this line every plan made here
+    // would report "no orchestrator is running" whatever was configured.
+    getServerOrchestrator();
+
     // Generate wave plan using the wave planner system
     const result = await generateWavePlan(
       id,
@@ -72,6 +80,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
           error: 'Wave plan generation failed',
           message: result.message,
           wavePlan: result.wavePlan,
+          codeGraph: result.codeGraph,
           metrics: result.metrics,
         },
         { status: 500 }
@@ -102,6 +111,10 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
         criticalPath: result.criticalPath,
         waveAssignment: result.waveAssignment,
         score: result.score,
+        // Whether the waves were assigned with a code graph, and each task's
+        // blast radius if so — or `{ used: false, reason }`. Never absent: a
+        // plan made without the graph says so.
+        codeGraph: result.codeGraph,
         metrics: result.metrics,
       },
       { status: 201 }

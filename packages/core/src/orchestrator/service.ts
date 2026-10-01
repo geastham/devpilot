@@ -24,6 +24,10 @@ import type {
   IntegrateOutcome,
   IntegrateRequest,
   IsolationSupport,
+  GraphDependentsRequest,
+  GraphDependentsOutcome,
+  GraphAffectedTestsRequest,
+  GraphAffectedTestsOutcome,
 } from './types';
 import { OrchestratorClient } from './client';
 import { AoCliAdapter } from './ao-cli-adapter';
@@ -438,6 +442,48 @@ export class OrchestratorService {
         message: error instanceof Error ? error.message : String(error),
       };
     }
+  }
+
+  /**
+   * What depends on these files, read from the repository's code graph index
+   * by whatever runs the sessions.
+   *
+   * Never rejects, and `available: false` is not a failure — see
+   * `GraphDependentsOutcome`. `http`, `ao-cli` and `disabled` have no runner
+   * with a checkout to read, and are answered for here with the mode named, so
+   * a plan that says "made without the code graph" also says why.
+   */
+  async graphDependents(request: GraphDependentsRequest): Promise<GraphDependentsOutcome> {
+    if (!this.adapter.graphDependents) {
+      return { available: false, reason: this.noGraphInThisMode() };
+    }
+    try {
+      return await this.adapter.graphDependents(request);
+    } catch (error) {
+      // An adapter is asked not to throw; one that does must still not cost
+      // the caller its plan.
+      return { available: false, reason: this.graphFault(error) };
+    }
+  }
+
+  /** The test files reached from these files. Same terms as `graphDependents`. */
+  async graphAffectedTests(request: GraphAffectedTestsRequest): Promise<GraphAffectedTestsOutcome> {
+    if (!this.adapter.graphAffectedTests) {
+      return { available: false, reason: this.noGraphInThisMode() };
+    }
+    try {
+      return await this.adapter.graphAffectedTests(request);
+    } catch (error) {
+      return { available: false, reason: this.graphFault(error) };
+    }
+  }
+
+  private noGraphInThisMode(): string {
+    return `the orchestrator is in '${this.adapter.mode}' mode, which has no session runner to read a code graph from`;
+  }
+
+  private graphFault(error: unknown): string {
+    return `the code graph could not be read (${error instanceof Error ? error.message : String(error)})`;
   }
 
   /**

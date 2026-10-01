@@ -116,8 +116,32 @@ export interface AssignedWave {
 }
 
 export interface WaveAdjustment {
-  type: 'FILE_CONFLICT_BUMP' | 'CAPACITY_SPLIT';
+  /**
+   * Why the task is not in the wave its dependencies alone would give it.
+   *
+   * - `FILE_CONFLICT_BUMP` — another task in that wave names one of the same
+   *   files.
+   * - `DEPENDENCY_CONFLICT_BUMP` — no file is shared, but one of the two tasks
+   *   changes a file that a file of the other's depends on. Only produced when
+   *   the assigner was given dependent claims, which needs a code graph; a plan
+   *   assigned without one never has this row. It is a prediction from an
+   *   index, where a shared file is a certainty, and it is a separate type so
+   *   that a reader can tell the two apart.
+   * - `CAPACITY_SPLIT` — the wave was larger than the fleet's capacity.
+   *
+   * `reason` is a sentence for a person. For a dependency conflict it names
+   * both files and the other task.
+   */
+  type: 'FILE_CONFLICT_BUMP' | 'DEPENDENCY_CONFLICT_BUMP' | 'CAPACITY_SPLIT';
   taskCode: string;
+  /**
+   * For the two conflict types these are wave numbers as the conflict pass
+   * counted them, from zero, BEFORE any capacity split renumbered the waves:
+   * `toWave - fromWave` is how far the task moved, and neither is necessarily
+   * the wave it finally runs in — that is where the task appears in `waves`.
+   * For a capacity split, `fromWave` is the wave that was split and `toWave`
+   * the final index of the sub-wave the task went to.
+   */
   fromWave: number;
   toWave: number;
   reason: string;

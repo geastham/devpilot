@@ -18,6 +18,9 @@ import {
   WavePlanGenerator,
   computeCriticalPath,
   assignWaves,
+  codeGraphOf,
+  dependentClaimsOf,
+  readPlanCodeGraph,
   type ParsedWavePlan,
   type PlanScore,
   resolvePlannerModel,
@@ -26,7 +29,7 @@ import { db, activityEvents, plans, wavePlans } from '@/lib/db';
 import { eq } from 'drizzle-orm';
 import type { EventType } from '@devpilot.sh/core/db';
 import { createDevPilotPorts } from './conductor';
-import { getWaveExecutionConfig } from './orchestrator';
+import { getServerOrchestrator, getWaveExecutionConfig } from './orchestrator';
 
 const globalForConductor = globalThis as unknown as {
   devpilotConductor?: ConductorGraph;
@@ -53,7 +56,7 @@ async function persistPlan(
   plan: ParsedWavePlan,
   score: PlanScore,
   input: GeneratePlanInput
-): Promise<{ wavePlanId: string }> {
+): Promise<{ wavePlanId: string; totalWaves: number }> {
   const generator = new WavePlanGenerator({
     aiClient: {
       apiKey: process.env.ANTHROPIC_API_KEY ?? '',
@@ -64,7 +67,31 @@ async function persistPlan(
 
   const allTasks = plan.waves.flatMap((w) => w.tasks);
   const criticalPath = computeCriticalPath(allTasks, plan.dependencyEdges);
-  const assignment = assignWaves(allTasks, plan.dependencyEdges);
+
+  /**
+   * The waves are assigned with whatever the code graph said about this plan.
+   *
+   * Normally that is already on the plan: the generate and refine ports read
+   * it when the plan was produced (`withBlastRadius` in `conductor.ts`), and
+   * it is used as it stands, so the layout written here is the one the
+   * reviewer was shown the reasons for. A plan with no reading — a run that
+   * was at review when the cockpit was upgraded — is asked about now.
+   *
+   * `dependentClaimsOf` is undefined when the graph was not used or had
+   * nothing to claim, and the option is then left off: the assignment is the
+   * one this function always made.
+   */
+  let codeGraph = codeGraphOf(plan);
+  if (!codeGraph) {
+    getServerOrchestrator();
+    codeGraph = await readPlanCodeGraph(input.repo, allTasks);
+  }
+  const dependentClaims = dependentClaimsOf(codeGraph);
+  const assignment = assignWaves(
+    allTasks,
+    plan.dependencyEdges,
+    dependentClaims ? { dependentClaims } : undefined
+  );
 
   // `wave_plans.plan_id` is a NOT NULL foreign key into `plans(id)` — a
   // *different* id from the horizon item's. Both arguments used to be
@@ -126,7 +153,8 @@ async function persistPlan(
     plan,
     criticalPath,
     assignment,
-    score
+    score,
+    codeGraph
   );
 
   /**
@@ -145,7 +173,21 @@ async function persistPlan(
     .set({ status: 'approved' })
     .where(eq(wavePlans.id, wavePlanId));
 
-  return { wavePlanId };
+  /**
+   * How many waves were WRITTEN, which is not always how many the planner
+   * wrote. The assigner lays the waves out again: tasks the planner put side
+   * by side that claim one file — or, with a code graph, where one's file
+   * depends on the other's — are moved apart, which adds waves; a planner that
+   * spread tasks over more waves than their dependencies need loses some.
+   *
+   * The graph counted `plan.waves` regardless. With more waves persisted than
+   * planned it reached `finish` after the planner's last wave and the plan was
+   * marked `completed` with the moved tasks still `pending` — never
+   * dispatched, and nothing said so. With fewer it asked for a wave that does
+   * not exist and the run died on "Wave N not found". It sequences by this
+   * number now.
+   */
+  return { wavePlanId, totalWaves: assignment.totalWaves };
 }
 
 /**

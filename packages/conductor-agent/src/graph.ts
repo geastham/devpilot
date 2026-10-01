@@ -1,7 +1,7 @@
 import { StateGraph, START, END } from '@langchain/langgraph';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import { ConductorState, type ConductorStateType } from './state';
-import { makeNodes } from './nodes';
+import { makeNodes, waveCount } from './nodes';
 import { DEFAULT_CONFIG, type ConductorConfig, type ConductorPorts } from './types';
 
 /**
@@ -102,10 +102,15 @@ export function createConductorGraph(options: ConductorAgentOptions) {
     return 'advance';
   }
 
-  /** After advancing: another wave, or done. */
+  /**
+   * After advancing: another wave, or done.
+   *
+   * Counted against the plan as it was PERSISTED when the host said how many
+   * waves that has (`waveCount`), because that is the plan `dispatchWave`
+   * dispatches from. The planner's own layout can have fewer waves or more.
+   */
   function afterAdvance(state: ConductorStateType): 'dispatch' | 'finish' {
-    const total = state.plan?.waves.length ?? 0;
-    return state.currentWaveIndex < total ? 'dispatch' : 'finish';
+    return state.currentWaveIndex < waveCount(state) ? 'dispatch' : 'finish';
   }
 
   const graph = new StateGraph(ConductorState)

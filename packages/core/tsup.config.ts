@@ -15,6 +15,12 @@ export default defineConfig({
     // Same reasoning as score/: the CLI imports the scanner and must not pull
     // better-sqlite3 in behind it. Nothing under adoption/ touches the db.
     'src/adoption/index.ts',
+    // The opposite case, and still its own entry: these readers DO open a
+    // database (the code graph index, with better-sqlite3 — external below),
+    // but the session runner wants them without the wave planner and the
+    // Anthropic SDK the barrel brings. No module state, so `splitting: false`
+    // duplicating it across entries is harmless.
+    'src/code-graph/index.ts',
   ],
   format: ['cjs', 'esm'],
   dts: true,
