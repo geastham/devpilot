@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -50,6 +50,54 @@ describe('the cockpit is packaged with the CLI', () => {
     // because it looks like a styling bug rather than a packaging one.
     expect(script).toContain('.next/static');
     expect(script).toContain('refusing to ship a broken cockpit');
+  });
+});
+
+/**
+ * `devpilot serve` installed from npm died on its first line — "Cannot find
+ * module 'next'" — in every version that shipped a cockpit. In a pnpm
+ * workspace Next's standalone output finds its packages through symlinks, npm
+ * does not publish symlinks, and nothing ever ran the bundle outside the
+ * checkout, where the links exist. The files-are-present checks above all
+ * passed the whole time.
+ */
+describe('the bundle works once npm has packed it', () => {
+  const script = readFileSync(join(CLI_ROOT, 'scripts/bundle-cockpit.mjs'), 'utf8');
+
+  it('flattens node_modules and refuses to ship a symlink', () => {
+    expect(script).toContain('flattenNodeModules(OUT)');
+    expect(script).toContain('symlink(s) left in the bundle');
+    // A flat tree is only right with one version of each package.
+    expect(script).toContain('in two versions');
+    // The server's own entry point must be resolvable from the bundle itself.
+    expect(script).toContain("'node_modules/next/package.json'");
+  });
+
+  it('boots the bundle outside the checkout before publishing', () => {
+    expect(pkg.scripts.prepublishOnly).toMatch(/bundle:cockpit.*verify:cockpit/);
+    expect(existsSync(join(CLI_ROOT, 'scripts/verify-cockpit-bundle.mjs'))).toBe(true);
+  });
+
+  it('installs the native addon for the user’s platform instead of shipping the builder’s', () => {
+    // The bundle leaves better-sqlite3 out; it has to arrive as a dependency.
+    expect(script).toMatch(/NATIVE = new Set\(\['better-sqlite3'/);
+    expect(Object.keys(pkg.dependencies)).toContain('better-sqlite3');
+  });
+
+  // The bundle is a publish-time artifact and is not in a fresh checkout. When
+  // it is there — on the machine about to publish — it is held to the rule.
+  it.skipIf(!existsSync(join(CLI_ROOT, 'ui/server.js')))('has no symlink and no compiled addon in it', () => {
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isSymbolicLink() || entry.name.endsWith('.node')) offenders.push(path);
+        else if (entry.isDirectory()) walk(path);
+      }
+    };
+    walk(join(CLI_ROOT, 'ui'));
+    expect(offenders).toEqual([]);
+    expect(existsSync(join(CLI_ROOT, 'ui/node_modules/next/package.json'))).toBe(true);
   });
 });
 

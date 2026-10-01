@@ -1,6 +1,6 @@
 {
   "name": "@devpilot.sh/cli",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "DevPilot CLI - Manage your AI coding agent fleet from the command line",
   "license": "MIT",
   "author": "DevPilot Team",
@@ -30,10 +30,11 @@
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
     "start": "node bin/devpilot.js",
-    "prepublishOnly": "pnpm run build && pnpm run bundle:cockpit",
+    "prepublishOnly": "pnpm run build && pnpm run bundle:cockpit && pnpm run verify:cockpit",
     "test": "vitest run --passWithNoTests",
     "harness:dispatch": "node tests/harness/run-local-dispatch.mjs",
-    "bundle:cockpit": "node scripts/bundle-cockpit.mjs"
+    "bundle:cockpit": "node scripts/bundle-cockpit.mjs",
+    "verify:cockpit": "node scripts/verify-cockpit-bundle.mjs"
   },
   "publishConfig": {
     "access": "public",
@@ -45,6 +46,7 @@
     "@devpilot.sh/bridge-protocol": "workspace:*",
     "@devpilot.sh/core": "workspace:*",
     "@devpilot.sh/mcp-session": "workspace:*",
+    "better-sqlite3": "^11.0.0",
     "chalk": "^5.3.0",
     "chokidar": "^3.6.0",
     "commander": "^12.0.0",
