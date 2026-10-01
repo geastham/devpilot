@@ -10,7 +10,7 @@ import {
   resolveBridgeCredentials,
   saveBridgeCredentials,
 } from '@devpilot.sh/bridge-client';
-import { createBridgeDispatchHandler } from './dispatch-handler';
+import { createBridgeDispatchHandler, createWatchOnlyDispatchHandler } from './dispatch-handler';
 import { createConductorDispatchHandler } from './conductor-handler';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -64,12 +64,81 @@ import { SessionObserver } from './observer';
 import { ResumeApplier } from './resume-applier';
 import { runIntrospection } from './introspect';
 
+/**
+ * What this bridge does with a ticket dispatched to it.
+ *
+ * WATCHING ONLY is the default, and it is not a degraded mode: it is the
+ * whole of what a first connect is for. The command the dashboard hands a new
+ * user is `devpilot bridge connect --url … --token …`, and until this existed
+ * that command stopped at "--mode http requires --http-url" — an instruction
+ * about a daemon a person who only wants to see their sessions has never
+ * heard of. Reporting the sessions on a machine needs no orchestrator, no
+ * runner, no cockpit and no Linear; only running dispatched work does.
+ *
+ * So the mode is worked out from what was actually supplied, and a machine
+ * that supplied nothing watches. A mode named explicitly without its URL is
+ * still an error: someone who typed `--mode http` meant to run work, and
+ * silently watching instead would hide the mistake.
+ */
+export type LocalMode =
+  | { kind: 'watch-only' }
+  | { kind: 'conductor' }
+  | { kind: 'orchestrator'; mode: 'http' | 'claude-session' }
+  | { kind: 'error'; message: string; hints: string[] };
+
+export function resolveLocalMode(options: {
+  mode?: string;
+  plan?: boolean;
+  httpUrl?: string;
+  sessionApiUrl?: string;
+}): LocalMode {
+  // --plan routes dispatches to the local cockpit, which builds its own
+  // orchestrator config from env. The local orchestrator mode is unused on
+  // that path, and demanding --http-url for it blocked the planned flow with
+  // a message about a daemon it would never contact.
+  if (options.plan) return { kind: 'conductor' };
+
+  const mode = options.mode ?? (options.httpUrl ? 'http' : options.sessionApiUrl ? 'claude-session' : undefined);
+  if (!mode) return { kind: 'watch-only' };
+
+  if (mode === 'ao-cli') {
+    return {
+      kind: 'error',
+      message: '--mode ao-cli is deprecated and non-functional.',
+      hints: [
+        '`ao` is now a daemon on 127.0.0.1:3001; point http mode at it:',
+        '  devpilot bridge connect --mode http --http-url http://127.0.0.1:3001',
+      ],
+    };
+  }
+  if (mode === 'http') {
+    return options.httpUrl
+      ? { kind: 'orchestrator', mode }
+      : { kind: 'error', message: '--mode http requires --http-url', hints: ['For the ao daemon: --http-url http://127.0.0.1:3001'] };
+  }
+  if (mode === 'claude-session') {
+    return options.sessionApiUrl
+      ? { kind: 'orchestrator', mode }
+      : {
+          kind: 'error',
+          message: '--mode claude-session requires --session-api-url',
+          hints: [
+            'Start the runner, then point at it:',
+            '  devpilot session-runner --port 3900 --token <t>',
+            '  … --session-api-url http://127.0.0.1:3900 --session-api-key <t>',
+          ],
+        };
+  }
+  return { kind: 'error', message: `Unknown --mode "${mode}".`, hints: ['Modes: http, claude-session. Leave it out to watch sessions only.'] };
+}
+
 interface ConnectOptions {
   url?: string;
   token?: string;
-  name: string;
+  name?: string;
   repos?: string;
-  mode: 'ao-cli' | 'http' | 'claude-session';
+  /** Absent unless named: see `resolveLocalMode`. */
+  mode?: 'ao-cli' | 'http' | 'claude-session';
   transport: 'realtime' | 'poll';
   sessionApiUrl?: string;
   sessionApiKey?: string;
@@ -92,9 +161,9 @@ export const connectCommand = new Command('connect')
   .option('-t, --token <token>', 'Orchestrator token (dp_orch_…)', process.env.DEVPILOT_BRIDGE_TOKEN)
   .option('-n, --name <name>', 'Name for this machine (defaults to a stable name for this machine)')
   .option('-r, --repos <repos>', 'Comma-separated repos this machine handles')
-  // Default is `http`: ao-cli is deprecated and throws (see ao-cli-adapter.ts),
-  // and http is the mode that points at the current ao daemon on :3001.
-  .option('-m, --mode <mode>', 'Local orchestrator mode (http|claude-session)', 'http')
+  // No default. With nothing named and no orchestrator URL the bridge watches
+  // sessions and runs no dispatched work — see `resolveLocalMode`.
+  .option('-m, --mode <mode>', 'How dispatched work is run here (http|claude-session). Omit to watch sessions only')
   .option(
     '--transport <transport>',
     'realtime | poll — polling is fully correct, just higher latency',
@@ -178,33 +247,20 @@ export const connectCommand = new Command('connect')
     const repos = options.repos?.split(',').map((r) => r.trim()).filter(Boolean) ?? [];
     const maxConcurrentJobs = Math.max(1, parseInt(options.maxJobs, 10) || 4);
 
+    // Worked out once. It was printed from `options.name` — "machine:
+    // undefined" for everyone who did not pass --name — while the name
+    // actually registered came from here.
+    const machineName = options.name ?? stableMachineName();
+
     console.log(chalk.cyan('🌉 DevPilot bridge'));
     console.log(chalk.gray(`   ${options.url}`));
-    console.log(chalk.gray(`   machine: ${options.name}`));
+    console.log(chalk.gray(`   machine: ${machineName}`));
     console.log('');
 
-    // --plan routes dispatches to the local cockpit, which builds its own
-    // orchestrator config from env. The local orchestrator mode is therefore
-    // unused on that path, and demanding --http-url for it blocks the planned
-    // flow with a message about a daemon it will never contact.
-    const usesLocalOrchestrator = !options.plan;
-
-    if (usesLocalOrchestrator && options.mode === 'ao-cli') {
-      console.error(chalk.red('✗ --mode ao-cli is deprecated and non-functional.'));
-      console.error(chalk.gray('  `ao` is now a daemon on 127.0.0.1:3001; point http mode at it:'));
-      console.error(chalk.gray('    devpilot bridge connect --mode http --http-url http://127.0.0.1:3001'));
-      process.exit(1);
-    }
-    if (usesLocalOrchestrator && options.mode === 'http' && !options.httpUrl) {
-      console.error(chalk.red('✗ --mode http requires --http-url'));
-      console.error(chalk.gray('  For the ao daemon: --http-url http://127.0.0.1:3001'));
-      process.exit(1);
-    }
-    if (usesLocalOrchestrator && options.mode === 'claude-session' && !options.sessionApiUrl) {
-      console.error(chalk.red('✗ --mode claude-session requires --session-api-url'));
-      console.error(chalk.gray('  Start the runner, then point at it:'));
-      console.error(chalk.gray('    devpilot session-runner --port 3900 --token <t>'));
-      console.error(chalk.gray('    … --session-api-url http://127.0.0.1:3900 --session-api-key <t>'));
+    const local = resolveLocalMode(options);
+    if (local.kind === 'error') {
+      console.error(chalk.red(`✗ ${local.message}`));
+      for (const hint of local.hints) console.error(chalk.gray(`  ${hint}`));
       process.exit(1);
     }
 
@@ -212,7 +268,6 @@ export const connectCommand = new Command('connect')
 
     let registration;
     try {
-      const machineName = options.name ?? stableMachineName();
       registration = await client.register({ name: machineName, repos, maxConcurrentJobs });
     } catch (err) {
       console.error(chalk.red('✗ Registration failed'));
@@ -234,10 +289,17 @@ export const connectCommand = new Command('connect')
         console.log(chalk.gray(`   remembered in ${bridgeCredentialsPath()} — reconnect with no flags`));
       }
     }
-    console.log(chalk.gray(`   repos: ${repos.join(', ') || '(none)'}`));
-    if (repos.length === 0) {
-      console.log(chalk.yellow('   ⚠ No repos specified — nothing can route to this machine.'));
-      console.log(chalk.gray('     Re-run with --repos owner/name to receive dispatches.'));
+    if (local.kind === 'watch-only') {
+      // Not a warning. This is the state a first connect is meant to reach.
+      console.log(chalk.gray('   mode: watching — the agent sessions on this machine are reported to your cockpit.'));
+      console.log(chalk.gray('         It does not run dispatched tickets. To accept them, start `devpilot serve`'));
+      console.log(chalk.gray('         and add --plan --repos owner/name.'));
+    } else {
+      console.log(chalk.gray(`   repos: ${repos.join(', ') || '(none)'}`));
+      if (repos.length === 0) {
+        console.log(chalk.yellow('   ⚠ No repos specified — nothing can route to this machine.'));
+        console.log(chalk.gray('     Re-run with --repos owner/name to receive dispatches.'));
+      }
     }
     console.log('');
 
@@ -334,7 +396,7 @@ export const connectCommand = new Command('connect')
       options.observe !== false
         ? new SessionObserver({
             client,
-            machineName: options.name ?? stableMachineName(),
+            machineName,
             repos,
             // A session placed on a board is already followed by the adoption
             // watcher; everything else gets its instruments from the observer.
@@ -452,7 +514,7 @@ export const connectCommand = new Command('connect')
     if (options.discover !== false) {
       await runIntrospection({
         client,
-        machineName: options.name ?? stableMachineName(),
+        machineName,
         repos,
         adopt: Boolean(options.adopt),
         allRepos: Boolean(options.adoptAllRepos),
@@ -471,16 +533,22 @@ export const connectCommand = new Command('connect')
           }
         : null,
       maxConcurrent: maxConcurrentJobs,
-      handler: options.plan
+      handler: local.kind === 'conductor'
         ? createConductorDispatchHandler({
             client,
             cockpitUrl: options.cockpitUrl!,
             watcher: conductorWatcher!,
             onLog: (line) => console.log(chalk.blue(`   ${line}`)),
           })
-        : createBridgeDispatchHandler({
+        : local.kind === 'watch-only'
+          ? createWatchOnlyDispatchHandler({
+              client,
+              machineName,
+              onLog: (line) => console.log(chalk.blue(`   ${line}`)),
+            })
+          : createBridgeDispatchHandler({
             client,
-            orchestratorMode: options.mode,
+            orchestratorMode: local.mode,
             httpUrl: options.httpUrl,
             sessionApiUrl: options.sessionApiUrl,
             sessionApiKey: options.sessionApiKey,
@@ -501,8 +569,14 @@ export const connectCommand = new Command('connect')
     await loop.start();
     heartbeat.start();
 
-    console.log(chalk.green(`✓ Listening (${useRealtime ? 'realtime' : 'poll'})`));
-    console.log(chalk.gray('   Agents run on THIS machine. Ctrl+C to disconnect.'));
+    console.log(chalk.green(local.kind === 'watch-only' ? '✓ Watching' : `✓ Listening (${useRealtime ? 'realtime' : 'poll'})`));
+    console.log(
+      chalk.gray(
+        local.kind === 'watch-only'
+          ? '   Nothing leaves this machine but counts, tool names and file paths. Ctrl+C to disconnect.'
+          : '   Agents run on THIS machine. Ctrl+C to disconnect.',
+      ),
+    );
     console.log('');
 
     let shuttingDown = false;

@@ -1,11 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" role="img" aria-label="DevPilot">
-  <defs>
-    <linearGradient id="dpIcon" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#60A5FA"/>
-      <stop offset="100%" stop-color="#A78BFA"/>
-    </linearGradient>
-  </defs>
-  <rect width="32" height="32" rx="8" fill="#0F1F3D"/>
-  <!-- Swept wing / dispatch mark, echoing the TopBar glyph -->
-  <path d="M6 21.5 L17.5 6.5 L20 15 L26 11.5 L21.5 25.5 L14 19 Z" fill="url(#dpIcon)"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!--
+    DevPilot mark, redrawn as vector.
+
+    public/devpilot-logo.png (1024px compass rose over a wireframe globe, with
+    wordmark) was being served AS THE FAVICON: 1.2 MB to render 16 CSS pixels,
+    where the hairlines fall below a pixel and the wordmark is unreadable.
+
+    Deliberately BOLDER than the source art. A first pass kept both of the
+    original's rings at 1.5px; at 16px they anti-aliased into a grey smudge.
+    One ring at 3px and a star with real mass at the waist is what actually
+    survives a browser tab — the mark has to read at 16px first and look like
+    the logo second.
+  -->
+  <rect width="64" height="64" rx="13" fill="#070A0F"/>
+  <circle cx="32" cy="32" r="18" fill="none" stroke="#22D3EE" stroke-opacity="0.45" stroke-width="3"/>
+  <path d="M32 3 L37.5 26.5 L61 32 L37.5 37.5 L32 61 L26.5 37.5 L3 32 L26.5 26.5 Z" fill="#67E8F9"/>
 </svg>
