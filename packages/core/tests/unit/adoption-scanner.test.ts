@@ -637,15 +637,32 @@ describe('scanSessions', () => {
     }
   });
 
-  it('treats a live session as adoptable however old its last write is', () => {
-    const result = scan({
-      // Pretend every scratchpad exists: a thinking session writes nothing.
-      existsImpl: () => true,
+  /**
+   * A scratchpad carries a quiet session past the short window — a long model
+   * call writes nothing for minutes — but it is there for as long as the
+   * terminal is, so it cannot carry one for ever. This used to read "however
+   * old its last write is", and on a real machine that made twenty-eight
+   * sessions left open in terminals "running" beside the one that was.
+   */
+  it('lets a scratchpad vouch for a quiet session for a while, not indefinitely', () => {
+    writeTranscript({
+      cwd: repoDirs.devpilot,
+      sessionUuid: 'bbbbbbbb-0000-0000-0000-00000000000a',
+      projectSlug: 'slug-dp',
+      customTitle: 'Thinking for an hour',
+      ageMs: 60 * 60 * 1000,
     });
-    const uuids = result.skipped
-      .filter((s) => s.reason === 'too-old')
-      .map((s) => s.sessionUuid);
-    expect(uuids).toHaveLength(0);
+
+    // Pretend every scratchpad exists.
+    const result = scan({ existsImpl: () => true });
+    const live = new Map(result.candidates.map((c) => [c.title, c.live]));
+    expect(live.get('Thinking for an hour')).toBe(true);
+    // Forty days quiet: an open terminal, not a run.
+    expect(live.get('Ancient history') ?? false).toBe(false);
+
+    // And with no scratchpad, an hour of silence is an ended session.
+    const without = scan({ existsImpl: () => false });
+    expect(without.candidates.find((c) => c.title === 'Thinking for an hour')?.live ?? false).toBe(false);
   });
 
   it('returns an empty result when the machine has never run Claude Code', () => {
