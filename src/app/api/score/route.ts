@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { score as scoreModel } from '@devpilot.sh/core';
 import { currentScore, scoreHistory, DEFAULT_SCORE_WINDOW_HOURS } from '@/lib/score';
 
+// Never prerendered. A GET handler that touches no request API is treated by
+// `next build` as static, and its build-time answer is then served for ever —
+// see tests/e2e/cockpit-routes.test.ts in packages/cli.
+export const dynamic = 'force-dynamic';
+
 /**
  * GET /api/score — the Conductor Score, computed now.
  *
