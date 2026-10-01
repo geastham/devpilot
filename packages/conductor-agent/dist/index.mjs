@@ -33,6 +33,20 @@ var ConductorState = Annotation.Root({
     reducer: (_prev, next) => next,
     default: () => null
   }),
+  /**
+   * How many waves the persisted plan has, when the host said. Null when it
+   * did not, and for a plan that was adopted rather than persisted here — the
+   * graph then counts `plan.waves`, as it always did.
+   *
+   * A channel, not something read off `plan`, because the two are different
+   * things: `plan` is what the planner wrote and the reviewer approved, and
+   * this is what the host laid out when it wrote it down. See
+   * `ConductorPorts.persistPlan`.
+   */
+  totalWaves: Annotation({
+    reducer: (_prev, next) => next,
+    default: () => null
+  }),
   currentWaveIndex: Annotation({
     reducer: (_prev, next) => next,
     default: () => 0
@@ -92,6 +106,12 @@ var ConductorState = Annotation.Root({
 
 // src/nodes.ts
 import { interrupt } from "@langchain/langgraph";
+function waveCount(state) {
+  return state.totalWaves ?? state.plan?.waves.length ?? 0;
+}
+function usableWaveCount(value) {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+}
 function planInput(state) {
   return {
     itemId: state.itemId,
@@ -161,13 +181,21 @@ function makeNodes(ports, config) {
     return { status: "executing" };
   }
   async function persist(state) {
-    const { wavePlanId } = await ports.persistPlan(
+    const { wavePlanId, totalWaves } = await ports.persistPlan(
       state.plan,
       state.score,
       planInput(state)
     );
     emit({ type: "plan:approved", wavePlanId });
-    return { wavePlanId, status: "executing", currentWaveIndex: 0 };
+    return {
+      wavePlanId,
+      // Only a usable count is kept. Anything else — absent, zero, not a whole
+      // number — leaves the graph counting the planner's waves, which is what
+      // it did before a host could say.
+      totalWaves: usableWaveCount(totalWaves),
+      status: "executing",
+      currentWaveIndex: 0
+    };
   }
   async function dispatch(state) {
     const backfill = state.waveSignal?.state === "in-flight";
@@ -225,7 +253,7 @@ function makeNodes(ports, config) {
     if (state.wavePlanId) {
       await ports.endRun?.(state.wavePlanId, { status: "complete" });
     }
-    emit({ type: "run:complete", waves: state.plan?.waves.length ?? 0 });
+    emit({ type: "run:complete", waves: waveCount(state) });
     return { status: "complete" };
   }
   async function fail(state) {
@@ -277,8 +305,7 @@ function createConductorGraph(options) {
     return "advance";
   }
   function afterAdvance(state) {
-    const total = state.plan?.waves.length ?? 0;
-    return state.currentWaveIndex < total ? "dispatch" : "finish";
+    return state.currentWaveIndex < waveCount(state) ? "dispatch" : "finish";
   }
   const graph = new StateGraph(ConductorState).addNode("generate", n.generate).addNode("refine", n.refine).addNode("review", n.review).addNode("persist", n.persist).addNode("dispatch", n.dispatch).addNode("awaitWave", n.awaitWave).addNode("advance", n.advance).addNode("retryWave", n.retryWave).addNode("finish", n.finish).addNode("fail", n.fail).addConditionalEdges(START, entry, ["generate", "dispatch"]).addConditionalEdges("generate", afterPlanning, ["refine", "review", "persist"]).addConditionalEdges("refine", afterPlanning, ["refine", "review", "persist"]).addConditionalEdges("review", afterReview, ["persist", "refine", "fail"]).addEdge("persist", "dispatch").addEdge("dispatch", "awaitWave").addConditionalEdges("awaitWave", afterWave, [
     "dispatch",

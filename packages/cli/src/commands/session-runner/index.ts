@@ -3,6 +3,7 @@ import chalk from 'chalk';
 import { resolve } from 'path';
 import { SessionRunner } from './server';
 import { resolveHarness, type Harness } from './harness';
+import { findIndexer, installHint } from '../../utils/codegraph';
 import type { RunnerConfig } from './types';
 
 export { SessionRunner } from './server';
@@ -20,6 +21,8 @@ export type { RunnerConfig } from './types';
  *   DEVPILOT_SESSION_API_KEY=dp_local_dev \
  *   devpilot serve
  */
+const wantsCodeGraph = (harness: Harness) => harness.techniques.some((t) => t.id === 'code-graph');
+
 function parseRepoMap(values: string[]): Map<string, string> {
   const map = new Map<string, string>();
   for (const entry of values) {
@@ -97,6 +100,9 @@ export const sessionRunnerCommand = new Command('session-runner')
       maxConcurrent: parseInt(options.maxConcurrent, 10),
       timeoutMs: parseInt(options.timeout, 10) * 60_000,
       harness,
+      // Found once, at start. Absent is the ordinary case and switches every
+      // graph feature off.
+      codeGraph: await findIndexer(),
       isolation: {
         worktreeRoot: options.worktreeRoot ? resolve(options.worktreeRoot) : undefined,
         setupCommand: options.worktreeSetup || undefined,
@@ -137,6 +143,19 @@ export const sessionRunnerCommand = new Command('session-runner')
           ? chalk.dim(` (setup: ${config.isolation.setupCommand})`)
           : chalk.dim(' (no --worktree-setup: tracked files only)'))
     );
+    console.log(
+      `  ${chalk.dim('code graph')}  ` +
+        (config.codeGraph
+          ? `codegraph ${config.codeGraph.version ?? ''}`.trim() +
+            chalk.dim(' (used for a repository once `devpilot graph enable` has indexed it)')
+          : chalk.dim(`not installed — optional: ${installHint()}`))
+    );
+    if (wantsCodeGraph(harness) && !config.codeGraph) {
+      console.log(
+        chalk.yellow('  The harness asks for code-graph but the indexer is not installed; agents will run without it,')
+      );
+      console.log(chalk.yellow('  and their readings will not carry the code-graph stamp.'));
+    }
     if (repoMap.size > 0) {
       for (const [repo, path] of repoMap) console.log(`  ${chalk.dim('repo')}        ${repo} → ${path}`);
     }

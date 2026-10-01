@@ -1,6 +1,6 @@
 {
   "name": "@devpilot.sh/core",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Core library for DevPilot - database schemas, integrations, and utilities",
   "license": "MIT",
   "author": "DevPilot Team",
@@ -47,6 +47,11 @@
       "types": "./dist/adoption/index.d.ts",
       "import": "./dist/adoption/index.mjs",
       "require": "./dist/adoption/index.js"
+    },
+    "./code-graph": {
+      "types": "./dist/code-graph/index.d.ts",
+      "import": "./dist/code-graph/index.mjs",
+      "require": "./dist/code-graph/index.js"
     }
   },
   "files": [

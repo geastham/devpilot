@@ -48,6 +48,20 @@ export const ConductorState = Annotation.Root({
     reducer: (_prev, next) => next,
     default: () => null,
   }),
+  /**
+   * How many waves the persisted plan has, when the host said. Null when it
+   * did not, and for a plan that was adopted rather than persisted here — the
+   * graph then counts `plan.waves`, as it always did.
+   *
+   * A channel, not something read off `plan`, because the two are different
+   * things: `plan` is what the planner wrote and the reviewer approved, and
+   * this is what the host laid out when it wrote it down. See
+   * `ConductorPorts.persistPlan`.
+   */
+  totalWaves: Annotation<number | null>({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
   currentWaveIndex: Annotation<number>({
     reducer: (_prev, next) => next,
     default: () => 0,

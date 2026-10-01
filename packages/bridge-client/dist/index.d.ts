@@ -113,6 +113,93 @@ interface MirroredTelemetry {
     harness?: string;
     elapsedMs?: number;
     idleMs?: number;
+    /** Human prompts in the session. A count. */
+    prompts?: number;
+    /**
+     * From Claude Code's status line input, recorded on the machine by
+     * `devpilot statusline`. Absent where that is not installed.
+     *
+     * `windowUsed*` is the ACCOUNT's subscription window at the session's last
+     * reading, not a property of the session. `windowDelta*` is an estimate: the
+     * points the window moved while this machine was taking readings, shared
+     * among the sessions it metered in proportion to their API-rate cost.
+     */
+    windowUsed5h?: number;
+    windowUsed7d?: number;
+    /** ISO-8601: when each window resets. */
+    windowResets5h?: string;
+    windowResets7d?: string;
+    windowDelta5h?: number;
+    windowDelta7d?: number;
+    /** Prompt-cache misses in the main conversation, as diagnosed by the client. */
+    cacheMisses?: number;
+    /** Cause name → count, from the client's own closed list. */
+    cacheMissCauses?: Record<string, number>;
+    /** Input tokens re-written to the cache because of those misses. */
+    cacheRecacheTokens?: number;
+    /** What re-writing them cost over reading them, at API list rates. */
+    cacheMissCostUsd?: number;
+    /** Highest context-window percentage seen. */
+    contextPeakPct?: number;
+}
+interface GraphManifest {
+    graph: {
+        commitSha: string;
+        indexer: string;
+        indexerVersion: string;
+        syncedAt: string;
+    } | null;
+    /** path → content hash, for every file the hosted graph holds. */
+    files: Record<string, string>;
+}
+type GraphManifestResult = ({
+    status: 'ok';
+} & GraphManifest) | {
+    status: 'disabled';
+    message: string;
+} | {
+    status: 'error';
+    message: string;
+};
+interface GraphCounts {
+    files: number;
+    nodes: number;
+    edges: number;
+}
+/** One request to `/api/graph/sync`. Every list is bounded by the route. */
+interface GraphSyncBatch {
+    repo: string;
+    branch: string;
+    commitSha: string;
+    indexer: string;
+    indexerVersion: string;
+    /** Chosen by the sender; groups the batches of one sync. */
+    syncId: string;
+    /** True on the last batch: the graph's counts and commit are updated. */
+    final: boolean;
+    upsertFiles: {
+        path: string;
+        contentHash: string;
+        language: string;
+    }[];
+    removePaths: string[];
+    nodes: {
+        id: string;
+        kind: string;
+        name: string;
+        qualifiedName: string;
+        filePath: string;
+        startLine: number;
+        endLine: number;
+        isExported: boolean;
+    }[];
+    edges: {
+        source: string;
+        target: string;
+        kind: string;
+        line: number | null;
+        filePath: string;
+    }[];
 }
 declare class BridgeClient {
     private readonly config;
@@ -215,6 +302,34 @@ declare class BridgeClient {
      * frame of it must never cost the run it describes.
      */
     reportTelemetry(sessionId: string, telemetry: MirroredTelemetry): Promise<boolean>;
+    /**
+     * What the hosted plane already holds of a repository's code graph: which
+     * files, at which content hash. The caller diffs its own index against this
+     * and sends only what changed.
+     *
+     * `disabled` is its own outcome because the caller must say something
+     * different for it: the workspace has not turned the hosted code graph on
+     * (it is a premium, opt-in feature), which is not a failure.
+     */
+    graphManifest(repo: string, branch: string): Promise<GraphManifestResult>;
+    /**
+     * Send one batch of a code graph's STRUCTURE: file paths and hashes, symbol
+     * names and kinds, and which symbol refers to which.
+     *
+     * There is no field here for a signature, a docstring or any source text,
+     * and the hosted route rejects a request that carries a key it does not
+     * know — so the boundary is held on both sides rather than trusted to one.
+     */
+    graphSync(batch: GraphSyncBatch): Promise<{
+        ok: true;
+        counts?: GraphCounts;
+    } | {
+        ok: false;
+        status: number;
+        message: string;
+    }>;
+    /** Remove a repository's graph from the hosted plane. */
+    graphDelete(repo: string, branch: string): Promise<boolean>;
     /**
      * Send derived stream events for the live watch view.
      *
@@ -526,4 +641,4 @@ declare class PubSubSubscriber {
     constructor();
 }
 
-export { BridgeClient, type BridgeClientConfig, type BridgeCredentials, BridgeError, DEFAULT_BRIDGE_URL, type DispatchHandler, DispatchLoop, type DispatchLoopConfig, type EntryStatus, type HeartbeatConfig, HeartbeatService, type MirroredPlan, type MirroredTelemetry, PubSubSubscriber, RealtimeSubscriber, type RealtimeSubscriberConfig, type SessionCommandMessage, SharedSessionClient, type SharedSessionCreateOptions, type SharedSessionJoinOptions, type TranscriptEntry, bridgeCredentialsPath, clearBridgeCredentials, loadBridgeCredentials, resolveBridgeCredentials, saveBridgeCredentials };
+export { BridgeClient, type BridgeClientConfig, type BridgeCredentials, BridgeError, DEFAULT_BRIDGE_URL, type DispatchHandler, DispatchLoop, type DispatchLoopConfig, type EntryStatus, type GraphCounts, type GraphManifest, type GraphManifestResult, type GraphSyncBatch, type HeartbeatConfig, HeartbeatService, type MirroredPlan, type MirroredTelemetry, PubSubSubscriber, RealtimeSubscriber, type RealtimeSubscriberConfig, type SessionCommandMessage, SharedSessionClient, type SharedSessionCreateOptions, type SharedSessionJoinOptions, type TranscriptEntry, bridgeCredentialsPath, clearBridgeCredentials, loadBridgeCredentials, resolveBridgeCredentials, saveBridgeCredentials };

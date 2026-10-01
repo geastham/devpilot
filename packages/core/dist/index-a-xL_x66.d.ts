@@ -3,6 +3,7 @@ import { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { C as Complexity, D as DependencyEdgeType, E as EventType, F as FileStatus, M as Model, O as OrchestratorMode, S as SessionStatus, b as WavePlanStatus, c as WaveStatus, d as WaveTaskStatus, W as WikiArticleStatus, e as WikiLogAction, a as WikiSourceType, Z as Zone, f as complexityValues, g as dependencyEdgeTypeValues, h as eventTypeValues, i as fileStatusValues, m as modelValues, o as orchestratorModeValues, s as sessionStatusValues, w as wavePlanStatusValues, j as waveStatusValues, k as waveTaskStatusValues, l as wikiArticleStatusValues, n as wikiLogActionValues, p as wikiSourceTypeValues, z as zoneValues } from './enums-CbVZMWqb.js';
 import * as drizzle_orm from 'drizzle-orm';
 import * as drizzle_orm_sqlite_core from 'drizzle-orm/sqlite-core';
+import { G as GraphDependentsRequest, d as GraphDependentsOutcome } from './types-CbuwQ_x5.js';
 
 declare const databaseConfigSchema: z.ZodObject<{
     type: z.ZodDefault<z.ZodEnum<["sqlite", "postgres"]>>;
@@ -1729,6 +1730,628 @@ declare const activityEvents: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
 type ActivityEvent = typeof activityEvents.$inferSelect;
 type NewActivityEvent = typeof activityEvents.$inferInsert;
 
+interface ParsedWavePlan {
+    waves: ParsedWave[];
+    dependencyEdges: ParsedEdge[];
+    criticalPath: string[];
+    statistics: ParsedStatistics;
+    rawMarkdown: string;
+}
+interface ParsedWave {
+    waveIndex: number;
+    label: string;
+    tasks: ParsedTask[];
+}
+interface ParsedTask {
+    taskCode: string;
+    description: string;
+    filePaths: string[];
+    dependencies: string[];
+    canRunInParallel: boolean;
+    recommendedModel: 'haiku' | 'sonnet' | 'opus';
+    complexity: 'S' | 'M' | 'L' | 'XL';
+}
+interface ParsedEdge {
+    from: string;
+    to: string;
+    type: 'hard' | 'soft';
+}
+interface ParsedStatistics {
+    totalTasks: number;
+    totalWaves: number;
+    maxParallelism: number;
+    criticalPathLength: number;
+    sequentialChains: number;
+}
+interface ValidationResult {
+    valid: boolean;
+    errors: ValidationError[];
+    warnings: ValidationWarning[];
+    correctedPlan?: ParsedWavePlan;
+}
+interface ValidationError {
+    code: ValidationErrorCode;
+    message: string;
+    taskCodes?: string[];
+    detail?: string;
+}
+type ValidationErrorCode = 'CYCLE_DETECTED' | 'MISSING_DEPENDENCY' | 'NO_ROOT_TASK' | 'EMPTY_PLAN' | 'DUPLICATE_TASK_CODE';
+interface ValidationWarning {
+    code: ValidationWarningCode;
+    message: string;
+    taskCodes?: string[];
+    detail?: string;
+}
+type ValidationWarningCode = 'FILE_OVERLAP_SAME_WAVE' | 'DANGLING_DEPENDENCY' | 'ORPHAN_SUBGRAPH' | 'STATISTICS_MISMATCH';
+interface CriticalPathResult {
+    path: string[];
+    length: number;
+    annotations: Map<string, CriticalPathAnnotation>;
+}
+interface CriticalPathAnnotation {
+    taskCode: string;
+    isOnCriticalPath: boolean;
+    distanceFromRoot: number;
+    distanceToEnd: number;
+    slack: number;
+}
+interface WaveAssignmentResult {
+    waves: AssignedWave[];
+    totalWaves: number;
+    maxParallelism: number;
+    adjustments: WaveAdjustment[];
+}
+interface AssignedWave {
+    waveIndex: number;
+    label: string;
+    tasks: ParsedTask[];
+}
+interface WaveAdjustment {
+    /**
+     * Why the task is not in the wave its dependencies alone would give it.
+     *
+     * - `FILE_CONFLICT_BUMP` — another task in that wave names one of the same
+     *   files.
+     * - `DEPENDENCY_CONFLICT_BUMP` — no file is shared, but one of the two tasks
+     *   changes a file that a file of the other's depends on. Only produced when
+     *   the assigner was given dependent claims, which needs a code graph; a plan
+     *   assigned without one never has this row. It is a prediction from an
+     *   index, where a shared file is a certainty, and it is a separate type so
+     *   that a reader can tell the two apart.
+     * - `CAPACITY_SPLIT` — the wave was larger than the fleet's capacity.
+     *
+     * `reason` is a sentence for a person. For a dependency conflict it names
+     * both files and the other task.
+     */
+    type: 'FILE_CONFLICT_BUMP' | 'DEPENDENCY_CONFLICT_BUMP' | 'CAPACITY_SPLIT';
+    taskCode: string;
+    /**
+     * For the two conflict types these are wave numbers as the conflict pass
+     * counted them, from zero, BEFORE any capacity split renumbered the waves:
+     * `toWave - fromWave` is how far the task moved, and neither is necessarily
+     * the wave it finally runs in — that is where the task appears in `waves`.
+     * For a capacity split, `fromWave` is the wave that was split and `toWave`
+     * the final index of the sub-wave the task went to.
+     */
+    fromWave: number;
+    toWave: number;
+    reason: string;
+}
+interface PlanScore {
+    parallelizationScore: number;
+    maxParallelism: number;
+    waveEfficiency: number;
+    dependencyDensity: number;
+    fileConflictScore: number;
+    confidenceSignals: ConfidenceSignalUpdate;
+}
+interface ConfidenceSignalUpdate {
+    parallelization: 'HIGH' | 'MEDIUM' | 'LOW';
+    conflictRisk: 'HIGH' | 'MEDIUM' | 'LOW';
+}
+interface DAGNode {
+    taskCode: string;
+    inDegree: number;
+    outDegree: number;
+    dependencies: Set<string>;
+    dependents: Set<string>;
+    filePaths: Set<string>;
+}
+interface TopologicalSortResult {
+    order: string[];
+    valid: boolean;
+    cycleParticipants?: string[];
+}
+interface WavePlannerConfig {
+    maxTasksPerWave?: number;
+    minParallelizationScore?: number;
+    enableAutoCorrection?: boolean;
+    strictFileOwnership?: boolean;
+}
+interface OptimizationResult {
+    success: boolean;
+    wavePlan?: ParsedWavePlan;
+    criticalPath?: CriticalPathResult;
+    waveAssignment?: WaveAssignmentResult;
+    score?: PlanScore;
+    validation?: ValidationResult;
+    error?: string;
+}
+interface PromptContext {
+    specContent: string;
+    itemTitle: string;
+    itemId: string;
+    repo: string;
+    fleetContext: FleetContextBlock;
+    codebaseContext: CodebaseContextBlock;
+    constraints: ConstraintBlock;
+    memoryContext?: MemoryContextBlock;
+    completedWork?: CompletedWorkBlock;
+    remainingWork?: RemainingWorkBlock;
+}
+interface FleetContextBlock {
+    availableWorkers: Record<string, number>;
+    inFlightFiles: {
+        path: string;
+        sessionId: string;
+        ticketId: string;
+        estimatedMinutesRemaining: number;
+    }[];
+    activeSessions: {
+        repo: string;
+        ticketId: string;
+        progressPercent: number;
+        estimatedRemainingMinutes: number;
+    }[];
+}
+interface CodebaseContextBlock {
+    fileTree: string;
+    recentlyModifiedFiles: string[];
+    moduleStructure?: string;
+}
+interface ConstraintBlock {
+    avoidFiles: string[];
+    preferModel?: 'haiku' | 'sonnet' | 'opus';
+    maxCost?: number;
+    maxConcurrency?: number;
+    customConstraints: string[];
+}
+interface MemoryContextBlock {
+    relevantSessions: {
+        date: string;
+        ticketId: string;
+        summary: string;
+        constraintApplied?: string;
+    }[];
+    /**
+     * Optional MemPalace context — the L0-L3 tiered loading stack.
+     *
+     * When present, this augments `relevantSessions` with:
+     *   - identity (L0): always-loaded project/persona identity
+     *   - criticalFacts (L1): always-loaded critical facts
+     *   - topicalClosets (L2): on-demand topical recall
+     *
+     * The wave planner template renders both blocks when available.
+     * This field is strictly additive — the Wiki and legacy memory
+     * flows continue to work if MemPalace is disabled.
+     */
+    palace?: {
+        identity: string;
+        criticalFacts: string[];
+        topicalClosets: {
+            topic: string;
+            summary: string;
+            citations: string[];
+        }[];
+        tokenEstimate: number;
+        wingSlug: string;
+    };
+}
+interface CompletedWorkBlock {
+    tasks: {
+        taskCode: string;
+        description: string;
+        filesModified: string[];
+        completionSummary: string;
+    }[];
+}
+interface RemainingWorkBlock {
+    tasks: {
+        taskCode: string;
+        description: string;
+        originalDependencies: string[];
+        originalFiles: string[];
+    }[];
+}
+interface GenerationResult {
+    content: string;
+    tokensInput: number;
+    tokensOutput: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    durationMs: number;
+    model: string;
+}
+interface WaveDispatchRequest {
+    wavePlanId: string;
+    waveIndex: number;
+    taskCode: string;
+    taskDescription: string;
+    fileScope: string[];
+    model: 'haiku' | 'sonnet' | 'opus';
+    predecessorContext: PredecessorSummary[];
+    constraints: string[];
+}
+interface PredecessorSummary {
+    taskCode: string;
+    description: string;
+    filesModified: string[];
+    /**
+     * Where `filesModified` came from: `'changed'` when it is git's diff of the
+     * task's own branch (an isolated task — exact), `'touched'` when the session
+     * runner reported the files the task wrote to, `'scoped'` when all that is
+     * known is which files the plan assigned it. Absent means `'scoped'`.
+     */
+    filesSource?: 'changed' | 'touched' | 'scoped';
+    completionSummary: string;
+    /**
+     * True when the task's branch has been merged into the run branch, so its
+     * work is in the checkout a later task is given. Absent otherwise — including
+     * for every task of a plan that is not isolated.
+     */
+    merged?: boolean;
+}
+interface WavePlanExecutionState {
+    wavePlanId: string;
+    status: 'draft' | 'approved' | 'executing' | 'paused' | 'completed' | 'failed' | 're-optimizing';
+    currentWaveIndex: number;
+    activeTasks: Map<string, ActiveTaskInfo>;
+    completedWaves: number[];
+}
+interface ActiveTaskInfo {
+    taskCode: string;
+    wavePlanId: string;
+    sessionId: string;
+    startedAt: Date;
+}
+type WaveSSEEvent = {
+    type: 'wave_plan_created';
+    wavePlanId: string;
+    itemId: string;
+    totalWaves: number;
+} | {
+    type: 'wave_dispatching';
+    wavePlanId: string;
+    waveIndex: number;
+    taskCount: number;
+} | {
+    type: 'wave_task_dispatched';
+    wavePlanId: string;
+    taskCode: string;
+    sessionId: string;
+} | {
+    type: 'wave_task_complete';
+    wavePlanId: string;
+    taskCode: string;
+    waveIndex: number;
+} | {
+    type: 'wave_task_failed';
+    wavePlanId: string;
+    taskCode: string;
+    error: string;
+} | {
+    type: 'wave_complete';
+    wavePlanId: string;
+    waveIndex: number;
+    nextWaveIndex: number | null;
+} | {
+    type: 'wave_advance';
+    wavePlanId: string;
+    fromWave: number;
+    toWave: number;
+} | {
+    type: 'wave_plan_complete';
+    wavePlanId: string;
+    metrics: object;
+} | {
+    type: 'wave_plan_failed';
+    wavePlanId: string;
+    failedWave: number;
+    failedTask: string;
+} | {
+    type: 'wave_plan_reoptimizing';
+    wavePlanId: string;
+    reason: string;
+};
+
+/**
+ * One extra claim a task makes on a wave: a file that depends on something the
+ * task changes.
+ *
+ * `file` is NOT one of the task's own files — the task does not edit it. It is
+ * a file that imports, calls or otherwise uses `dependsOn`, which is one of the
+ * task's own. Where they come from is not this module's business; in practice
+ * a code graph index (`plan-code-graph.ts`).
+ */
+interface DependentClaim {
+    /** A file that depends on one of the task's own files. */
+    file: string;
+    /** The task's own file it depends on. */
+    dependsOn: string;
+}
+/**
+ * How many dependent claims one task may make: 25.
+ *
+ * WHY A CAP AT ALL. A claim is a prediction, from an index that is sometimes
+ * wrong, and the wider a file's list of dependents the less any one entry in
+ * it means. Measured on this repository's own index (codegraph 1.6.1, October
+ * 2026 — one repository, not a study): the file with the most dependents, 55,
+ * had 53 of them through a name collision (53 test files' `describe`, resolved
+ * to a local function of that name). Without a cap, a task editing that file
+ * would be sequenced against every task that touches one of those tests. And
+ * a file that really is imported by half the repository would do the same
+ * honestly: every task that edits one of its importers — in a plan of any
+ * size, most of them — moved out of its wave, on the strength of a
+ * relationship that holds between that file and nearly everything. The plan
+ * is then sequenced by which file is popular, not by what collides.
+ *
+ * WHY 25. In the same index, 239 files have at least one dependent and 231 of
+ * them (97%) have 25 or fewer. The eight above it are database schema files,
+ * shared type and utility modules, and two files whose count is a name
+ * collision (the one above, and a type called `Command`). So 25 keeps every
+ * ordinary file's dependents whole and leaves out the files whose answer is "a
+ * large part of the repository". It is a constant chosen from one measurement,
+ * and `maxDependentClaimsPerTask` exists so it can be moved when there is a
+ * second.
+ *
+ * HOW IT IS APPLIED is `selectDependentClaims`: a file's dependents are claimed
+ * all together or not at all, narrowest file first.
+ */
+declare const MAX_DEPENDENT_CLAIMS_PER_TASK = 25;
+/**
+ * Configuration for wave assignment.
+ */
+interface WaveAssignerConfig {
+    maxTasksPerWave?: number;
+    /**
+     * Optional. Per task code, the files that depend on what the task changes.
+     *
+     * With these, the conflict pass also keeps apart two tasks where one changes
+     * a file that the other's file depends on — see `resolveFileConflicts` for
+     * the rule and its direction. Absent, or empty, the assignment is exactly
+     * what it was before this option existed: the plan is produced from the
+     * tasks' own files alone, which is the behaviour whenever there is no code
+     * graph to ask.
+     */
+    dependentClaims?: Record<string, DependentClaim[]>;
+    /** Overrides `MAX_DEPENDENT_CLAIMS_PER_TASK`. */
+    maxDependentClaimsPerTask?: number;
+}
+/** What `selectDependentClaims` kept, and which of the task's files it left out. */
+interface SelectedDependentClaims {
+    /** The claims the conflict pass will use. At most the cap. */
+    claims: DependentClaim[];
+    /**
+     * The task's own files whose dependents were not claimed because they did
+     * not fit, with how many each had. A reviewer should see these: the task
+     * changes something widely used, and nothing was sequenced on account of it.
+     */
+    leftOut: {
+        file: string;
+        dependents: number;
+    }[];
+}
+/**
+ * Apply the cap to one task's dependent claims.
+ *
+ * The task's own files are taken narrowest first — fewest dependents first —
+ * and each file's dependents are claimed whole or not at all. The first file
+ * that does not fit under the cap is left out, and so is every wider one.
+ *
+ * Whole or not at all, because the alternative is a prefix: the first 25 of a
+ * hub's 200 dependents in path order. Whether two tasks were then kept apart
+ * would depend on where a filename falls in the alphabet, which is not a
+ * reason. A file narrow enough to fit is a specific coupling and is believed
+ * in full; a file too wide to fit is shared ground and sequences nothing.
+ *
+ * Narrowest first, so that a task which edits one widely-used file and one
+ * narrowly-used file still claims the narrow one's dependents — the coupling
+ * most likely to be real — instead of losing both to the hub.
+ *
+ * Two kinds of claim are dropped before counting: one whose `file` is among
+ * the task's own files (a task does not conflict with itself), and one whose
+ * `dependsOn` is not (it is not a claim on this task's behalf).
+ *
+ * Deterministic, and idempotent: selecting from an already-selected list
+ * returns it unchanged, so a caller may store the selection and pass it back.
+ */
+declare function selectDependentClaims(ownFiles: readonly string[], claims: readonly DependentClaim[], max?: number): SelectedDependentClaims;
+/**
+ * Assigns tasks to waves based on dependency depths, resolving file conflicts
+ * and applying capacity constraints.
+ *
+ * Algorithm:
+ * 1. Compute wave depths via topological sort
+ * 2. Group tasks by depth, which fixes the order they are placed in
+ * 3. Place each task in the earliest wave that is after all of its
+ *    dependencies and has no file conflict — so a conflict delays the task and,
+ *    through it, everything that depends on it. With `dependentClaims`, a
+ *    conflict is also one task changing a file another task's file depends on
+ * 4. Apply fleet capacity constraints
+ *
+ * Every input task appears in exactly one output wave. That is checked before
+ * returning, and a mismatch throws rather than returning a shorter plan.
+ *
+ * @param tasks - Array of parsed tasks
+ * @param edges - Array of dependency edges
+ * @param config - Optional configuration
+ * @returns WaveAssignmentResult with assigned waves and adjustments
+ */
+declare function assignWaves(tasks: ParsedTask[], edges: ParsedEdge[], config?: WaveAssignerConfig): WaveAssignmentResult;
+
+/**
+ * What a plan learns from a code graph, and what it does not.
+ *
+ * A plan is a list of tasks, each naming the files it will change. Given the
+ * files that DEPEND ON those files, two things become possible that were not
+ * (TRD 27 §5.1, §5.3): the wave assigner can keep apart two tasks where one
+ * changes a file the other's file uses, and a reviewer can be shown each
+ * task's blast radius before approving it.
+ *
+ * Where the dependents come from: the session runner, asked through the
+ * orchestrator service. The cockpit knows a repository by name; only the
+ * runner knows where it is checked out, and so only the runner can read the
+ * index that lives in that checkout.
+ *
+ * THE GRAPH IS AN AID. Every way of not having it — no orchestrator, a mode
+ * with no runner, a runner that predates it or did not answer in time, a
+ * repository with no index — produces the same plan as before the graph
+ * existed, and `PlanCodeGraph.reason` saying which of those it was. That
+ * sentence is the whole difference between a plan made without the graph and
+ * one that silently was: the first can be corrected.
+ *
+ * Nothing in this file reads a database or an index. `readPlanCodeGraph` makes
+ * one request; everything else is pure.
+ */
+
+/**
+ * How many dependent files are listed per task. The count is always the whole
+ * count; this bounds what is stored on the plan and carried in a run's
+ * checkpoint, and what a reviewer is asked to read.
+ */
+declare const BLAST_RADIUS_LISTED = 25;
+/** What depends on the files one task changes. */
+interface TaskBlastRadius {
+    taskCode: string;
+    /**
+     * How many distinct files depend on something this task changes, not
+     * counting the task's own files. A lower bound when the plan's
+     * `truncated` is true.
+     */
+    dependentCount: number;
+    /** Up to `BLAST_RADIUS_LISTED` of them, in path order. */
+    dependents: string[];
+    /**
+     * The claims the wave assigner sequences on: at most
+     * `MAX_DEPENDENT_CLAIMS_PER_TASK`, chosen by `selectDependentClaims`. Stored
+     * so that the assignment made when the plan is persisted is the one the
+     * reviewer was shown, whatever the index says by then.
+     */
+    claims: DependentClaim[];
+    /**
+     * The task's own files whose dependents were too many to sequence on. The
+     * task changes something widely used and nothing was moved because of it —
+     * which a reviewer may well want to know.
+     */
+    leftOut: {
+        file: string;
+        dependents: number;
+    }[];
+}
+/** Whether a plan was made with a code graph, and what the graph said. */
+interface PlanCodeGraph {
+    /** True when dependents were read and passed to the wave assigner. */
+    used: boolean;
+    /** Present exactly when `used` is false: why not, in words for a person. */
+    reason?: string;
+    /** When the index was last written (ISO-8601). Its age, not a promise that it matches the code. */
+    indexedAt?: string | null;
+    /** True when the runner cut at least one list short; counts are then lower bounds. */
+    truncated?: boolean;
+    /** One entry per task, in plan order. Present exactly when `used` is true. */
+    tasks?: TaskBlastRadius[];
+}
+/** The one method this module needs of the orchestrator service. */
+interface GraphDependentsSource {
+    graphDependents(request: GraphDependentsRequest): Promise<GraphDependentsOutcome>;
+}
+/**
+ * Ask for the dependents of every file the plan's tasks name — in ONE request,
+ * for the whole plan — and work out each task's blast radius.
+ *
+ * Depth 1: the files that directly use a file the task changes. Further out,
+ * the answer for anything shared approaches "the repository", and a claim that
+ * wide separates nothing.
+ *
+ * Never rejects. `source` defaults to the process's orchestrator service;
+ * tests pass their own.
+ */
+declare function readPlanCodeGraph(repo: string, tasks: readonly ParsedTask[], source?: GraphDependentsSource | null): Promise<PlanCodeGraph>;
+/**
+ * One task's blast radius from a file → dependents map.
+ *
+ * A dependent that is one of the task's own files is not counted: a task that
+ * changes both `policy.ts` and the `fetch.ts` that imports it has that
+ * dependency in hand.
+ */
+declare function blastRadiusOf(task: Pick<ParsedTask, 'taskCode' | 'filePaths'>, dependentsByFile: Readonly<Record<string, readonly string[]>>, maxClaims?: number): TaskBlastRadius;
+/**
+ * The `dependentClaims` option for `assignWaves`, or undefined when the graph
+ * was not used or claimed nothing — in which case the option must be left off
+ * altogether, so the assignment is exactly the one made without a graph.
+ */
+declare function dependentClaimsOf(codeGraph: PlanCodeGraph | null | undefined): Record<string, DependentClaim[]> | undefined;
+/**
+ * Attach what the graph said to a plan object, and read it back.
+ *
+ * The conductor's graph holds a plan between the node that generates it and
+ * the node that persists it, with a human review — hours, possibly — and a
+ * checkpoint in between. Its plan type is structural, so a host's extra fields
+ * pass through it untouched, and this is one: the review shows it, and the
+ * persist step assigns waves from the same claims the reviewer saw.
+ *
+ * `codeGraphOf` checks the shape rather than trusting it, because what it
+ * reads has been through JSON and may have been written by another version.
+ */
+declare function withCodeGraph<T extends object>(plan: T, codeGraph: PlanCodeGraph): T & {
+    codeGraph: PlanCodeGraph;
+};
+declare function codeGraphOf(plan: unknown): PlanCodeGraph | null;
+declare function isPlanCodeGraph(value: unknown): value is PlanCodeGraph;
+/** One task's blast radius, as a reviewer reads it. */
+interface BlastRadiusLine {
+    taskCode: string;
+    dependentCount: number;
+    /** The listed dependents; `more` is how many are not listed. */
+    dependents: string[];
+    more: number;
+    /** "7 files depend on what this changes", or "at least 7 files…" when lists were cut short. */
+    summary: string;
+    /**
+     * Set when the task changes a file too widely used to sequence on:
+     * "src/types.ts has 46 dependents — too many to keep other tasks apart on".
+     */
+    notSequencedOn: string[];
+}
+/** One task the code graph moved, in plain words. */
+interface SequencedLine {
+    taskCode: string;
+    /** How many waves later than its dependencies alone would have put it. */
+    wavesLater: number;
+    /** A sentence: who moved, how far, and the two files that are the reason. */
+    because: string;
+}
+/** What `GET /api/items/:id/conductor` reports about the code graph. */
+interface CodeGraphReview {
+    used: boolean;
+    /** Why not, when `used` is false. Null when it was. */
+    reason: string | null;
+    indexedAt: string | null;
+    truncated: boolean;
+    tasks: BlastRadiusLine[];
+    sequenced: SequencedLine[];
+}
+/**
+ * Turn the stored graph reading and the assigner's adjustments into what a
+ * reviewer is shown.
+ *
+ * `adjustments` may be null — a plan from before they were recorded — and the
+ * list of moved tasks is then empty, which the caller should not read as "the
+ * graph moved nothing". It is why `sequenced` is only meaningful alongside
+ * `used: true` on a plan that has its adjustments.
+ */
+declare function describeCodeGraph(codeGraph: PlanCodeGraph, adjustments: readonly WaveAdjustment[] | null): CodeGraphReview;
+
 declare const wavePlans: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
     name: "wave_plans";
     schema: undefined;
@@ -1971,6 +2594,30 @@ declare const wavePlans: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
             notNull: false;
             hasDefault: false;
             enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        adjustments: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "adjustments";
+            tableName: "wave_plans";
+            dataType: "json";
+            columnType: "SQLiteTextJson";
+            data: WaveAdjustment[];
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        codeGraph: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "code_graph";
+            tableName: "wave_plans";
+            dataType: "json";
+            columnType: "SQLiteTextJson";
+            data: PlanCodeGraph;
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
             baseColumn: never;
         }, object>;
         startedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
@@ -4101,4 +4748,4 @@ type Database = SQLiteDatabase;
 declare function createDatabase(config: DatabaseConfig): Database;
 declare function closeDatabase(config: DatabaseConfig): Promise<void>;
 
-export { getDatabaseConfig as $, type ActivityEvent as A, type WavePlan as B, type CompletedTask as C, type Database as D, type WavePlanMetric as E, type WaveTask as F, type Workstream as G, type HorizonItem as H, type InFlightFile as I, activityEvents as J, closeDatabase as K, completedTasks as L, completedTasksRelations as M, type NewActivityEvent as N, conductorScores as O, type Plan as P, conductorScoresRelations as Q, type RufloSession as R, type SQLiteDatabase as S, type Task as T, conflictingFiles as U, conflictingFilesRelations as V, type Wave as W, createDatabase as X, databaseConfigSchema as Y, dependencyEdges as Z, dependencyEdgesRelations as _, type ConductorScore as a, horizonItems as a0, horizonItemsRelations as a1, inFlightFiles as a2, inFlightFilesRelations as a3, palaceClosets as a4, palaceClosetsRelations as a5, palaceDiary as a6, palaceDrawers as a7, palaceDrawersRelations as a8, palaceHalls as a9, wikiArticles as aA, wikiArticlesRelations as aB, wikiLog as aC, wikiLogRelations as aD, wikiSources as aE, wikiSourcesRelations as aF, workstreams as aG, workstreamsRelations as aH, schema as aI, palaceKgTriples as aa, palaceRooms as ab, palaceRoomsRelations as ac, palaceTunnels as ad, palaceWings as ae, palaceWingsRelations as af, plans as ag, plansRelations as ah, rufloSessions as ai, rufloSessionsRelations as aj, runwaySamples as ak, scoreHistory as al, scoreHistoryRelations as am, scoreReadings as an, tasks as ao, tasksRelations as ap, touchedFiles as aq, touchedFilesRelations as ar, wavePlanMetrics as as, wavePlanMetricsRelations as at, wavePlans as au, wavePlansRelations as av, waveTasks as aw, waveTasksRelations as ax, waves as ay, wavesRelations as az, type ConflictingFile as b, type DatabaseConfig as c, type DependencyEdge as d, type NewCompletedTask as e, type NewConductorScore as f, type NewConflictingFile as g, type NewDependencyEdge as h, type NewHorizonItem as i, type NewInFlightFile as j, type NewPlan as k, type NewRufloSession as l, type NewRunwaySampleRow as m, type NewScoreHistory as n, type NewScoreReading as o, type NewTask as p, type NewTouchedFile as q, type NewWave as r, type NewWavePlan as s, type NewWavePlanMetric as t, type NewWaveTask as u, type NewWorkstream as v, type RunwaySampleRow as w, type ScoreHistory as x, type ScoreReading as y, type TouchedFile as z };
+export { getDatabaseConfig as $, type ActivityEvent as A, type WavePlan as B, type CompletedTask as C, type Database as D, type WavePlanMetric as E, type WaveTask as F, type Workstream as G, type HorizonItem as H, type InFlightFile as I, activityEvents as J, closeDatabase as K, completedTasks as L, completedTasksRelations as M, type NewActivityEvent as N, conductorScores as O, type Plan as P, conductorScoresRelations as Q, type RufloSession as R, type SQLiteDatabase as S, type Task as T, conflictingFiles as U, conflictingFilesRelations as V, type Wave as W, createDatabase as X, databaseConfigSchema as Y, dependencyEdges as Z, dependencyEdgesRelations as _, type ConductorScore as a, type AssignedWave as a$, horizonItems as a0, horizonItemsRelations as a1, inFlightFiles as a2, inFlightFilesRelations as a3, palaceClosets as a4, palaceClosetsRelations as a5, palaceDiary as a6, palaceDrawers as a7, palaceDrawersRelations as a8, palaceHalls as a9, wikiArticles as aA, wikiArticlesRelations as aB, wikiLog as aC, wikiLogRelations as aD, wikiSources as aE, wikiSourcesRelations as aF, workstreams as aG, workstreamsRelations as aH, type ParsedTask as aI, type DAGNode as aJ, type TopologicalSortResult as aK, type ParsedWavePlan as aL, type ParsedEdge as aM, type ValidationResult as aN, type CriticalPathResult as aO, type WaveAssignmentResult as aP, type PlanScore as aQ, type GenerationResult as aR, type FleetContextBlock as aS, type CodebaseContextBlock as aT, type PromptContext as aU, type PlanCodeGraph as aV, type WaveAssignerConfig as aW, type WaveSSEEvent as aX, type ActiveTaskInfo as aY, type PredecessorSummary as aZ, type WaveDispatchRequest as a_, palaceKgTriples as aa, palaceRooms as ab, palaceRoomsRelations as ac, palaceTunnels as ad, palaceWings as ae, palaceWingsRelations as af, plans as ag, plansRelations as ah, rufloSessions as ai, rufloSessionsRelations as aj, runwaySamples as ak, scoreHistory as al, scoreHistoryRelations as am, scoreReadings as an, tasks as ao, tasksRelations as ap, touchedFiles as aq, touchedFilesRelations as ar, wavePlanMetrics as as, wavePlanMetricsRelations as at, wavePlans as au, wavePlansRelations as av, waveTasks as aw, waveTasksRelations as ax, waves as ay, wavesRelations as az, type ConflictingFile as b, BLAST_RADIUS_LISTED as b0, type BlastRadiusLine as b1, type CodeGraphReview as b2, type CompletedWorkBlock as b3, type ConfidenceSignalUpdate as b4, type ConstraintBlock as b5, type CriticalPathAnnotation as b6, type DependentClaim as b7, type GraphDependentsSource as b8, MAX_DEPENDENT_CLAIMS_PER_TASK as b9, type MemoryContextBlock as ba, type OptimizationResult as bb, type ParsedStatistics as bc, type ParsedWave as bd, type RemainingWorkBlock as be, type SelectedDependentClaims as bf, type SequencedLine as bg, type TaskBlastRadius as bh, type ValidationError as bi, type ValidationErrorCode as bj, type ValidationWarning as bk, type ValidationWarningCode as bl, type WaveAdjustment as bm, type WavePlanExecutionState as bn, type WavePlannerConfig as bo, assignWaves as bp, blastRadiusOf as bq, codeGraphOf as br, dependentClaimsOf as bs, describeCodeGraph as bt, isPlanCodeGraph as bu, readPlanCodeGraph as bv, selectDependentClaims as bw, withCodeGraph as bx, schema as by, type DatabaseConfig as c, type DependencyEdge as d, type NewCompletedTask as e, type NewConductorScore as f, type NewConflictingFile as g, type NewDependencyEdge as h, type NewHorizonItem as i, type NewInFlightFile as j, type NewPlan as k, type NewRufloSession as l, type NewRunwaySampleRow as m, type NewScoreHistory as n, type NewScoreReading as o, type NewTask as p, type NewTouchedFile as q, type NewWave as r, type NewWavePlan as s, type NewWavePlanMetric as t, type NewWaveTask as u, type NewWorkstream as v, type RunwaySampleRow as w, type ScoreHistory as x, type ScoreReading as y, type TouchedFile as z };

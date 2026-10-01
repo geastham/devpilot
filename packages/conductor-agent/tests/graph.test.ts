@@ -541,3 +541,88 @@ describe('conductor graph — adopting an existing plan', () => {
     expect(calls.persist).toBe(1);
   });
 });
+
+/**
+ * The plan a host persists is not always the plan the planner wrote.
+ *
+ * DevPilot's wave assigner recomputes the waves when it persists: two tasks the
+ * planner put side by side that claim the same file — or, with a code graph,
+ * where one's file depends on the other's — are moved apart, and the persisted
+ * plan then has MORE waves than `plan.waves`. A planner that spreads tasks over
+ * more waves than their dependencies need gives the opposite: fewer.
+ *
+ * The graph used to count `plan.waves` either way. With more persisted waves
+ * it reached `finish` early and told the host the run was complete, with the
+ * moved tasks never dispatched; with fewer it asked the host to dispatch a
+ * wave that did not exist. `persistPlan` can now say how many waves it wrote.
+ */
+describe('conductor graph — the persisted plan decides how many waves there are', () => {
+  function portsPersisting(plannedWaves: number, totalWaves: number | undefined) {
+    const stub = stubPorts({ waveCount: plannedWaves });
+    stub.ports.persistPlan = async () => {
+      stub.calls.persist++;
+      return totalWaves === undefined ? { wavePlanId: 'wp_test' } : { wavePlanId: 'wp_test', totalWaves };
+    };
+    return stub;
+  }
+
+  it('dispatches every wave the host persisted, when that is more than the planner wrote', async () => {
+    const { ports, calls, events } = portsPersisting(2, 3);
+    const graph = createConductorGraph({ ports, config: { requireReview: false } });
+
+    const result = await graph.invoke(input, thread('w1'));
+
+    expect(calls.dispatch).toEqual([0, 1, 2]);
+    expect(result.completedWaves).toEqual([0, 1, 2]);
+    expect(result.status).toBe('complete');
+    expect(events).toContainEqual({ type: 'run:complete', waves: 3 });
+    // Told once, after the last wave — not after the planner's last.
+    expect(calls.ended).toEqual([{ wavePlanId: 'wp_test', result: { status: 'complete' } }]);
+  });
+
+  it('does not dispatch a wave the host did not persist, when it wrote fewer', async () => {
+    const { ports, calls } = portsPersisting(3, 2);
+    const graph = createConductorGraph({ ports, config: { requireReview: false } });
+
+    const result = await graph.invoke(input, thread('w2'));
+
+    expect(calls.dispatch).toEqual([0, 1]);
+    expect(result.status).toBe('complete');
+  });
+
+  it('counts the planner’s waves, as before, for a host that does not say', async () => {
+    const { ports, calls, events } = portsPersisting(2, undefined);
+    const graph = createConductorGraph({ ports, config: { requireReview: false } });
+
+    await graph.invoke(input, thread('w3'));
+
+    expect(calls.dispatch).toEqual([0, 1]);
+    expect(events).toContainEqual({ type: 'run:complete', waves: 2 });
+  });
+
+  it('counts the supplied plan’s waves for an adopted plan, which is never persisted here', async () => {
+    const { ports, calls } = portsPersisting(1, 9);
+    const graph = createConductorGraph({ ports, config: { requireReview: false } });
+
+    await graph.invoke({ ...input, plan: planWith(2), wavePlanId: 'wp_existing' }, thread('w4'));
+
+    expect(calls.persist).toBe(0);
+    expect(calls.dispatch).toEqual([0, 1]);
+  });
+
+  it('keeps the count across the review interrupt and a checkpoint', async () => {
+    const { ports, calls } = portsPersisting(1, 2);
+    const graph = createConductorGraph({
+      ports,
+      config: { requireReview: true },
+      checkpointer: new MemorySaver(),
+    });
+    const cfg = thread('w5');
+
+    await graph.invoke(input, cfg);
+    const resumed = await graph.invoke(new Command({ resume: { action: 'approve' } }), cfg);
+
+    expect(calls.dispatch).toEqual([0, 1]);
+    expect(resumed.totalWaves).toBe(2);
+  });
+});

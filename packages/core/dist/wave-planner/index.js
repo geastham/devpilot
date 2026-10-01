@@ -30,9 +30,11 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/wave-planner/index.ts
 var wave_planner_exports = {};
 __export(wave_planner_exports, {
+  BLAST_RADIUS_LISTED: () => BLAST_RADIUS_LISTED,
   CodebaseContextService: () => CodebaseContextService,
   CompletionListener: () => CompletionListener,
   ConcurrencyManager: () => ConcurrencyManager,
+  DEFAULT_HISTORY_LIMIT: () => DEFAULT_HISTORY_LIMIT,
   DEFAULT_PLANNER_MODEL: () => DEFAULT_PLANNER_MODEL,
   DEFAULT_RECONCILE_INTERVAL_MS: () => DEFAULT_RECONCILE_INTERVAL_MS,
   DEFAULT_RECONCILE_STALL_MS: () => DEFAULT_RECONCILE_STALL_MS,
@@ -42,9 +44,12 @@ __export(wave_planner_exports, {
   ExecutionBridge: () => ExecutionBridge,
   FleetContextService: () => FleetContextService,
   IN_FLIGHT_WAVE_TASK_STATUSES: () => IN_FLIGHT_WAVE_TASK_STATUSES,
+  MAX_DEPENDENT_CLAIMS_PER_TASK: () => MAX_DEPENDENT_CLAIMS_PER_TASK,
+  MAX_HISTORY_LIMIT: () => MAX_HISTORY_LIMIT,
   MAX_ITEM_DESCRIPTION_CHARS: () => MAX_ITEM_DESCRIPTION_CHARS,
   PlanRefinementService: () => PlanRefinementService,
   PromptConstructor: () => PromptConstructor,
+  SUMMARY_MAX_CHARS: () => SUMMARY_MAX_CHARS,
   TERMINAL_WAVE_PLAN_STATUSES: () => TERMINAL_WAVE_PLAN_STATUSES,
   TERMINAL_WAVE_TASK_STATUSES: () => TERMINAL_WAVE_TASK_STATUSES,
   WaveDispatchCoordinator: () => WaveDispatchCoordinator,
@@ -52,8 +57,10 @@ __export(wave_planner_exports, {
   WavePlanGenerator: () => WavePlanGenerator,
   WavePlannerAIClient: () => WavePlannerAIClient,
   assignWaves: () => assignWaves,
+  blastRadiusOf: () => blastRadiusOf,
   buildDAGGraph: () => buildDAGGraph,
   buildSpecContentForItem: () => buildSpecContentForItem,
+  codeGraphOf: () => codeGraphOf,
   collectFinalMetrics: () => collectFinalMetrics,
   compareTaskCodes: () => compareTaskCodes,
   computeCriticalPath: () => computeCriticalPath,
@@ -63,6 +70,8 @@ __export(wave_planner_exports, {
   createPromptConstructor: () => createPromptConstructor,
   createWavePlanGenerator: () => createWavePlanGenerator,
   defaultTemplate: () => defaultTemplate,
+  dependentClaimsOf: () => dependentClaimsOf,
+  describeCodeGraph: () => describeCodeGraph,
   extractAllTaskCodes: () => extractAllTaskCodes,
   extractWaveFromTaskCode: () => extractWaveFromTaskCode,
   findCommonTheme: () => findCommonTheme,
@@ -79,6 +88,7 @@ __export(wave_planner_exports, {
   initExecutionBridge: () => initExecutionBridge,
   isDispatchableWaveTaskStatus: () => isDispatchableWaveTaskStatus,
   isInFlightWaveTaskStatus: () => isInFlightWaveTaskStatus,
+  isPlanCodeGraph: () => isPlanCodeGraph,
   isTerminalWavePlanStatus: () => isTerminalWavePlanStatus,
   isTerminalWaveTaskStatus: () => isTerminalWaveTaskStatus,
   isWaveOver: () => isWaveOver,
@@ -89,6 +99,7 @@ __export(wave_planner_exports, {
   parseFilePaths: () => parseFilePaths,
   parseWavePlanResponse: () => parseWavePlanResponse,
   projectWavePlanToPlan: () => projectWavePlanToPlan,
+  readPlanCodeGraph: () => readPlanCodeGraph,
   readWaveSignal: () => readWaveSignal,
   refinementTemplate: () => refinementTemplate,
   renderTicketDescription: () => renderTicketDescription,
@@ -97,13 +108,16 @@ __export(wave_planner_exports, {
   resolveWikiModel: () => resolveWikiModel,
   runIdFor: () => runIdFor,
   scorePlan: () => scorePlan,
+  selectDependentClaims: () => selectDependentClaims,
   simplifiedTemplate: () => simplifiedTemplate,
   sleep: () => sleep,
   toActivityEventType: () => toActivityEventType,
   topologicalSort: () => topologicalSort,
   validateDAG: () => validateDAG,
   waveSignalFor: () => waveSignalFor,
-  workFromReport: () => workFromReport
+  withCodeGraph: () => withCodeGraph,
+  workFromReport: () => workFromReport,
+  workHistoryForPaths: () => workHistoryForPaths
 });
 module.exports = __toCommonJS(wave_planner_exports);
 
@@ -764,6 +778,33 @@ function computeCriticalPath(tasks2, edges) {
 }
 
 // src/wave-planner/wave-assigner.ts
+var MAX_DEPENDENT_CLAIMS_PER_TASK = 25;
+function selectDependentClaims(ownFiles, claims, max = MAX_DEPENDENT_CLAIMS_PER_TASK) {
+  const own = new Set(ownFiles);
+  const byOwnFile = /* @__PURE__ */ new Map();
+  for (const claim of claims) {
+    if (!own.has(claim.dependsOn) || own.has(claim.file)) continue;
+    let dependents = byOwnFile.get(claim.dependsOn);
+    if (!dependents) byOwnFile.set(claim.dependsOn, dependents = /* @__PURE__ */ new Set());
+    dependents.add(claim.file);
+  }
+  const groups = [...byOwnFile.entries()].map(([file, dependents]) => ({ file, dependents: [...dependents].sort() })).sort((a, b) => a.dependents.length - b.dependents.length || compareStrings(a.file, b.file));
+  const selected = [];
+  const leftOut = [];
+  let full = false;
+  for (const group of groups) {
+    if (full || selected.length + group.dependents.length > max) {
+      full = true;
+      leftOut.push({ file: group.file, dependents: group.dependents.length });
+      continue;
+    }
+    for (const file of group.dependents) selected.push({ file, dependsOn: group.file });
+  }
+  return { claims: selected, leftOut };
+}
+function compareStrings(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
 function assignWaves(tasks2, edges, config) {
   if (tasks2.length === 0) {
     return {
@@ -784,7 +825,9 @@ function assignWaves(tasks2, edges, config) {
   const tasksByDepth = groupTasksByDepth(tasks2, depths);
   const { wavesAfterConflicts, conflictAdjustments } = resolveFileConflicts(
     tasksByDepth,
-    graph
+    graph,
+    config?.dependentClaims,
+    config?.maxDependentClaimsPerTask
   );
   const { finalWaves, capacityAdjustments } = applyCapacityConstraints(
     wavesAfterConflicts,
@@ -829,11 +872,12 @@ function groupTasksByDepth(tasks2, depths) {
   }
   return grouped;
 }
-function resolveFileConflicts(tasksByDepth, graph) {
+function resolveFileConflicts(tasksByDepth, graph, dependentClaims, maxDependentClaimsPerTask) {
   const adjustments = [];
   const result = /* @__PURE__ */ new Map();
   const claimedFilesByWave = /* @__PURE__ */ new Map();
   const waveByTaskCode = /* @__PURE__ */ new Map();
+  const dependencies = dependentClaims && Object.values(dependentClaims).some((claims) => claims.length > 0) ? new DependencyClaims(dependentClaims, maxDependentClaimsPerTask) : null;
   const depths = Array.from(tasksByDepth.keys()).sort((a, b) => a - b);
   for (const depth of depths) {
     const tasksAtDepth = tasksByDepth.get(depth) || [];
@@ -847,10 +891,13 @@ function resolveFileConflicts(tasksByDepth, graph) {
       }
       let wave = earliestWave;
       const conflictingFiles2 = [];
+      const dependencyConflicts = [];
+      const ownClaims = dependencies ? dependencies.claimsOf(task) : [];
       for (; ; ) {
         const claimedFiles2 = claimedFilesByWave.get(wave);
         const conflictsHere = claimedFiles2 ? task.filePaths.filter((file) => claimedFiles2.has(file)) : [];
-        if (conflictsHere.length === 0) {
+        const dependenciesHere = dependencies ? dependencies.conflictsIn(wave, task, ownClaims) : [];
+        if (conflictsHere.length === 0 && dependenciesHere.length === 0) {
           break;
         }
         for (const file of conflictsHere) {
@@ -858,16 +905,31 @@ function resolveFileConflicts(tasksByDepth, graph) {
             conflictingFiles2.push(file);
           }
         }
+        for (const sentence of dependenciesHere) {
+          if (!dependencyConflicts.includes(sentence)) {
+            dependencyConflicts.push(sentence);
+          }
+        }
         wave++;
       }
       if (wave !== earliestWave) {
-        adjustments.push({
-          type: "FILE_CONFLICT_BUMP",
-          taskCode: task.taskCode,
-          fromWave: earliestWave,
-          toWave: wave,
-          reason: `File conflict detected with files: ${conflictingFiles2.join(", ")}`
-        });
+        if (conflictingFiles2.length > 0) {
+          adjustments.push({
+            type: "FILE_CONFLICT_BUMP",
+            taskCode: task.taskCode,
+            fromWave: earliestWave,
+            toWave: wave,
+            reason: `File conflict detected with files: ${conflictingFiles2.join(", ")}` + (dependencyConflicts.length > 0 ? `; dependency conflict: ${dependencyConflicts.join("; ")}` : "")
+          });
+        } else {
+          adjustments.push({
+            type: "DEPENDENCY_CONFLICT_BUMP",
+            taskCode: task.taskCode,
+            fromWave: earliestWave,
+            toWave: wave,
+            reason: `Dependency conflict: ${dependencyConflicts.join("; ")}`
+          });
+        }
       }
       const tasksInWave = result.get(wave) || [];
       tasksInWave.push(task);
@@ -877,6 +939,9 @@ function resolveFileConflicts(tasksByDepth, graph) {
         claimedFiles.add(file);
       }
       claimedFilesByWave.set(wave, claimedFiles);
+      if (dependencies) {
+        dependencies.place(wave, task, ownClaims);
+      }
       waveByTaskCode.set(
         task.taskCode,
         Math.max(waveByTaskCode.get(task.taskCode) ?? 0, wave)
@@ -888,6 +953,68 @@ function resolveFileConflicts(tasksByDepth, graph) {
     conflictAdjustments: adjustments
   };
 }
+var DependencyClaims = class {
+  constructor(claims, max = MAX_DEPENDENT_CLAIMS_PER_TASK) {
+    this.claims = claims;
+    this.max = max;
+    this.ownerByWave = /* @__PURE__ */ new Map();
+    this.claimByWave = /* @__PURE__ */ new Map();
+  }
+  /**
+   * The claims this task brings, capped. Looked up by task code and then
+   * filtered to the row's own files, so two rows sharing a code (an invalid
+   * plan, which the assigner still has to survive) each get only the claims
+   * that are theirs.
+   */
+  claimsOf(task) {
+    const given = this.claims[task.taskCode];
+    if (!given || given.length === 0) return [];
+    return selectDependentClaims(task.filePaths, given, this.max).claims;
+  }
+  /**
+   * Why `task` may not join `wave`, one sentence per pair of files, or none.
+   * Each sentence names the file that depends, the file it depends on, and the
+   * task already in the wave — which is what a person reviewing the plan needs
+   * to check the claim against the code.
+   */
+  conflictsIn(wave, task, ownClaims) {
+    const sentences = [];
+    const claimed = this.claimByWave.get(wave);
+    if (claimed) {
+      for (const file of task.filePaths) {
+        const claim = claimed.get(file);
+        if (claim && claim.taskCode !== task.taskCode) {
+          sentences.push(`${file} depends on ${claim.dependsOn}, which task ${claim.taskCode} changes`);
+        }
+      }
+    }
+    const owners = this.ownerByWave.get(wave);
+    if (owners) {
+      for (const claim of ownClaims) {
+        const owner = owners.get(claim.file);
+        if (owner !== void 0 && owner !== task.taskCode) {
+          sentences.push(`${claim.file}, which task ${owner} changes, depends on ${claim.dependsOn}`);
+        }
+      }
+    }
+    return sentences;
+  }
+  /** Record a task's files and claims against the wave it was placed in. */
+  place(wave, task, ownClaims) {
+    let owners = this.ownerByWave.get(wave);
+    if (!owners) this.ownerByWave.set(wave, owners = /* @__PURE__ */ new Map());
+    for (const file of task.filePaths) {
+      if (!owners.has(file)) owners.set(file, task.taskCode);
+    }
+    let claimed = this.claimByWave.get(wave);
+    if (!claimed) this.claimByWave.set(wave, claimed = /* @__PURE__ */ new Map());
+    for (const claim of ownClaims) {
+      if (!claimed.has(claim.file)) {
+        claimed.set(claim.file, { taskCode: task.taskCode, dependsOn: claim.dependsOn });
+      }
+    }
+  }
+};
 function applyCapacityConstraints(tasksByDepth, maxTasksPerWave) {
   const adjustments = [];
   const waves2 = [];
@@ -1010,7 +1137,7 @@ function computeFileConflictScore(assignment, tasks2) {
     return 1;
   }
   const fileConflictAdjustments = assignment.adjustments.filter(
-    (adj) => adj.type === "FILE_CONFLICT_BUMP"
+    (adj) => adj.type === "FILE_CONFLICT_BUMP" || adj.type === "DEPENDENCY_CONFLICT_BUMP"
   ).length;
   const conflictRatio = fileConflictAdjustments / totalFileRefs;
   const score = Math.max(0, 1 - conflictRatio);
@@ -1037,6 +1164,149 @@ function computeConfidenceSignals(parallelizationScore, fileConflictScore) {
     parallelization,
     conflictRisk
   };
+}
+
+// src/orchestrator/ao-cli-adapter.ts
+var import_child_process = require("child_process");
+var import_util = require("util");
+var execAsync = (0, import_util.promisify)(import_child_process.exec);
+
+// src/orchestrator/claude-session-adapter.ts
+var INTEGRATE_TIMEOUT_MS = 5 * 6e4;
+
+// src/orchestrator/service.ts
+var globalForOrchestrator = globalThis;
+function getInstance() {
+  return globalForOrchestrator.__devpilotOrchestratorService ?? null;
+}
+function getOrchestratorServiceOrNull() {
+  return getInstance();
+}
+
+// src/wave-planner/plan-code-graph.ts
+var BLAST_RADIUS_LISTED = 25;
+async function readPlanCodeGraph(repo, tasks2, source = getOrchestratorServiceOrNull()) {
+  const files = [...new Set(tasks2.flatMap((task) => task.filePaths))];
+  if (files.length === 0) {
+    return { used: false, reason: "no task in the plan names a file, so there was nothing to look up" };
+  }
+  if (!source) {
+    return {
+      used: false,
+      reason: "no orchestrator is running in this process, so there is no session runner to read a code graph from"
+    };
+  }
+  let outcome;
+  try {
+    outcome = await source.graphDependents({ repo, files, depth: 1 });
+  } catch (error) {
+    return {
+      used: false,
+      reason: `the code graph could not be read (${error instanceof Error ? error.message : String(error)})`
+    };
+  }
+  if (!outcome.available) {
+    return { used: false, reason: outcome.reason };
+  }
+  return {
+    used: true,
+    indexedAt: outcome.indexedAt,
+    truncated: outcome.truncated,
+    tasks: tasks2.map((task) => blastRadiusOf(task, outcome.byFile))
+  };
+}
+function blastRadiusOf(task, dependentsByFile, maxClaims = MAX_DEPENDENT_CLAIMS_PER_TASK) {
+  const own = new Set(task.filePaths);
+  const all = /* @__PURE__ */ new Set();
+  const claims = [];
+  for (const dependsOn of own) {
+    for (const file of dependentsByFile[dependsOn] ?? []) {
+      if (own.has(file)) continue;
+      all.add(file);
+      claims.push({ file, dependsOn });
+    }
+  }
+  const selected = selectDependentClaims(task.filePaths, claims, maxClaims);
+  return {
+    taskCode: task.taskCode,
+    dependentCount: all.size,
+    dependents: [...all].sort().slice(0, BLAST_RADIUS_LISTED),
+    claims: selected.claims,
+    leftOut: selected.leftOut
+  };
+}
+function dependentClaimsOf(codeGraph) {
+  if (!codeGraph?.used || !codeGraph.tasks) return void 0;
+  const out = {};
+  let any = false;
+  for (const task of codeGraph.tasks) {
+    if (task.claims.length === 0) continue;
+    out[task.taskCode] = [...out[task.taskCode] ?? [], ...task.claims];
+    any = true;
+  }
+  return any ? out : void 0;
+}
+function withCodeGraph(plan, codeGraph) {
+  return { ...plan, codeGraph };
+}
+function codeGraphOf(plan) {
+  const value = plan?.codeGraph;
+  return isPlanCodeGraph(value) ? value : null;
+}
+function isPlanCodeGraph(value) {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value;
+  if (typeof candidate.used !== "boolean") return false;
+  if (!candidate.used) return typeof candidate.reason === "string";
+  return Array.isArray(candidate.tasks) && candidate.tasks.every(
+    (task) => task !== null && typeof task === "object" && typeof task.taskCode === "string" && typeof task.dependentCount === "number" && Array.isArray(task.dependents) && Array.isArray(task.claims) && task.claims.every((c) => c && typeof c.file === "string" && typeof c.dependsOn === "string") && Array.isArray(task.leftOut)
+  );
+}
+function describeCodeGraph(codeGraph, adjustments) {
+  if (!codeGraph.used) {
+    return {
+      used: false,
+      reason: codeGraph.reason ?? "no reason was recorded",
+      indexedAt: null,
+      truncated: false,
+      tasks: [],
+      sequenced: []
+    };
+  }
+  const truncated = codeGraph.truncated === true;
+  return {
+    used: true,
+    reason: null,
+    indexedAt: codeGraph.indexedAt ?? null,
+    truncated,
+    tasks: (codeGraph.tasks ?? []).map((task) => ({
+      taskCode: task.taskCode,
+      dependentCount: task.dependentCount,
+      dependents: task.dependents,
+      more: Math.max(0, task.dependentCount - task.dependents.length),
+      summary: blastRadiusSummary(task.dependentCount, truncated),
+      notSequencedOn: task.leftOut.map(
+        (left) => `${left.file} has ${left.dependents} dependent${left.dependents === 1 ? "" : "s"} \u2014 too many to keep other tasks apart on`
+      )
+    })),
+    sequenced: (adjustments ?? []).filter((adjustment) => adjustment.type === "DEPENDENCY_CONFLICT_BUMP").map((adjustment) => {
+      const wavesLater = adjustment.toWave - adjustment.fromWave;
+      return {
+        taskCode: adjustment.taskCode,
+        wavesLater,
+        because: `Task ${adjustment.taskCode} runs ${wavesLater} wave${wavesLater === 1 ? "" : "s"} later than its dependencies alone would put it: ${sentenceBody(adjustment.reason)}.`
+      };
+    })
+  };
+}
+function blastRadiusSummary(count, lowerBound) {
+  if (count === 0) {
+    return lowerBound ? "No file was found that depends on what this changes (some lists were cut short)" : "No indexed file depends on what this changes";
+  }
+  return `${lowerBound ? "At least " : ""}${count} file${count === 1 ? "" : "s"} depend${count === 1 ? "s" : ""} on what this changes`;
+}
+function sentenceBody(reason) {
+  return reason.replace(/^Dependency conflict:\s*/, "");
 }
 
 // src/wave-planner/models.ts
@@ -1728,6 +1998,33 @@ var wavePlans = (0, import_sqlite_core5.sqliteTable)("wave_plans", {
    */
   runBranch: (0, import_sqlite_core5.text)("run_branch"),
   runHeadSha: (0, import_sqlite_core5.text)("run_head_sha"),
+  /**
+   * What the wave assigner changed about the planner's layout, and why: each
+   * task it moved for a shared file, for a dependency between two tasks' files,
+   * or to fit the fleet's capacity, with a sentence of reason.
+   *
+   * Until this column the assigner's adjustments were computed, counted into
+   * `wave_plan_metrics.file_conflicts_avoided`, and thrown away — so a plan
+   * review could show THAT two tasks had been sequenced and never why.
+   *
+   * NULL is "not recorded": the plan predates the column. That is not `[]`,
+   * which is an assignment that moved nothing.
+   */
+  adjustments: (0, import_sqlite_core5.text)("adjustments", { mode: "json" }).$type(),
+  /**
+   * Whether this plan's waves were assigned with a code graph, and what the
+   * graph said about each task: how many files depend on what it changes, the
+   * first of them, and the claims the assigner sequenced on (TRD 27 §5.1,
+   * §5.3). When the graph was not used, the reason it was not.
+   *
+   * A snapshot from when the plan was made, of an index that goes stale as the
+   * code changes; `indexedAt` inside it says how old the index was then.
+   *
+   * NULL is "not asked": the plan predates the column, or was written by a
+   * caller that does not ask. Such a plan was assigned from its tasks' own
+   * files alone, exactly as every plan was before.
+   */
+  codeGraph: (0, import_sqlite_core5.text)("code_graph", { mode: "json" }).$type(),
   startedAt: (0, import_sqlite_core5.integer)("started_at", { mode: "timestamp" }),
   completedAt: (0, import_sqlite_core5.integer)("completed_at", { mode: "timestamp" }),
   createdAt: (0, import_sqlite_core5.integer)("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date()),
@@ -2327,6 +2624,8 @@ CREATE TABLE IF NOT EXISTS wave_plans (
   isolation_note TEXT,
   run_branch TEXT,
   run_head_sha TEXT,
+  adjustments TEXT,
+  code_graph TEXT,
   started_at INTEGER,
   completed_at INTEGER,
   created_at INTEGER NOT NULL,
@@ -2458,6 +2757,8 @@ function createSQLiteAdapter(path) {
   ensureColumn(sqliteConnection, "wave_tasks", "commit_sha", "commit_sha TEXT");
   ensureColumn(sqliteConnection, "wave_tasks", "files_changed", "files_changed TEXT");
   ensureColumn(sqliteConnection, "wave_tasks", "merged_at", "merged_at INTEGER");
+  ensureColumn(sqliteConnection, "wave_plans", "adjustments", "adjustments TEXT");
+  ensureColumn(sqliteConnection, "wave_plans", "code_graph", "code_graph TEXT");
   sqliteDb = (0, import_better_sqlite32.drizzle)(sqliteConnection, { schema: schema_exports });
   return sqliteDb;
 }
@@ -2573,9 +2874,9 @@ var FleetContextService = class {
 // src/wave-planner/codebase-context.ts
 var import_fs2 = require("fs");
 var import_path2 = require("path");
-var import_child_process = require("child_process");
-var import_util = require("util");
-var execAsync = (0, import_util.promisify)(import_child_process.exec);
+var import_child_process2 = require("child_process");
+var import_util2 = require("util");
+var execAsync2 = (0, import_util2.promisify)(import_child_process2.exec);
 var CodebaseContextService = class {
   /**
    * Assemble codebase context for a repository
@@ -2652,7 +2953,7 @@ var CodebaseContextService = class {
    */
   async getRecentlyModifiedFiles(dir, limit = 20) {
     try {
-      const { stdout } = await execAsync(
+      const { stdout } = await execAsync2(
         `git -C "${dir}" log --pretty=format: --name-only --since="1 week ago" | sort | uniq`,
         { maxBuffer: 1024 * 1024 }
       );
@@ -3865,7 +4166,12 @@ var WavePlanGenerator = class {
       const allTasks = refinementResult.plan.waves.flatMap((w) => w.tasks);
       const edges = refinementResult.plan.dependencyEdges;
       const criticalPath = computeCriticalPath(allTasks, edges);
-      const waveAssignment = assignWaves(allTasks, edges, this.config.waveAssigner);
+      const codeGraph = await readPlanCodeGraph(repo, allTasks);
+      const dependentClaims = dependentClaimsOf(codeGraph);
+      const waveAssignment = assignWaves(allTasks, edges, {
+        ...this.config.waveAssigner,
+        ...dependentClaims ? { dependentClaims } : {}
+      });
       let wavePlanId;
       if (this.config.autoPersist !== false) {
         wavePlanId = await this.persistWavePlan(
@@ -3874,7 +4180,8 @@ var WavePlanGenerator = class {
           refinementResult.plan,
           criticalPath,
           waveAssignment,
-          refinementResult.score
+          refinementResult.score,
+          codeGraph
         );
       }
       const generationDurationMs = Date.now() - startTime;
@@ -3884,6 +4191,7 @@ var WavePlanGenerator = class {
         criticalPath,
         waveAssignment,
         score: refinementResult.score,
+        codeGraph,
         metrics: {
           totalTokensUsed: refinementResult.totalTokensUsed,
           refinementIterations: refinementResult.iterationsPerformed,
@@ -3942,6 +4250,10 @@ var WavePlanGenerator = class {
         wavePlan.dependencyEdges,
         allTasks
       );
+      const codeGraph = {
+        used: false,
+        reason: "the planner failed and this is the flat fallback plan \u2014 one wave, no files named \u2014 which is not passed through the wave assigner"
+      };
       let wavePlanId;
       if (this.config.autoPersist !== false) {
         wavePlanId = await this.persistWavePlan(
@@ -3950,7 +4262,8 @@ var WavePlanGenerator = class {
           wavePlan,
           criticalPath,
           waveAssignment,
-          score
+          score,
+          codeGraph
         );
       }
       return {
@@ -3959,6 +4272,7 @@ var WavePlanGenerator = class {
         criticalPath,
         waveAssignment,
         score,
+        codeGraph,
         success: false
       };
     } catch {
@@ -3972,8 +4286,13 @@ var WavePlanGenerator = class {
    * Public so the conductor graph can persist an approved plan as its own node.
    * The graph decides *when* a plan is approved (after a human interrupt); the
    * write itself is unchanged and still versions against prior plans.
+   *
+   * `codeGraph` is what a code graph said when `waveAssignment` was made — or
+   * that it was not used, and why. Optional for the callers that predate it;
+   * left out, the plan row records that nobody asked (NULL), which is the
+   * truth. The assignment's adjustments are recorded either way.
    */
-  async persistWavePlan(horizonItemId, planId, wavePlan, criticalPath, waveAssignment, score) {
+  async persistWavePlan(horizonItemId, planId, wavePlan, criticalPath, waveAssignment, score, codeGraph) {
     const db2 = getDatabase();
     const existingPlans = await db2.select().from(wavePlans).where((0, import_drizzle_orm8.eq)(wavePlans.horizonItemId, horizonItemId)).orderBy(wavePlans.version);
     const version = existingPlans.length > 0 ? existingPlans[existingPlans.length - 1].version + 1 : 1;
@@ -3991,7 +4310,9 @@ var WavePlanGenerator = class {
       currentWaveIndex: 0,
       version,
       previousWavePlanId,
-      rawMarkdown: wavePlan.rawMarkdown
+      rawMarkdown: wavePlan.rawMarkdown,
+      adjustments: waveAssignment.adjustments,
+      codeGraph: codeGraph ?? null
     }).returning();
     const wavePlanId = insertedWavePlan.id;
     for (const wave of waveAssignment.waves) {
@@ -4036,6 +4357,11 @@ var WavePlanGenerator = class {
       tasksCompleted: 0,
       tasksFailed: 0,
       tasksRetried: 0,
+      // Shared-file bumps only, as the column's name says. A
+      // DEPENDENCY_CONFLICT_BUMP is a predicted conflict, from an index that
+      // can be wrong; counting it here would report a prediction as a conflict
+      // avoided. Those rows are kept, with their reasons, in
+      // `wave_plans.adjustments`.
       fileConflictsAvoided: waveAssignment.adjustments.filter(
         (a) => a.type === "FILE_CONFLICT_BUMP"
       ).length,
@@ -4329,6 +4655,84 @@ async function projectWavePlanToPlan(params) {
     confidenceSignals
   }).where((0, import_drizzle_orm9.eq)(plans.id, planId));
   return { planId, workstreamIds, taskIds };
+}
+
+// src/wave-planner/work-history.ts
+var DEFAULT_HISTORY_LIMIT = 5;
+var MAX_HISTORY_LIMIT = 20;
+var SUMMARY_MAX_CHARS = 400;
+var ERROR_MAX_CHARS = 300;
+function workHistoryForPaths(rows, paths, opts = {}) {
+  const limit = clampLimit(opts.limit);
+  const started = rows.map((row) => ({ row, at: row.completedAt ?? row.lastAttemptAt ?? row.startedAt })).filter((entry) => entry.row.startedAt !== null && entry.at !== null).sort((a, b) => b.at - a.at || compare(a.row.taskCode, b.row.taskCode) || compare(a.row.wavePlanId, b.row.wavePlanId));
+  const byPath = {};
+  const totals = {};
+  for (const path of paths) {
+    const wanted = normalizePath(path);
+    const entries = [];
+    let total = 0;
+    for (const { row, at } of started) {
+      const matchedOn = matchOf(row, wanted);
+      if (!matchedOn) continue;
+      total++;
+      if (entries.length < limit) entries.push(entryOf(row, at, matchedOn));
+    }
+    byPath[path] = entries;
+    totals[path] = total;
+  }
+  return { byPath, totals };
+}
+function matchOf(row, path) {
+  if (row.filesChanged !== null) {
+    return row.filesChanged.some((file) => normalizePath(file) === path) ? "changed" : null;
+  }
+  return row.filePaths.some((file) => normalizePath(file) === path) ? "planned" : null;
+}
+function entryOf(row, at, matchedOn) {
+  const summary = row.completionSummary?.trim() || null;
+  const error = row.errorMessage?.trim() || null;
+  return {
+    taskCode: row.taskCode,
+    task: row.label,
+    item: row.itemTitle,
+    ticketId: row.ticketId,
+    wavePlanId: row.wavePlanId,
+    status: row.status,
+    at: new Date(at).toISOString(),
+    matchedOn,
+    retried: row.retryCount > 0,
+    attempts: row.retryCount + 1,
+    error: error ? cut(error, ERROR_MAX_CHARS) : null,
+    // The controller's own wording for a branch that did not merge; see
+    // `integrateWave` in execution/controller.ts.
+    conflicted: error !== null && error.startsWith("merge conflict"),
+    summary: summary ? cut(summary, SUMMARY_MAX_CHARS) : null,
+    summaryTruncated: summary !== null && summary.length > SUMMARY_MAX_CHARS,
+    costUsd: finalCostOf(row.session)
+  };
+}
+function finalCostOf(session) {
+  if (!session || !session.terminal) return null;
+  const cents = session.reportedCostCents;
+  if (cents === null || !Number.isFinite(cents)) return null;
+  const reading = session.telemetryCostUsd;
+  if (reading !== null && Number.isFinite(reading) && Math.round(reading * 100) === cents) {
+    return reading;
+  }
+  return cents / 100;
+}
+function cut(text8, max) {
+  return text8.length > max ? `${text8.slice(0, max - 1).trimEnd()}\u2026` : text8;
+}
+function clampLimit(limit) {
+  if (typeof limit !== "number" || !Number.isFinite(limit)) return DEFAULT_HISTORY_LIMIT;
+  return Math.min(MAX_HISTORY_LIMIT, Math.max(1, Math.floor(limit)));
+}
+function normalizePath(path) {
+  return path.trim().replace(/\\/g, "/").replace(/^(\.\/)+/, "");
+}
+function compare(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 // src/wave-planner/execution/types.ts
@@ -4787,15 +5191,8 @@ async function collectFinalMetrics(wavePlanId) {
 // src/wave-planner/execution/controller.ts
 var import_drizzle_orm14 = require("drizzle-orm");
 
-// src/orchestrator/ao-cli-adapter.ts
-var import_child_process2 = require("child_process");
-var import_util2 = require("util");
-var execAsync2 = (0, import_util2.promisify)(import_child_process2.exec);
-
-// src/orchestrator/claude-session-adapter.ts
-var INTEGRATE_TIMEOUT_MS = 5 * 6e4;
-
 // src/orchestrator/session-prompt.ts
+var MAX_REACHED_TESTS_LISTED = 10;
 function sessionReportingForMode(mode) {
   return mode === "claude-session" ? "runner" : "agent";
 }
@@ -4811,7 +5208,9 @@ function buildSessionPrompt(input) {
     sessionId,
     reporting = "agent",
     goal,
-    predecessorsMerged = false
+    predecessorsMerged = false,
+    reachedTests,
+    reachedTestsTruncated = false
   } = input;
   const sections = [];
   sections.push(`# Task
@@ -4837,6 +5236,10 @@ These files are this task's scope. Other tasks running at the same time have bee
 
 ` + fileScope.map((f) => `- \`${f}\``).join("\n")
     );
+  }
+  const reached = reachedTestsSection(reachedTests, reachedTestsTruncated);
+  if (reached) {
+    sections.push(reached);
   }
   if (predecessorContext.length > 0) {
     const blocks = predecessorContext.map((p) => {
@@ -4877,6 +5280,25 @@ ${blocks}`
     reporting === "runner" ? finishingSection(sessionId) : reportingProtocolSection(callbackUrl, sessionId)
   );
   return sections.join("\n\n");
+}
+function reachedTestsSection(tests, truncated) {
+  if (!tests || tests.length === 0) return null;
+  const usable = tests.filter(
+    (path) => path.length > 0 && path.length <= 300 && !/[`\u0000-\u001f\u007f]/.test(path)
+  );
+  if (usable.length === 0) return null;
+  const listed = usable.slice(0, MAX_REACHED_TESTS_LISTED);
+  const unlisted = usable.length - listed.length;
+  const more = unlisted > 0 ? `
+
+\u2026and ${truncated ? "at least " : ""}${unlisted} more not listed.` : truncated ? `
+
+\u2026and more not listed.` : "";
+  return `# Tests Reached From Your Files
+
+These test files are reached from the files in your scope: they use them, directly or through other files, according to an index of the repository's code. This is information about where a change here can show up \u2014 it is not a list of tests you are being asked to run or to make pass. The index can be wrong in both directions, so a file here may not depend on yours, and one that does may be missing:
+
+` + listed.map((path) => `- \`${path}\``).join("\n") + more;
 }
 function finishingSection(sessionId) {
   return `# When You Finish
@@ -4930,15 +5352,6 @@ curl -sS -X POST '${completeUrl}' \\
 \`\`\`
 
 Replace \`<callback-token>\` with the token provided by your runner. Send the completion callback even if the task failed \u2014 set \`"success": false\` and include an \`"error"\` field describing what went wrong.`;
-}
-
-// src/orchestrator/service.ts
-var globalForOrchestrator = globalThis;
-function getInstance() {
-  return globalForOrchestrator.__devpilotOrchestratorService ?? null;
-}
-function getOrchestratorServiceOrNull() {
-  return getInstance();
 }
 
 // src/orchestrator/host-wiring.ts
@@ -6115,6 +6528,7 @@ var WaveDispatchCoordinator = class {
         `ISOLATION_UNAVAILABLE: this run gives each task its own branch, and the orchestrator is now in '${service.mode}' mode, which cannot`
       );
     }
+    const reached = await this.reachedTests(service, ctx.repo, request.fileScope);
     const [session] = await this.db.insert(rufloSessions).values({
       repo: ctx.repo,
       linearTicketId: ctx.linearTicketId ?? `DP-${task.taskCode}-${Date.now()}`,
@@ -6151,7 +6565,11 @@ var WaveDispatchCoordinator = class {
       // True only when it is: the plan is isolated and every predecessor
       // listed has been merged, so the worktree this task is given was cut
       // from a branch that contains them.
-      predecessorsMerged: ctx.run.isolated && request.predecessorContext.length > 0 && request.predecessorContext.every((p) => p.merged === true)
+      predecessorsMerged: ctx.run.isolated && request.predecessorContext.length > 0 && request.predecessorContext.every((p) => p.merged === true),
+      // Present only when there is a list with something in it. Spread rather
+      // than passed as undefined so that, without a code graph, the input —
+      // and the prompt — are what they were.
+      ...reached ? { reachedTests: reached.tests, reachedTestsTruncated: reached.truncated } : {}
     });
     const dispatchReq = {
       sessionId: session.id,
@@ -6201,6 +6619,37 @@ var WaveDispatchCoordinator = class {
       externalJobId: response.orchestratorJobId ?? "",
       mode: service.mode
     };
+  }
+  /**
+   * The test files reached from a task's files, or null when there is nothing
+   * to tell the worker: the task names no files, there is no code graph to
+   * ask, or it found none.
+   *
+   * Asked of the runner, like the plan's dependents, because the index lives
+   * in the checkout and only the runner knows where that is. The request
+   * names the repository and nothing about the task's run, so the answer
+   * cannot come from an isolated task's own worktree: it describes the
+   * repository as it was last indexed, not the run branch the task's checkout
+   * is cut from. That is one more reason the prompt presents the list as
+   * information.
+   *
+   * Never throws and never fails a dispatch. "Unavailable" is not logged or
+   * recorded per task: it is the normal state of a repository with no index,
+   * and the plan already says whether a graph was there when it was made.
+   */
+  async reachedTests(service, repo, files) {
+    if (files.length === 0) {
+      return null;
+    }
+    try {
+      const outcome = await service.graphAffectedTests({ repo, files });
+      if (!outcome.available || outcome.tests.length === 0) {
+        return null;
+      }
+      return { tests: outcome.tests, truncated: outcome.truncated };
+    } catch {
+      return null;
+    }
   }
   /**
    * Map database model enum to dispatch model format
@@ -6738,9 +7187,11 @@ function getExecutionBridgeOrNull() {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  BLAST_RADIUS_LISTED,
   CodebaseContextService,
   CompletionListener,
   ConcurrencyManager,
+  DEFAULT_HISTORY_LIMIT,
   DEFAULT_PLANNER_MODEL,
   DEFAULT_RECONCILE_INTERVAL_MS,
   DEFAULT_RECONCILE_STALL_MS,
@@ -6750,9 +7201,12 @@ function getExecutionBridgeOrNull() {
   ExecutionBridge,
   FleetContextService,
   IN_FLIGHT_WAVE_TASK_STATUSES,
+  MAX_DEPENDENT_CLAIMS_PER_TASK,
+  MAX_HISTORY_LIMIT,
   MAX_ITEM_DESCRIPTION_CHARS,
   PlanRefinementService,
   PromptConstructor,
+  SUMMARY_MAX_CHARS,
   TERMINAL_WAVE_PLAN_STATUSES,
   TERMINAL_WAVE_TASK_STATUSES,
   WaveDispatchCoordinator,
@@ -6760,8 +7214,10 @@ function getExecutionBridgeOrNull() {
   WavePlanGenerator,
   WavePlannerAIClient,
   assignWaves,
+  blastRadiusOf,
   buildDAGGraph,
   buildSpecContentForItem,
+  codeGraphOf,
   collectFinalMetrics,
   compareTaskCodes,
   computeCriticalPath,
@@ -6771,6 +7227,8 @@ function getExecutionBridgeOrNull() {
   createPromptConstructor,
   createWavePlanGenerator,
   defaultTemplate,
+  dependentClaimsOf,
+  describeCodeGraph,
   extractAllTaskCodes,
   extractWaveFromTaskCode,
   findCommonTheme,
@@ -6787,6 +7245,7 @@ function getExecutionBridgeOrNull() {
   initExecutionBridge,
   isDispatchableWaveTaskStatus,
   isInFlightWaveTaskStatus,
+  isPlanCodeGraph,
   isTerminalWavePlanStatus,
   isTerminalWaveTaskStatus,
   isWaveOver,
@@ -6797,6 +7256,7 @@ function getExecutionBridgeOrNull() {
   parseFilePaths,
   parseWavePlanResponse,
   projectWavePlanToPlan,
+  readPlanCodeGraph,
   readWaveSignal,
   refinementTemplate,
   renderTicketDescription,
@@ -6805,12 +7265,15 @@ function getExecutionBridgeOrNull() {
   resolveWikiModel,
   runIdFor,
   scorePlan,
+  selectDependentClaims,
   simplifiedTemplate,
   sleep,
   toActivityEventType,
   topologicalSort,
   validateDAG,
   waveSignalFor,
-  workFromReport
+  withCodeGraph,
+  workFromReport,
+  workHistoryForPaths
 });
 //# sourceMappingURL=index.js.map

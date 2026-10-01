@@ -52,6 +52,22 @@ for it explicitly and it is returned, with a note of what that cost.
 | `devpilot_session_wait` | Block until someone else posts, or a timeout passes |
 | `devpilot_session_post` | Append a message, encrypted locally |
 | `devpilot_session_who` | List participants |
+| `devpilot_history` | What earlier DevPilot tasks did to the files you name — see below |
+
+### Work history
+
+`devpilot_history({ paths })` asks the DevPilot cockpit **on this machine**
+(`DEVPILOT_COCKPIT_URL`, default `http://127.0.0.1:3847`) which tasks last
+changed those files, whether they failed or collided on merge, and what their
+agents reported. It has nothing to do with a shared session and sends nothing
+to the relay. The repository comes from `DEVPILOT_REPO` (set by the session
+runner) or the `repo` argument.
+
+What it returns includes text written by earlier agents. It is presented as
+notes inside a delimited block and described as not being instructions.
+
+`DEVPILOT_MCP_TOOLS=session` or `=history` limits the server to one group, so an
+agent given only one does not carry the other's tool schemas in its context.
 
 ## The agent decides when to look
 

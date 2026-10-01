@@ -32,6 +32,7 @@ import {
   type UsageTotals,
   type UsageMeterState,
 } from '../../utils/usage-meter.js';
+import type { WindowReading, WindowState } from '../../utils/statusline-store.js';
 
 /** One decoded line from the stream. Shapes are Claude Code's, not ours. */
 interface StreamEvent {
@@ -52,6 +53,11 @@ interface StreamEvent {
   num_turns?: number;
   duration_ms?: number;
   usage?: TokenUsage;
+  /** On `rate_limit_event`: the account's subscription windows as of this response. */
+  session_id?: string;
+  rate_limit_info?: {
+    unifiedWindows?: Record<string, { utilization?: number; resetsAt?: number } | undefined>;
+  };
   /** On the final `result` only: the run's usage, split by the model that used it. */
   modelUsage?: Record<
     string,
@@ -228,8 +234,40 @@ export class TelemetryCollector {
     this.ingest(event);
   }
 
+  /**
+   * The account's subscription windows, as the stream last reported them, with
+   * what this run had cost by then — in the shape `devpilot statusline`
+   * records for sessions a person runs by hand.
+   *
+   * A dispatched agent has no status line, but it spends the same windows. If
+   * its readings were not in the log, the points it moved would be shared out
+   * among whichever hand-run sessions happened to be open. Null until the
+   * stream has reported a window and named the session.
+   */
+  windowReading(): WindowReading | null {
+    if (!this.claudeSessionId || (!this.windows.five && !this.windows.seven)) return null;
+    return { t: this.now(), s: this.claudeSessionId, c: this.costUsd, ...this.windows };
+  }
+
+  private claudeSessionId: string | null = null;
+  private windows: { five?: WindowState; seven?: WindowState } = {};
+
   ingest(event: StreamEvent): void {
     this.lastEventAt = this.now();
+
+    if (typeof event.session_id === 'string') this.claudeSessionId = event.session_id;
+    if (event.type === 'rate_limit_event') {
+      const read = (w: { utilization?: number; resetsAt?: number } | undefined): WindowState | undefined =>
+        w && typeof w.utilization === 'number' && typeof w.resetsAt === 'number'
+          ? // The stream reports a fraction; the status line reports a percentage.
+            { used: Math.max(0, Math.min(100, w.utilization * 100)), resetsAt: w.resetsAt }
+          : undefined;
+      const windows = event.rate_limit_info?.unifiedWindows;
+      const five = read(windows?.five_hour);
+      const seven = read(windows?.seven_day);
+      if (five) this.windows.five = five;
+      if (seven) this.windows.seven = seven;
+    }
 
     if (event.type === 'assistant') {
       // Each turn prices itself, so the dial moves during the run instead of

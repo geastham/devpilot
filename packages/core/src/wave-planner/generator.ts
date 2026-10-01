@@ -23,6 +23,7 @@ import { assignWaves, WaveAssignerConfig } from './wave-assigner';
 import { scorePlan } from './plan-scorer';
 import { validateDAG } from './dag-validator';
 import { createFlatPlan, createFlatPlanFromDescriptions } from './fallback';
+import { dependentClaimsOf, readPlanCodeGraph, type PlanCodeGraph } from './plan-code-graph';
 import { eq } from 'drizzle-orm';
 
 // ============================================================================
@@ -55,6 +56,11 @@ export interface WavePlanGenerationResult {
   waveAssignment: WaveAssignmentResult;
   /** Plan quality score */
   score: PlanScore;
+  /**
+   * Whether the waves were assigned with a code graph — and when they were
+   * not, why not. Always present: a plan made without the graph says so.
+   */
+  codeGraph: PlanCodeGraph;
   /** Generation metrics */
   metrics: {
     totalTokensUsed: number;
@@ -132,8 +138,25 @@ export class WavePlanGenerator {
       // Step 3: Compute critical path
       const criticalPath = computeCriticalPath(allTasks, edges);
 
-      // Step 4: Assign waves with configuration
-      const waveAssignment = assignWaves(allTasks, edges, this.config.waveAssigner);
+      // Step 4: Assign waves with configuration.
+      //
+      // Asked once, for the whole plan, of whatever runs the sessions: which
+      // files depend on the files these tasks change. When there is an answer
+      // the assigner also keeps apart two tasks where one changes a file the
+      // other's file uses. When there is not — no runner, no index, no reply
+      // in time — `dependentClaims` is left off and this is the assignment it
+      // always was; `codeGraph.reason` then says which of those it was.
+      //
+      // `refinementResult.score` is NOT recomputed from this assignment. The
+      // score the refinement loop gated on is the critical path over the task
+      // count, which a bump does not change, and it is deliberately computed
+      // without anything that needs a network.
+      const codeGraph = await readPlanCodeGraph(repo, allTasks);
+      const dependentClaims = dependentClaimsOf(codeGraph);
+      const waveAssignment = assignWaves(allTasks, edges, {
+        ...this.config.waveAssigner,
+        ...(dependentClaims ? { dependentClaims } : {}),
+      });
 
       // Step 5: Persist to database if enabled
       let wavePlanId: string | undefined;
@@ -144,7 +167,8 @@ export class WavePlanGenerator {
           refinementResult.plan,
           criticalPath,
           waveAssignment,
-          refinementResult.score
+          refinementResult.score,
+          codeGraph
         );
       }
 
@@ -156,6 +180,7 @@ export class WavePlanGenerator {
         criticalPath,
         waveAssignment,
         score: refinementResult.score,
+        codeGraph,
         metrics: {
           totalTokensUsed: refinementResult.totalTokensUsed,
           refinementIterations: refinementResult.iterationsPerformed,
@@ -234,6 +259,16 @@ export class WavePlanGenerator {
         allTasks
       );
 
+      // The fallback is one wave written by hand above; it never goes through
+      // the wave assigner, so there is nothing for a code graph to inform. Its
+      // tasks are bare descriptions with no files to look up in any case.
+      const codeGraph: PlanCodeGraph = {
+        used: false,
+        reason:
+          'the planner failed and this is the flat fallback plan — one wave, no files named — ' +
+          'which is not passed through the wave assigner',
+      };
+
       // Persist if enabled
       let wavePlanId: string | undefined;
       if (this.config.autoPersist !== false) {
@@ -243,7 +278,8 @@ export class WavePlanGenerator {
           wavePlan,
           criticalPath,
           waveAssignment,
-          score
+          score,
+          codeGraph
         );
       }
 
@@ -253,6 +289,7 @@ export class WavePlanGenerator {
         criticalPath,
         waveAssignment,
         score,
+        codeGraph,
         success: false,
       };
     } catch {
@@ -267,6 +304,11 @@ export class WavePlanGenerator {
    * Public so the conductor graph can persist an approved plan as its own node.
    * The graph decides *when* a plan is approved (after a human interrupt); the
    * write itself is unchanged and still versions against prior plans.
+   *
+   * `codeGraph` is what a code graph said when `waveAssignment` was made — or
+   * that it was not used, and why. Optional for the callers that predate it;
+   * left out, the plan row records that nobody asked (NULL), which is the
+   * truth. The assignment's adjustments are recorded either way.
    */
   async persistWavePlan(
     horizonItemId: string,
@@ -274,7 +316,8 @@ export class WavePlanGenerator {
     wavePlan: ParsedWavePlan,
     criticalPath: CriticalPathResult,
     waveAssignment: WaveAssignmentResult,
-    score: PlanScore
+    score: PlanScore,
+    codeGraph?: PlanCodeGraph
   ): Promise<string> {
     const db = getDatabase();
 
@@ -310,6 +353,8 @@ export class WavePlanGenerator {
         version,
         previousWavePlanId,
         rawMarkdown: wavePlan.rawMarkdown,
+        adjustments: waveAssignment.adjustments,
+        codeGraph: codeGraph ?? null,
       })
       .returning();
 
@@ -367,6 +412,11 @@ export class WavePlanGenerator {
       tasksCompleted: 0,
       tasksFailed: 0,
       tasksRetried: 0,
+      // Shared-file bumps only, as the column's name says. A
+      // DEPENDENCY_CONFLICT_BUMP is a predicted conflict, from an index that
+      // can be wrong; counting it here would report a prediction as a conflict
+      // avoided. Those rows are kept, with their reasons, in
+      // `wave_plans.adjustments`.
       fileConflictsAvoided: waveAssignment.adjustments.filter(
         a => a.type === 'FILE_CONFLICT_BUMP'
       ).length,

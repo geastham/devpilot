@@ -134,9 +134,23 @@ interface ConductorPorts {
     refinePlan(input: GeneratePlanInput): Promise<GeneratePlanOutput>;
     /** Deterministic. Not an LLM call, and must not become one. */
     scorePlan(plan: WavePlanShape): PlanScoreShape | Promise<PlanScoreShape>;
-    /** Persist an approved plan; returns the host's id for it. */
+    /**
+     * Persist an approved plan; returns the host's id for it.
+     *
+     * `totalWaves` is how many waves the PERSISTED plan has, when that can differ
+     * from `plan.waves.length` — and for a host that lays the waves out again as
+     * it persists, it can. DevPilot's assigner moves apart two tasks the planner
+     * put side by side that would collide, which adds a wave; a planner that
+     * spreads tasks over more waves than their dependencies need loses some.
+     *
+     * The graph sequences `0 … totalWaves - 1` when it is given, and
+     * `plan.waves` when it is not. Counting the planner's waves against a plan
+     * with more was the worse of the two errors: the run reached `finish` and
+     * `endRun` was told `complete` with the moved tasks never dispatched.
+     */
     persistPlan(plan: WavePlanShape, score: PlanScoreShape, input: GeneratePlanInput): Promise<{
         wavePlanId: string;
+        totalWaves?: number;
     }>;
     /**
      * Dispatch what can be dispatched of one wave. DevPilot delegates to its
@@ -287,6 +301,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
     refinementIterations: number;
     constraints: string[];
     wavePlanId: string | null;
+    totalWaves: number | null;
     currentWaveIndex: number;
     waveRetries: number;
     lastDispatch: {
@@ -309,6 +324,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
     refinementIterations?: number | _langchain_langgraph.OverwriteValue<number> | undefined;
     constraints?: string[] | _langchain_langgraph.OverwriteValue<string[]> | undefined;
     wavePlanId?: string | _langchain_langgraph.OverwriteValue<string | null> | null | undefined;
+    totalWaves?: number | _langchain_langgraph.OverwriteValue<number | null> | null | undefined;
     currentWaveIndex?: number | _langchain_langgraph.OverwriteValue<number> | undefined;
     waveRetries?: number | _langchain_langgraph.OverwriteValue<number> | undefined;
     lastDispatch?: {
@@ -350,6 +366,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
     refinementIterations: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
     constraints: _langchain_langgraph.BaseChannel<string[], string[] | _langchain_langgraph.OverwriteValue<string[]>, unknown>;
     wavePlanId: _langchain_langgraph.BaseChannel<string | null, string | _langchain_langgraph.OverwriteValue<string | null> | null, unknown>;
+    totalWaves: _langchain_langgraph.BaseChannel<number | null, number | _langchain_langgraph.OverwriteValue<number | null> | null, unknown>;
     currentWaveIndex: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
     waveRetries: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
     lastDispatch: _langchain_langgraph.BaseChannel<{
@@ -394,6 +411,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
     refinementIterations: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
     constraints: _langchain_langgraph.BaseChannel<string[], string[] | _langchain_langgraph.OverwriteValue<string[]>, unknown>;
     wavePlanId: _langchain_langgraph.BaseChannel<string | null, string | _langchain_langgraph.OverwriteValue<string | null> | null, unknown>;
+    totalWaves: _langchain_langgraph.BaseChannel<number | null, number | _langchain_langgraph.OverwriteValue<number | null> | null, unknown>;
     currentWaveIndex: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
     waveRetries: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
     lastDispatch: _langchain_langgraph.BaseChannel<{
@@ -439,6 +457,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
         refinementIterations: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         constraints: _langchain_langgraph.BaseChannel<string[], string[] | _langchain_langgraph.OverwriteValue<string[]>, unknown>;
         wavePlanId: _langchain_langgraph.BaseChannel<string | null, string | _langchain_langgraph.OverwriteValue<string | null> | null, unknown>;
+        totalWaves: _langchain_langgraph.BaseChannel<number | null, number | _langchain_langgraph.OverwriteValue<number | null> | null, unknown>;
         currentWaveIndex: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         waveRetries: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         lastDispatch: _langchain_langgraph.BaseChannel<{
@@ -484,6 +503,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
         refinementIterations: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         constraints: _langchain_langgraph.BaseChannel<string[], string[] | _langchain_langgraph.OverwriteValue<string[]>, unknown>;
         wavePlanId: _langchain_langgraph.BaseChannel<string | null, string | _langchain_langgraph.OverwriteValue<string | null> | null, unknown>;
+        totalWaves: _langchain_langgraph.BaseChannel<number | null, number | _langchain_langgraph.OverwriteValue<number | null> | null, unknown>;
         currentWaveIndex: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         waveRetries: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         lastDispatch: _langchain_langgraph.BaseChannel<{
@@ -529,6 +549,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
         refinementIterations: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         constraints: _langchain_langgraph.BaseChannel<string[], string[] | _langchain_langgraph.OverwriteValue<string[]>, unknown>;
         wavePlanId: _langchain_langgraph.BaseChannel<string | null, string | _langchain_langgraph.OverwriteValue<string | null> | null, unknown>;
+        totalWaves: _langchain_langgraph.BaseChannel<number | null, number | _langchain_langgraph.OverwriteValue<number | null> | null, unknown>;
         currentWaveIndex: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         waveRetries: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         lastDispatch: _langchain_langgraph.BaseChannel<{
@@ -574,6 +595,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
         refinementIterations: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         constraints: _langchain_langgraph.BaseChannel<string[], string[] | _langchain_langgraph.OverwriteValue<string[]>, unknown>;
         wavePlanId: _langchain_langgraph.BaseChannel<string | null, string | _langchain_langgraph.OverwriteValue<string | null> | null, unknown>;
+        totalWaves: _langchain_langgraph.BaseChannel<number | null, number | _langchain_langgraph.OverwriteValue<number | null> | null, unknown>;
         currentWaveIndex: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         waveRetries: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         lastDispatch: _langchain_langgraph.BaseChannel<{
@@ -619,6 +641,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
         refinementIterations: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         constraints: _langchain_langgraph.BaseChannel<string[], string[] | _langchain_langgraph.OverwriteValue<string[]>, unknown>;
         wavePlanId: _langchain_langgraph.BaseChannel<string | null, string | _langchain_langgraph.OverwriteValue<string | null> | null, unknown>;
+        totalWaves: _langchain_langgraph.BaseChannel<number | null, number | _langchain_langgraph.OverwriteValue<number | null> | null, unknown>;
         currentWaveIndex: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         waveRetries: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         lastDispatch: _langchain_langgraph.BaseChannel<{
@@ -664,6 +687,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
         refinementIterations: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         constraints: _langchain_langgraph.BaseChannel<string[], string[] | _langchain_langgraph.OverwriteValue<string[]>, unknown>;
         wavePlanId: _langchain_langgraph.BaseChannel<string | null, string | _langchain_langgraph.OverwriteValue<string | null> | null, unknown>;
+        totalWaves: _langchain_langgraph.BaseChannel<number | null, number | _langchain_langgraph.OverwriteValue<number | null> | null, unknown>;
         currentWaveIndex: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         waveRetries: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         lastDispatch: _langchain_langgraph.BaseChannel<{
@@ -709,6 +733,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
         refinementIterations: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         constraints: _langchain_langgraph.BaseChannel<string[], string[] | _langchain_langgraph.OverwriteValue<string[]>, unknown>;
         wavePlanId: _langchain_langgraph.BaseChannel<string | null, string | _langchain_langgraph.OverwriteValue<string | null> | null, unknown>;
+        totalWaves: _langchain_langgraph.BaseChannel<number | null, number | _langchain_langgraph.OverwriteValue<number | null> | null, unknown>;
         currentWaveIndex: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         waveRetries: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         lastDispatch: _langchain_langgraph.BaseChannel<{
@@ -754,6 +779,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
         refinementIterations: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         constraints: _langchain_langgraph.BaseChannel<string[], string[] | _langchain_langgraph.OverwriteValue<string[]>, unknown>;
         wavePlanId: _langchain_langgraph.BaseChannel<string | null, string | _langchain_langgraph.OverwriteValue<string | null> | null, unknown>;
+        totalWaves: _langchain_langgraph.BaseChannel<number | null, number | _langchain_langgraph.OverwriteValue<number | null> | null, unknown>;
         currentWaveIndex: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         waveRetries: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         lastDispatch: _langchain_langgraph.BaseChannel<{
@@ -799,6 +825,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
         refinementIterations: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         constraints: _langchain_langgraph.BaseChannel<string[], string[] | _langchain_langgraph.OverwriteValue<string[]>, unknown>;
         wavePlanId: _langchain_langgraph.BaseChannel<string | null, string | _langchain_langgraph.OverwriteValue<string | null> | null, unknown>;
+        totalWaves: _langchain_langgraph.BaseChannel<number | null, number | _langchain_langgraph.OverwriteValue<number | null> | null, unknown>;
         currentWaveIndex: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         waveRetries: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         lastDispatch: _langchain_langgraph.BaseChannel<{
@@ -844,6 +871,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
         refinementIterations: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         constraints: _langchain_langgraph.BaseChannel<string[], string[] | _langchain_langgraph.OverwriteValue<string[]>, unknown>;
         wavePlanId: _langchain_langgraph.BaseChannel<string | null, string | _langchain_langgraph.OverwriteValue<string | null> | null, unknown>;
+        totalWaves: _langchain_langgraph.BaseChannel<number | null, number | _langchain_langgraph.OverwriteValue<number | null> | null, unknown>;
         currentWaveIndex: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         waveRetries: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         lastDispatch: _langchain_langgraph.BaseChannel<{
@@ -908,6 +936,17 @@ declare const ConductorState: _langchain_langgraph.AnnotationRoot<{
     /** Constraints the conductor added at review; fed back into refinement. */
     constraints: _langchain_langgraph.BaseChannel<string[], string[] | _langchain_langgraph.OverwriteValue<string[]>, unknown>;
     wavePlanId: _langchain_langgraph.BaseChannel<string | null, string | _langchain_langgraph.OverwriteValue<string | null> | null, unknown>;
+    /**
+     * How many waves the persisted plan has, when the host said. Null when it
+     * did not, and for a plan that was adopted rather than persisted here — the
+     * graph then counts `plan.waves`, as it always did.
+     *
+     * A channel, not something read off `plan`, because the two are different
+     * things: `plan` is what the planner wrote and the reviewer approved, and
+     * this is what the host laid out when it wrote it down. See
+     * `ConductorPorts.persistPlan`.
+     */
+    totalWaves: _langchain_langgraph.BaseChannel<number | null, number | _langchain_langgraph.OverwriteValue<number | null> | null, unknown>;
     currentWaveIndex: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
     /** Retries used on the CURRENT wave; reset when a wave is left behind. */
     waveRetries: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;

@@ -14,6 +14,7 @@ import {
   generatePlanForItem,
   projectWavePlanToPlan,
 } from '@devpilot.sh/core/wave-planner';
+import { getServerOrchestrator } from '@/lib/orchestrator';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -65,6 +66,10 @@ export async function POST(_request: NextRequest, { params }: RouteParams) {
       await db.delete(touchedFiles).where(eq(touchedFiles.planId, item.plan.id));
       await db.delete(plans).where(eq(plans.id, item.plan.id));
     }
+
+    // So the generator can ask the session runner for the code graph; see the
+    // same line in ../../wave-plan/generate/route.ts.
+    getServerOrchestrator();
 
     // Generate (creates the plans row + persists the wave plan) then project.
     const workingDir = process.env.WORKING_DIR || process.cwd();
@@ -122,7 +127,10 @@ export async function POST(_request: NextRequest, { params }: RouteParams) {
       },
     });
 
-    return NextResponse.json(completePlan, { status: 201 });
+    // The plan row and its relations, as before, plus one field: whether the
+    // wave plan behind it was laid out with a code graph and, when it was not,
+    // why not.
+    return NextResponse.json({ ...completePlan, codeGraph: generation.codeGraph }, { status: 201 });
   } catch (error) {
     console.error('Failed to generate plan:', error);
     return NextResponse.json(

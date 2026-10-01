@@ -115,12 +115,25 @@ export interface ConductorPorts {
   refinePlan(input: GeneratePlanInput): Promise<GeneratePlanOutput>;
   /** Deterministic. Not an LLM call, and must not become one. */
   scorePlan(plan: WavePlanShape): PlanScoreShape | Promise<PlanScoreShape>;
-  /** Persist an approved plan; returns the host's id for it. */
+  /**
+   * Persist an approved plan; returns the host's id for it.
+   *
+   * `totalWaves` is how many waves the PERSISTED plan has, when that can differ
+   * from `plan.waves.length` — and for a host that lays the waves out again as
+   * it persists, it can. DevPilot's assigner moves apart two tasks the planner
+   * put side by side that would collide, which adds a wave; a planner that
+   * spreads tasks over more waves than their dependencies need loses some.
+   *
+   * The graph sequences `0 … totalWaves - 1` when it is given, and
+   * `plan.waves` when it is not. Counting the planner's waves against a plan
+   * with more was the worse of the two errors: the run reached `finish` and
+   * `endRun` was told `complete` with the moved tasks never dispatched.
+   */
   persistPlan(
     plan: WavePlanShape,
     score: PlanScoreShape,
     input: GeneratePlanInput
-  ): Promise<{ wavePlanId: string }>;
+  ): Promise<{ wavePlanId: string; totalWaves?: number }>;
   /**
    * Dispatch what can be dispatched of one wave. DevPilot delegates to its
    * coordinator.

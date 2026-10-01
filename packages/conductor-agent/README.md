@@ -116,6 +116,15 @@ If a wave is already over when `dispatchWave` returns (nothing was dispatchable,
 or every task was refused), return `settled` with the outcome and the graph acts
 on it instead of waiting for a report that will never come.
 
+## When the persisted plan is not the planner's
+
+The graph sequences waves `0 … n-1`, and by default `n` is `plan.waves.length`.
+If your `persistPlan` lays the waves out again as it writes them — moving apart
+tasks that would collide, or packing ones the planner spread out — return how
+many it wrote: `{ wavePlanId, totalWaves }`. The graph then counts that. Without
+it, a persisted plan with more waves than the planner wrote reaches `finish`
+with its last waves never dispatched.
+
 ## Knowing a run ended
 
 Implement the optional `endRun(wavePlanId, result)` port to be told once when a

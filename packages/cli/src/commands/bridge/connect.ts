@@ -59,6 +59,7 @@ function stableMachineName(): string {
 import { ConductorWatcher } from './conductor-watcher';
 import { CommandApplier } from './command-applier';
 import { AdoptionWatcher } from './adoption-watcher';
+import { GraphSharer } from './graph-sharer';
 import { SessionObserver } from './observer';
 import { ResumeApplier } from './resume-applier';
 import { runIntrospection } from './introspect';
@@ -356,6 +357,11 @@ export const connectCommand = new Command('connect')
       }
       observer.start();
     }
+
+    // Repositories whose owner ran `devpilot graph share --yes`. Nothing is
+    // sent for any other repository, indexed or not — and this is a separate
+    // consent from observing sessions, so it does not depend on that being on.
+    new GraphSharer({ client, onLog: (line) => console.log(chalk.gray(`   ${line}`)) }).start();
 
     /**
      * The command return path — TRD 23 §7.1.

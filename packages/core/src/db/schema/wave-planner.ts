@@ -10,6 +10,10 @@ import {
   complexityValues,
 } from './enums';
 import { plans, horizonItems, tasks } from './horizon';
+// Types only — erased at build, so the schema still depends on nothing at run
+// time. They are the shapes of the two JSON columns the wave planner writes.
+import type { WaveAdjustment } from '../../wave-planner/types';
+import type { PlanCodeGraph } from '../../wave-planner/plan-code-graph';
 
 // ============================================================================
 // Wave Plans
@@ -80,6 +84,33 @@ export const wavePlans = sqliteTable('wave_plans', {
    */
   runBranch: text('run_branch'),
   runHeadSha: text('run_head_sha'),
+  /**
+   * What the wave assigner changed about the planner's layout, and why: each
+   * task it moved for a shared file, for a dependency between two tasks' files,
+   * or to fit the fleet's capacity, with a sentence of reason.
+   *
+   * Until this column the assigner's adjustments were computed, counted into
+   * `wave_plan_metrics.file_conflicts_avoided`, and thrown away — so a plan
+   * review could show THAT two tasks had been sequenced and never why.
+   *
+   * NULL is "not recorded": the plan predates the column. That is not `[]`,
+   * which is an assignment that moved nothing.
+   */
+  adjustments: text('adjustments', { mode: 'json' }).$type<WaveAdjustment[]>(),
+  /**
+   * Whether this plan's waves were assigned with a code graph, and what the
+   * graph said about each task: how many files depend on what it changes, the
+   * first of them, and the claims the assigner sequenced on (TRD 27 §5.1,
+   * §5.3). When the graph was not used, the reason it was not.
+   *
+   * A snapshot from when the plan was made, of an index that goes stale as the
+   * code changes; `indexedAt` inside it says how old the index was then.
+   *
+   * NULL is "not asked": the plan predates the column, or was written by a
+   * caller that does not ask. Such a plan was assigned from its tasks' own
+   * files alone, exactly as every plan was before.
+   */
+  codeGraph: text('code_graph', { mode: 'json' }).$type<PlanCodeGraph>(),
   startedAt: integer('started_at', { mode: 'timestamp' }),
   completedAt: integer('completed_at', { mode: 'timestamp' }),
   createdAt: integer('created_at', { mode: 'timestamp' })

@@ -57,6 +57,8 @@ that would show it has made things worse.
 | `stable-prefix` | Per-directory details stay out of the system prompt, so parallel worktrees share one cache entry | cache writes | no fall in first-turn cache writes; changed behaviour |
 | `compact-200k` | History is summarised at 200k tokens instead of near the window limit | context size | files re-read after a compaction; more turns; lower success |
 | `budget-cap` | A run stops once it has spent `DEVPILOT_HARNESS_MAX_BUDGET_USD` at API rates | tail cost | legitimate long tasks cut off |
+| `code-graph` | The agent gets one extra tool that answers "where is this and what depends on it" from an index of the repository — see [CODE-GRAPH.md](CODE-GRAPH.md) | the reading an agent does to find its way around | **more** tokens per written change, not fewer; retrieved context left in the window; answers about the wrong module |
+| `work-history` | The agent gets one extra tool, `devpilot_history`, that says what earlier tasks did to a file: which changed it, whether that task failed or collided on merge, what its agent reported — see [CODE-GRAPH.md](CODE-GRAPH.md#work-history) | retries and merge conflicts (tail cost) | no fall in retries or conflicts; the agent following an earlier agent's summary instead of reading the code |
 
 Profiles are named sets:
 
@@ -73,6 +75,21 @@ DEVPILOT_HARNESS=lean+budget-cap DEVPILOT_HARNESS_MAX_BUDGET_USD=15 devpilot ses
 
 An unknown name is an error, not a fallback. A typo that silently ran
 `baseline` would produce an A/B whose two arms were the same thing.
+
+**A run's stamp names only what took effect in that run.** A technique can be
+asked for and have nothing to act on: `code-graph` in a repository with no
+index, `budget-cap` with no figure set. Such a run is stamped without it —
+`lean@1`, not `lean+code-graph@1` — because the stamp is what readings are
+grouped by, and a row that mixed runs which had a graph with runs which did
+not would be comparing a thing with itself.
+
+**A technique that adds a tool also grants it.** A headless agent cannot be
+asked for permission, and the runner's permission mode covers file edits only,
+so an MCP tool that has not been granted is refused. The first live run of
+`code-graph` was exactly that: the tool was configured, called three times,
+refused three times, and the agent answered with grep — under a stamp saying
+it had a code graph, while every test that looked only at the configuration
+passed. The runner now grants the tools it configures itself, and only those.
 
 The harness is the **operator's** choice, like the permission mode and for the
 same reason: a dispatch must not be able to change what an agent on someone
@@ -123,6 +140,23 @@ turn, so over a 300-turn session it is roughly 1.5M cache-read tokens.
 This is **not** a savings claim. It is one sample, it scales with how many MCP
 servers a machine has, and it says nothing about whether a worker that lost
 those servers still finishes its task. It is the size of the lever, measured.
+
+### `code-graph`: two live runs, and what they are not
+
+The same one-line question ("which function calls X?") was given to a Haiku
+agent twice, in a worktree of this repository with a real index:
+
+| | Tools it called | Turns | Cost at API rates |
+|---|---|---|---|
+| Graph tool configured but **not granted** | graph ×3 (all refused), then Bash, Read, Write | — | $0.102 |
+| Graph tool granted | graph ×2, Write | 4 | $0.054 |
+
+Both got the right answer. This is **not** a measurement of the technique: it
+is one task, chosen because a graph can answer it, and the dearer run is dear
+partly because it spent three calls being refused. The comparison that would
+say something — the same plans under `lean` and `lean+code-graph`, across
+repositories, scored by tokens per written change and by whether the task's
+tests pass — has not been run.
 
 ## What is deliberately not in the harness
 

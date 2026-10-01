@@ -227,6 +227,8 @@ CREATE TABLE IF NOT EXISTS wave_plans (
   isolation_note TEXT,
   run_branch TEXT,
   run_head_sha TEXT,
+  adjustments TEXT,
+  code_graph TEXT,
   started_at INTEGER,
   completed_at INTEGER,
   created_at INTEGER NOT NULL,
@@ -388,6 +390,12 @@ export function createSQLiteAdapter(path: string): SQLiteDatabase {
   ensureColumn(sqliteConnection, 'wave_tasks', 'commit_sha', 'commit_sha TEXT');
   ensureColumn(sqliteConnection, 'wave_tasks', 'files_changed', 'files_changed TEXT');
   ensureColumn(sqliteConnection, 'wave_tasks', 'merged_at', 'merged_at INTEGER');
+  // Why the assigner moved what it moved, and what a code graph said about the
+  // plan. Both nullable with no default, and NULL is the truth about a plan
+  // written before either existed: its adjustments were not recorded (which is
+  // not "there were none"), and no code graph was asked about it.
+  ensureColumn(sqliteConnection, 'wave_plans', 'adjustments', 'adjustments TEXT');
+  ensureColumn(sqliteConnection, 'wave_plans', 'code_graph', 'code_graph TEXT');
 
   // Create Drizzle instance
   sqliteDb = drizzle(sqliteConnection, { schema });

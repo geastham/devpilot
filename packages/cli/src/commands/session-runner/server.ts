@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import { existsSync } from 'fs';
 import { basename, isAbsolute, resolve } from 'path';
 import { runClaudeSession } from './claude-runner';
+import { workHistorySource } from './harness';
 import { sendCompletion, sendStatus } from './callbacks';
 import { describeActivity, estimateProgress, type SessionTelemetry } from './stream-events';
 import {
@@ -15,6 +16,15 @@ import {
   workspacePreamble,
   type TaskWorkspace,
 } from './isolation';
+import { codeGraph as graph } from '@devpilot.sh/core';
+import {
+  excludeIndexFromGit,
+  hasIndex,
+  mcpServerFor,
+  seedIndex,
+  stopIndexDaemon,
+  syncIndex,
+} from '../../utils/codegraph';
 import type {
   CreateSessionRequest,
   IntegrateRequest,
@@ -48,7 +58,7 @@ const VERSION = '1.1.0';
  * a capability ignores the field it does not know, which for `isolation` would
  * mean a task quietly run in the shared checkout — so the dispatcher checks.
  */
-const CAPABILITIES = ['isolation'] as const;
+const CAPABILITIES = ['isolation', 'code-graph'] as const;
 
 /** The first line of a commit message: one line, and short enough to read in a log. */
 function commitSubject(taskCode: string, title: string | undefined): string {
@@ -179,6 +189,34 @@ export class SessionRunner {
       }
       const rundir = workspace?.dir ?? session.workdir;
 
+      /**
+       * Give the run its code graph, if this machine has the indexer and the
+       * repository has an index. All of it is best-effort: the graph is an aid,
+       * and a task must run exactly as it would have without one when any step
+       * here fails.
+       *
+       * Order matters. The exclude goes in first — before the agent can write
+       * anything and long before the runner's own `git add -A` — because the
+       * index directory contains a `.gitignore` that un-ignores itself.
+       */
+      let codeGraph: ReturnType<typeof mcpServerFor> | null = null;
+      const indexer = this.config.codeGraph;
+      if (indexer && hasIndex(session.workdir)) {
+        try {
+          await excludeIndexFromGit(session.workdir);
+          if (workspace && seedIndex(session.workdir, workspace.dir)) {
+            // The worktree was cut from the run branch, which can be ahead of
+            // the checkout the index describes. Bring it up to the tree it is in.
+            await syncIndex(indexer, workspace.dir, 60_000);
+          }
+          if (hasIndex(rundir)) codeGraph = mcpServerFor(indexer, rundir);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.config.log(`[${session.externalSessionId}] code graph unavailable for this run: ${message.slice(0, 300)}`);
+          codeGraph = null;
+        }
+      }
+
       session.progressPercent = 5;
       session.currentStep = 'session started';
       this.reportStatus(session, callbackUrl, callbackToken, {
@@ -234,6 +272,8 @@ export class SessionRunner {
         resumeSessionId: request.resumeSessionId,
         timeoutMs: this.config.timeoutMs,
         harness: this.config.harness,
+        codeGraph,
+        workHistory: workHistorySource(callbackUrl, request.repo),
         onLog: (line) => this.config.log(`[${session.externalSessionId}] ${line}`),
         onSpawn: (kill) => {
           session.kill = kill;
@@ -258,6 +298,11 @@ export class SessionRunner {
       });
 
       clearInterval(heartbeat);
+
+      // The indexer's MCP server leaves a daemon running after the agent has
+      // gone. Stop it before the worktree is committed and removed, or every
+      // task leaves one behind watching a directory that no longer exists.
+      if (codeGraph) await stopIndexDaemon(rundir);
 
       /**
        * Commit the task and read its changes from git.
@@ -535,6 +580,56 @@ export class SessionRunner {
     }
   }
 
+  /**
+   * `POST /v1/graph/dependents` and `POST /v1/graph/affected-tests`.
+   *
+   * The cockpit plans the work but does not know where a repository is checked
+   * out; this runner does. So the planner asks here which files depend on the
+   * files a task will change, and gets an answer read straight from the index
+   * — no model, no agent, a few milliseconds.
+   *
+   * "No index" is an ordinary answer, `{ available: false, reason }` with a
+   * 200: the caller plans without the graph, exactly as it did before.
+   */
+  private async handleGraph(req: IncomingMessage, res: ServerResponse, kind: 'dependents' | 'affected-tests'): Promise<void> {
+    let body: { repo?: unknown; files?: unknown; depth?: unknown; limit?: unknown };
+    try {
+      body = (await readBody(req)) as typeof body;
+    } catch (error) {
+      return json(res, 400, { error: 'INVALID_PAYLOAD', message: error instanceof Error ? error.message : 'invalid JSON' });
+    }
+    if (
+      typeof body?.repo !== 'string' ||
+      !Array.isArray(body.files) ||
+      body.files.length > 2_000 ||
+      body.files.some((f) => typeof f !== 'string' || !f || f.length > 500)
+    ) {
+      return json(res, 400, { error: 'INVALID_PAYLOAD', message: 'repo and files (at most 2000 paths) are required' });
+    }
+
+    const { workdir, error } = this.resolveWorkdir(body.repo);
+    if (!workdir) return json(res, 200, { available: false, reason: error });
+    if (!hasIndex(workdir)) {
+      return json(res, 200, {
+        available: false,
+        reason: `No code graph index for ${body.repo}. Run \`devpilot graph enable\` in its checkout to build one.`,
+      });
+    }
+
+    const files = body.files as string[];
+    if (kind === 'dependents') {
+      const depth = typeof body.depth === 'number' ? body.depth : undefined;
+      const limit = typeof body.limit === 'number' ? body.limit : undefined;
+      const result = graph.dependentsOf(workdir, files, { depth, limit });
+      const status = graph.readGraphStatus(workdir);
+      return json(res, 200, {
+        ...result,
+        indexedAt: status.indexedAt ? new Date(status.indexedAt).toISOString() : null,
+      });
+    }
+    return json(res, 200, graph.affectedTests(workdir, files));
+  }
+
   private handleGet(res: ServerResponse, externalSessionId: string): void {
     const session = this.sessions.get(externalSessionId);
     if (!session) return json(res, 404, { error: 'NOT_FOUND' });
@@ -605,6 +700,13 @@ export class SessionRunner {
 
     if (path === '/v1/integrate' && req.method === 'POST') {
       return this.handleIntegrate(req, res);
+    }
+
+    if (path === '/v1/graph/dependents' && req.method === 'POST') {
+      return this.handleGraph(req, res, 'dependents');
+    }
+    if (path === '/v1/graph/affected-tests' && req.method === 'POST') {
+      return this.handleGraph(req, res, 'affected-tests');
     }
 
     const match = path.match(/^\/v1\/sessions\/([^/]+)(\/messages|\/stop)?$/);

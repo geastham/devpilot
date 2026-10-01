@@ -31,7 +31,10 @@ import {
   type ParsedWavePlan,
   type PlanScore,
   type PromptConstructorConfig,
+  codeGraphOf,
+  readPlanCodeGraph,
   resolvePlannerModel,
+  withCodeGraph,
 } from '@devpilot.sh/core/wave-planner';
 import type {
   ConductorPorts,
@@ -52,12 +55,15 @@ export interface DevPilotPortsOptions {
   model?: string;
   /** Repo checkout the prompt constructor reads codebase context from. */
   workingDir?: string;
-  /** Persist an approved plan and return the host's wave plan id. */
+  /**
+   * Persist an approved plan and return the host's wave plan id — and how many
+   * waves the plan has as persisted, which the graph sequences by.
+   */
   persist: (
     plan: ParsedWavePlan,
     score: PlanScore,
     input: GeneratePlanInput
-  ) => Promise<{ wavePlanId: string }>;
+  ) => Promise<{ wavePlanId: string; totalWaves?: number }>;
   onEvent?: ConductorPorts['onEvent'];
 }
 
@@ -118,6 +124,43 @@ export function createDevPilotPorts(options: DevPilotPortsOptions): ConductorPor
     };
   }
 
+  /**
+   * Ask the code graph about a plan the moment it is produced, and carry the
+   * answer on the plan (TRD 27 §5.1, §5.3).
+   *
+   * Here rather than at persist, because the review comes in between and the
+   * reviewer is who it is for: which files depend on what each task changes,
+   * and which tasks will be sequenced because of it. The graph's plan type is
+   * structural, so the reading rides through the checkpoint and the review
+   * interrupt untouched, and `persistPlan` assigns waves from the same claims
+   * the reviewer was shown — one request per plan, however long the review
+   * takes and whatever the index says by the time it is approved.
+   *
+   * A plan that already carries a reading keeps it: a refinement that was
+   * discarded hands back the plan it was given.
+   *
+   * Never fails planning. With no runner, no index or no answer in time, the
+   * plan carries `{ used: false, reason }` and is otherwise the plan it would
+   * have been — and the score the refinement loop gates on is computed without
+   * any of this (`scorePlan` below), so the loop behaves the same on a machine
+   * with an index as on one without.
+   */
+  async function withBlastRadius(plan: ParsedWavePlan, repo: string): Promise<ParsedWavePlan> {
+    if (codeGraphOf(plan)) return plan;
+
+    // The runner is reached through core's orchestrator singleton, and this is
+    // what initialises it — the same reason `dispatchWave` below calls it.
+    getServerOrchestrator();
+
+    return withCodeGraph(
+      plan,
+      await readPlanCodeGraph(
+        repo,
+        plan.waves.flatMap((wave) => wave.tasks)
+      )
+    );
+  }
+
   async function generate(input: GeneratePlanInput): Promise<GeneratePlanOutput> {
     const result = await refinementService.generateInitialPlan(
       input.specContent,
@@ -127,7 +170,7 @@ export function createDevPilotPorts(options: DevPilotPortsOptions): ConductorPor
       constructorConfig(input)
     );
     return {
-      plan: result.plan as unknown as WavePlanShape,
+      plan: (await withBlastRadius(result.plan, input.repo)) as unknown as WavePlanShape,
       tokensUsed: result.tokensUsed,
     };
   }
@@ -147,7 +190,7 @@ export function createDevPilotPorts(options: DevPilotPortsOptions): ConductorPor
       input.previousScore?.parallelizationScore ?? 0
     );
     return {
-      plan: result.plan as unknown as WavePlanShape,
+      plan: (await withBlastRadius(result.plan, input.repo)) as unknown as WavePlanShape,
       tokensUsed: result.tokensUsed,
     };
   }

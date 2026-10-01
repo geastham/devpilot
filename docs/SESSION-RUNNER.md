@@ -67,6 +67,7 @@ Then dispatch a READY item from the cockpit.
 | `--harness` | `baseline` | How agents are configured — `baseline`, `lean`, or either `+technique`. The operator's choice, never the dispatch's. See [HARNESS.md](HARNESS.md) |
 | `--worktree-root` | `~/.devpilot/worktrees` | Where per-task worktrees are created. See [A tree and a branch per task](#a-tree-and-a-branch-per-task) |
 | `--worktree-setup` | — | Shell command run in each new worktree before its agent starts, e.g. `"pnpm install --offline"`. The operator's, never the dispatch's |
+| `DEVPILOT_CODEGRAPH_BIN` (env) | `codegraph` on PATH | The code graph indexer, if installed. Optional; see [CODE-GRAPH.md](CODE-GRAPH.md) |
 
 ### Repo resolution refuses to guess
 
@@ -136,7 +137,7 @@ renamed `…-attempt-<sha>`.
 - A dispatch with no `isolation` runs in the checkout itself, as before. So
   does a resumed session, which has to run where its conversation lives.
 
-`GET /v1/health` lists `isolation` under `capabilities`. A runner from before
+`GET /v1/health` lists `isolation` and `code-graph` under `capabilities`. A runner from before
 this ignores a field it does not know, which would mean a task quietly run in
 the shared checkout — so a dispatcher should check before it asks.
 
@@ -144,6 +145,31 @@ the shared checkout — so a dispatcher should check before it asks.
 through the real runner against real repositories: parallel tasks, a conflict,
 the second attempt, the next wave's base, an agent that commits for itself or
 wanders off its branch, a repository with no identity, and each refusal.
+
+## The code graph
+
+When the indexer is installed and a repository has been indexed
+(`devpilot graph enable`), the runner does four things with it — and nothing at
+all otherwise. See [CODE-GRAPH.md](CODE-GRAPH.md).
+
+- **Keeps the index out of commits.** It adds `.codegraph/` to the repository's
+  `.git/info/exclude` before an agent starts. This is required: the indexer's
+  own `.gitignore` un-ignores itself, and the runner's `git add -A` at task end
+  would otherwise commit it into every task branch.
+- **Seeds each task's worktree** with the main checkout's index and syncs the
+  difference, rather than indexing inside a task's time budget.
+- **Stops the indexer's daemon** when the agent exits. Its MCP server leaves
+  one running (it would exit after five idle minutes by itself); the runner
+  signals it at once, and only if the pid in the tool's own file is in fact
+  the indexer.
+- **Answers the planner.** `POST /v1/graph/dependents` `{ repo, files, depth? }`
+  → `{ available, byFile, truncated, indexedAt }`, and `POST
+  /v1/graph/affected-tests` `{ repo, files }` → `{ available, tests,
+  truncated }`. The cockpit plans the work but does not know where a repository
+  is checked out; the runner does. A repository with no index answers
+  `{ available: false, reason }` with a 200, and the plan is made without it.
+
+Agents are given the graph only when the harness includes `code-graph`.
 
 ## The runner reports, not the agent
 

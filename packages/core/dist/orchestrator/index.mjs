@@ -473,12 +473,15 @@ function createAoCliAdapter(config) {
 
 // src/orchestrator/claude-session-adapter.ts
 var ISOLATION_CAPABILITY = "isolation";
+var CODE_GRAPH_CAPABILITY = "code-graph";
+var GRAPH_TIMEOUT_MS = 5e3;
 var INTEGRATE_TIMEOUT_MS = 5 * 6e4;
 var HttpSessionTransport = class _HttpSessionTransport {
-  constructor(baseUrl, apiKey, timeoutMs = 3e4) {
+  constructor(baseUrl, apiKey, timeoutMs = 3e4, graphTimeoutMs = GRAPH_TIMEOUT_MS) {
     this.baseUrl = baseUrl;
     this.apiKey = apiKey;
     this.timeoutMs = timeoutMs;
+    this.graphTimeoutMs = graphTimeoutMs;
     /**
      * The runner's capabilities, once it has told us.
      *
@@ -498,9 +501,17 @@ var HttpSessionTransport = class _HttpSessionTransport {
     return j.externalSessionId ?? j.sessionId ?? j.id;
   }
   async capabilities() {
+    return this.readCapabilities();
+  }
+  /**
+   * `capabilities`, with a say over how long `/v1/health` may take. The code
+   * graph reads pass their own, much shorter, limit: they are optional, and
+   * must not wait the thirty seconds a dispatch is allowed.
+   */
+  async readCapabilities(timeoutMs) {
     if (this.knownCapabilities) return this.knownCapabilities;
     try {
-      const res = await this.fetch("/v1/health");
+      const res = await this.fetch("/v1/health", {}, timeoutMs);
       if (!res.ok) return null;
       const json = await res.json();
       const capabilities = Array.isArray(json.capabilities) ? json.capabilities.filter((c) => typeof c === "string") : [];
@@ -600,6 +611,110 @@ var HttpSessionTransport = class _HttpSessionTransport {
         message: `the session runner could not be reached to merge the wave (${error instanceof Error ? error.message : String(error)})`
       };
     }
+  }
+  /**
+   * Ask the runner's code graph a question, or say why there is no answer.
+   *
+   * The same question is asked first as for isolation — does this runner say
+   * it can? — and for the same reason: a runner from before the capability
+   * answers an unknown route with a bare 404, which says nothing a person can
+   * act on, while "the runner predates the code graph" does.
+   *
+   * Unlike a refused create, none of the unhappy paths here is a failure of
+   * anything. They all come back as `available: false`, and nothing is retried.
+   * The capability cache is dropped on each of them all the same, including
+   * "not listed": the capability arrives with a runner upgrade, the cockpit
+   * outlives the runner it started beside, and asking `/v1/health` again is a
+   * cheap way not to go on quoting a runner that has been replaced. The cost
+   * is one extra local GET per question for as long as the runner is an older
+   * one — per plan, and per task dispatched.
+   */
+  async askGraph(path, request, read) {
+    const unavailable = (reason) => {
+      this.knownCapabilities = null;
+      return { available: false, reason };
+    };
+    const deadline = Date.now() + this.graphTimeoutMs;
+    const capabilities = await this.readCapabilities(this.graphTimeoutMs);
+    if (capabilities === null) {
+      return unavailable("the session runner did not answer /v1/health, so it could not be asked for the code graph");
+    }
+    if (!capabilities.includes(CODE_GRAPH_CAPABILITY)) {
+      return unavailable(
+        `the session runner does not report the '${CODE_GRAPH_CAPABILITY}' capability (it predates the code graph)`
+      );
+    }
+    try {
+      const res = await this.fetch(
+        path,
+        { method: "POST", body: JSON.stringify(request) },
+        Math.max(1, deadline - Date.now())
+      );
+      const text8 = await res.text().catch(() => "");
+      if (res.status !== 200) {
+        const refusal = _HttpSessionTransport.readRefusal(text8);
+        return unavailable(
+          refusal?.message ?? `the session runner answered ${res.status}${refusal?.error ? ` (${refusal.error})` : ""} when asked for the code graph`
+        );
+      }
+      let json;
+      try {
+        const parsed = JSON.parse(text8);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+        json = parsed;
+      } catch {
+        return unavailable("the session runner answered the code graph request with something that is not JSON");
+      }
+      if (json.available === false) {
+        return {
+          available: false,
+          reason: typeof json.reason === "string" && json.reason ? json.reason : "the session runner gave no reason"
+        };
+      }
+      const answer = json.available === true ? read(json) : null;
+      return answer ?? unavailable("the session runner answered the code graph request with something that is not a code graph answer");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return unavailable(
+        error instanceof Error && error.name === "AbortError" ? `the session runner did not answer the code graph request within ${this.graphTimeoutMs / 1e3}s` : `the session runner could not be reached for the code graph (${message})`
+      );
+    }
+  }
+  async graphDependents(request) {
+    return this.askGraph("/v1/graph/dependents", request, (json) => {
+      const byFile = _HttpSessionTransport.readFileLists(json.byFile);
+      if (!byFile) return null;
+      return {
+        available: true,
+        byFile,
+        truncated: json.truncated === true,
+        indexedAt: typeof json.indexedAt === "string" ? json.indexedAt : null
+      };
+    });
+  }
+  async graphAffectedTests(request) {
+    return this.askGraph("/v1/graph/affected-tests", request, (json) => {
+      if (!Array.isArray(json.tests)) return null;
+      return {
+        available: true,
+        tests: json.tests.filter((t) => typeof t === "string"),
+        truncated: json.truncated === true
+      };
+    });
+  }
+  /**
+   * `{ file: [file, …] }`, if that is what the value is. Shape-checked because
+   * it is acted on — these lists decide which tasks share a wave — and a list
+   * that is not a list of strings is dropped whole rather than half-read.
+   */
+  static readFileLists(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const out = {};
+    for (const [file, list] of Object.entries(value)) {
+      if (!Array.isArray(list) || !list.every((entry) => typeof entry === "string")) return null;
+      out[file] = list;
+    }
+    return out;
   }
   /** A merge result, if that is what the body is. Shape-checked: it is acted on. */
   static readIntegration(body) {
@@ -834,6 +949,24 @@ var ClaudeSessionAdapter = class {
     }
     return this.transport.integrate(request);
   }
+  /**
+   * What depends on these files, from the runner's code graph index.
+   *
+   * A transport with no way to ask answers for itself here, in words, the same
+   * as `isolationSupport` does: a custom transport is not a runner that failed.
+   */
+  async graphDependents(request) {
+    if (!this.transport.graphDependents) {
+      return { available: false, reason: "the session transport in use cannot read a code graph" };
+    }
+    return this.transport.graphDependents(request);
+  }
+  async graphAffectedTests(request) {
+    if (!this.transport.graphAffectedTests) {
+      return { available: false, reason: "the session transport in use cannot read a code graph" };
+    }
+    return this.transport.graphAffectedTests(request);
+  }
   async shutdown() {
     this.cache.clear();
   }
@@ -915,6 +1048,7 @@ function renderTicketDescription(description) {
 }
 
 // src/orchestrator/session-prompt.ts
+var MAX_REACHED_TESTS_LISTED = 10;
 function sessionReportingForMode(mode) {
   return mode === "claude-session" ? "runner" : "agent";
 }
@@ -930,7 +1064,9 @@ function buildSessionPrompt(input) {
     sessionId,
     reporting = "agent",
     goal,
-    predecessorsMerged = false
+    predecessorsMerged = false,
+    reachedTests,
+    reachedTestsTruncated = false
   } = input;
   const sections = [];
   sections.push(`# Task
@@ -956,6 +1092,10 @@ These files are this task's scope. Other tasks running at the same time have bee
 
 ` + fileScope.map((f) => `- \`${f}\``).join("\n")
     );
+  }
+  const reached = reachedTestsSection(reachedTests, reachedTestsTruncated);
+  if (reached) {
+    sections.push(reached);
   }
   if (predecessorContext.length > 0) {
     const blocks = predecessorContext.map((p) => {
@@ -996,6 +1136,25 @@ ${blocks}`
     reporting === "runner" ? finishingSection(sessionId) : reportingProtocolSection(callbackUrl, sessionId)
   );
   return sections.join("\n\n");
+}
+function reachedTestsSection(tests, truncated) {
+  if (!tests || tests.length === 0) return null;
+  const usable = tests.filter(
+    (path) => path.length > 0 && path.length <= 300 && !/[`\u0000-\u001f\u007f]/.test(path)
+  );
+  if (usable.length === 0) return null;
+  const listed = usable.slice(0, MAX_REACHED_TESTS_LISTED);
+  const unlisted = usable.length - listed.length;
+  const more = unlisted > 0 ? `
+
+\u2026and ${truncated ? "at least " : ""}${unlisted} more not listed.` : truncated ? `
+
+\u2026and more not listed.` : "";
+  return `# Tests Reached From Your Files
+
+These test files are reached from the files in your scope: they use them, directly or through other files, according to an index of the repository's code. This is information about where a change here can show up \u2014 it is not a list of tests you are being asked to run or to make pass. The index can be wrong in both directions, so a file here may not depend on yours, and one that does may be missing:
+
+` + listed.map((path) => `- \`${path}\``).join("\n") + more;
 }
 function finishingSection(sessionId) {
   return `# When You Finish
@@ -1378,6 +1537,42 @@ var OrchestratorService = class {
         message: error instanceof Error ? error.message : String(error)
       };
     }
+  }
+  /**
+   * What depends on these files, read from the repository's code graph index
+   * by whatever runs the sessions.
+   *
+   * Never rejects, and `available: false` is not a failure — see
+   * `GraphDependentsOutcome`. `http`, `ao-cli` and `disabled` have no runner
+   * with a checkout to read, and are answered for here with the mode named, so
+   * a plan that says "made without the code graph" also says why.
+   */
+  async graphDependents(request) {
+    if (!this.adapter.graphDependents) {
+      return { available: false, reason: this.noGraphInThisMode() };
+    }
+    try {
+      return await this.adapter.graphDependents(request);
+    } catch (error) {
+      return { available: false, reason: this.graphFault(error) };
+    }
+  }
+  /** The test files reached from these files. Same terms as `graphDependents`. */
+  async graphAffectedTests(request) {
+    if (!this.adapter.graphAffectedTests) {
+      return { available: false, reason: this.noGraphInThisMode() };
+    }
+    try {
+      return await this.adapter.graphAffectedTests(request);
+    } catch (error) {
+      return { available: false, reason: this.graphFault(error) };
+    }
+  }
+  noGraphInThisMode() {
+    return `the orchestrator is in '${this.adapter.mode}' mode, which has no session runner to read a code graph from`;
+  }
+  graphFault(error) {
+    return `the code graph could not be read (${error instanceof Error ? error.message : String(error)})`;
   }
   /**
    * Ingest a pushed status update from a session callback
@@ -2203,6 +2398,33 @@ var wavePlans = sqliteTable5("wave_plans", {
    */
   runBranch: text5("run_branch"),
   runHeadSha: text5("run_head_sha"),
+  /**
+   * What the wave assigner changed about the planner's layout, and why: each
+   * task it moved for a shared file, for a dependency between two tasks' files,
+   * or to fit the fleet's capacity, with a sentence of reason.
+   *
+   * Until this column the assigner's adjustments were computed, counted into
+   * `wave_plan_metrics.file_conflicts_avoided`, and thrown away — so a plan
+   * review could show THAT two tasks had been sequenced and never why.
+   *
+   * NULL is "not recorded": the plan predates the column. That is not `[]`,
+   * which is an assignment that moved nothing.
+   */
+  adjustments: text5("adjustments", { mode: "json" }).$type(),
+  /**
+   * Whether this plan's waves were assigned with a code graph, and what the
+   * graph said about each task: how many files depend on what it changes, the
+   * first of them, and the claims the assigner sequenced on (TRD 27 §5.1,
+   * §5.3). When the graph was not used, the reason it was not.
+   *
+   * A snapshot from when the plan was made, of an index that goes stale as the
+   * code changes; `indexedAt` inside it says how old the index was then.
+   *
+   * NULL is "not asked": the plan predates the column, or was written by a
+   * caller that does not ask. Such a plan was assigned from its tasks' own
+   * files alone, exactly as every plan was before.
+   */
+  codeGraph: text5("code_graph", { mode: "json" }).$type(),
   startedAt: integer5("started_at", { mode: "timestamp" }),
   completedAt: integer5("completed_at", { mode: "timestamp" }),
   createdAt: integer5("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date()),
@@ -2802,6 +3024,8 @@ CREATE TABLE IF NOT EXISTS wave_plans (
   isolation_note TEXT,
   run_branch TEXT,
   run_head_sha TEXT,
+  adjustments TEXT,
+  code_graph TEXT,
   started_at INTEGER,
   completed_at INTEGER,
   created_at INTEGER NOT NULL,
@@ -2933,6 +3157,8 @@ function createSQLiteAdapter(path) {
   ensureColumn(sqliteConnection, "wave_tasks", "commit_sha", "commit_sha TEXT");
   ensureColumn(sqliteConnection, "wave_tasks", "files_changed", "files_changed TEXT");
   ensureColumn(sqliteConnection, "wave_tasks", "merged_at", "merged_at INTEGER");
+  ensureColumn(sqliteConnection, "wave_plans", "adjustments", "adjustments TEXT");
+  ensureColumn(sqliteConnection, "wave_plans", "code_graph", "code_graph TEXT");
   sqliteDb = drizzle(sqliteConnection, { schema: schema_exports });
   return sqliteDb;
 }
@@ -3028,9 +3254,12 @@ function createDbStatusPollerCallbacks() {
 }
 export {
   AoCliAdapter,
+  CODE_GRAPH_CAPABILITY,
   ClaudeSessionAdapter,
+  GRAPH_TIMEOUT_MS,
   HttpSessionTransport,
   ISOLATION_CAPABILITY,
+  MAX_REACHED_TESTS_LISTED,
   OrchestratorClient,
   OrchestratorService,
   StatusPoller,

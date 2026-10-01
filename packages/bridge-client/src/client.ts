@@ -138,6 +138,77 @@ export interface MirroredTelemetry {
   harness?: string;
   elapsedMs?: number;
   idleMs?: number;
+  /** Human prompts in the session. A count. */
+  prompts?: number;
+  /**
+   * From Claude Code's status line input, recorded on the machine by
+   * `devpilot statusline`. Absent where that is not installed.
+   *
+   * `windowUsed*` is the ACCOUNT's subscription window at the session's last
+   * reading, not a property of the session. `windowDelta*` is an estimate: the
+   * points the window moved while this machine was taking readings, shared
+   * among the sessions it metered in proportion to their API-rate cost.
+   */
+  windowUsed5h?: number;
+  windowUsed7d?: number;
+  /** ISO-8601: when each window resets. */
+  windowResets5h?: string;
+  windowResets7d?: string;
+  windowDelta5h?: number;
+  windowDelta7d?: number;
+  /** Prompt-cache misses in the main conversation, as diagnosed by the client. */
+  cacheMisses?: number;
+  /** Cause name → count, from the client's own closed list. */
+  cacheMissCauses?: Record<string, number>;
+  /** Input tokens re-written to the cache because of those misses. */
+  cacheRecacheTokens?: number;
+  /** What re-writing them cost over reading them, at API list rates. */
+  cacheMissCostUsd?: number;
+  /** Highest context-window percentage seen. */
+  contextPeakPct?: number;
+}
+
+export interface GraphManifest {
+  graph: { commitSha: string; indexer: string; indexerVersion: string; syncedAt: string } | null;
+  /** path → content hash, for every file the hosted graph holds. */
+  files: Record<string, string>;
+}
+
+export type GraphManifestResult =
+  | ({ status: 'ok' } & GraphManifest)
+  | { status: 'disabled'; message: string }
+  | { status: 'error'; message: string };
+
+export interface GraphCounts {
+  files: number;
+  nodes: number;
+  edges: number;
+}
+
+/** One request to `/api/graph/sync`. Every list is bounded by the route. */
+export interface GraphSyncBatch {
+  repo: string;
+  branch: string;
+  commitSha: string;
+  indexer: string;
+  indexerVersion: string;
+  /** Chosen by the sender; groups the batches of one sync. */
+  syncId: string;
+  /** True on the last batch: the graph's counts and commit are updated. */
+  final: boolean;
+  upsertFiles: { path: string; contentHash: string; language: string }[];
+  removePaths: string[];
+  nodes: {
+    id: string;
+    kind: string;
+    name: string;
+    qualifiedName: string;
+    filePath: string;
+    startLine: number;
+    endLine: number;
+    isExported: boolean;
+  }[];
+  edges: { source: string; target: string; kind: string; line: number | null; filePath: string }[];
 }
 
 export class BridgeClient {
@@ -398,6 +469,65 @@ export class BridgeClient {
         method: 'POST',
         body: JSON.stringify(telemetry),
       });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * What the hosted plane already holds of a repository's code graph: which
+   * files, at which content hash. The caller diffs its own index against this
+   * and sends only what changed.
+   *
+   * `disabled` is its own outcome because the caller must say something
+   * different for it: the workspace has not turned the hosted code graph on
+   * (it is a premium, opt-in feature), which is not a failure.
+   */
+  async graphManifest(repo: string, branch: string): Promise<GraphManifestResult> {
+    try {
+      const q = `repo=${encodeURIComponent(repo)}&branch=${encodeURIComponent(branch)}`;
+      const body = await this.request<{ graph: GraphManifest['graph']; files: Record<string, string> }>(
+        `/api/graph/manifest?${q}`,
+      );
+      return { status: 'ok', graph: body.graph ?? null, files: body.files ?? {} };
+    } catch (error) {
+      if (error instanceof BridgeError && error.status === 403) {
+        return { status: 'disabled', message: error.message };
+      }
+      return { status: 'error', message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /**
+   * Send one batch of a code graph's STRUCTURE: file paths and hashes, symbol
+   * names and kinds, and which symbol refers to which.
+   *
+   * There is no field here for a signature, a docstring or any source text,
+   * and the hosted route rejects a request that carries a key it does not
+   * know — so the boundary is held on both sides rather than trusted to one.
+   */
+  async graphSync(batch: GraphSyncBatch): Promise<{ ok: true; counts?: GraphCounts } | { ok: false; status: number; message: string }> {
+    try {
+      const body = await this.request<{ counts?: GraphCounts }>('/api/graph/sync', {
+        method: 'POST',
+        body: JSON.stringify(batch),
+      });
+      return { ok: true, counts: body?.counts };
+    } catch (error) {
+      return {
+        ok: false,
+        status: error instanceof BridgeError ? error.status : 0,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /** Remove a repository's graph from the hosted plane. */
+  async graphDelete(repo: string, branch: string): Promise<boolean> {
+    try {
+      const q = `repo=${encodeURIComponent(repo)}&branch=${encodeURIComponent(branch)}`;
+      await this.request(`/api/graph?${q}`, { method: 'DELETE' });
       return true;
     } catch {
       return false;

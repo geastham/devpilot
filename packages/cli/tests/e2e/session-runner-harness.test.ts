@@ -41,12 +41,17 @@ function stubClaude(dir: string, name: string): { path: string; argvLog: string;
 const fs = require('fs');
 const argv = process.argv.slice(2);
 fs.writeFileSync(${JSON.stringify(argvLog)}, JSON.stringify(argv));
+const promptLog = ${JSON.stringify(argvLog)}.replace('.argv.json', '.prompt.txt');
 // Copy the MCP config while it exists: the runner deletes it when we exit.
 const i = argv.indexOf('--mcp-config');
 if (i !== -1) fs.writeFileSync(${JSON.stringify(cfgLog)}, fs.readFileSync(argv[i + 1], 'utf8'));
+// Every config, in order, for the runs that are given more than one.
+const all = argv.flatMap((a, n) => (a === '--mcp-config' ? [JSON.parse(fs.readFileSync(argv[n + 1], 'utf8'))] : []));
+fs.writeFileSync(${JSON.stringify(cfgLog)} + '.all', JSON.stringify(all));
 let input = '';
 process.stdin.on('data', (c) => (input += c));
 process.stdin.on('end', () => {
+  fs.writeFileSync(promptLog, input);
   fs.writeFileSync('touched.txt', 'edited by stub\\n');
   const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
   out({ type: 'assistant', message: { id: 'msg_1', model: 'claude-haiku-4-5',
@@ -136,6 +141,8 @@ describe('the harness reaches the agent it configures', () => {
 
     const argv: string[] = JSON.parse(readFileSync(stub.argvLog, 'utf8'));
     expect(argv).toEqual(['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'acceptEdits']);
+    // And is given the task as written, with nothing put in front of it.
+    expect(readFileSync(stub.argvLog.replace('.argv.json', '.prompt.txt'), 'utf8')).toBe('do the thing');
   });
 
   it('launches a lean agent with nothing it was not given', async () => {
@@ -187,5 +194,38 @@ describe('the harness reaches the agent it configures', () => {
     // …against the most the same tokens could have cost on any listed model.
     expect(reading.referenceCostUsd).toBeGreaterThan(reading.listCostUsd);
     expect(reading.referenceModel).toMatch(/^claude-fable-5/);
+  });
+
+  /**
+   * Work history is the cockpit's own record of what earlier tasks did. The
+   * runner knows which cockpit dispatched a task — it is where it reports — so
+   * it is the runner that points the agent there, and grants the one tool.
+   */
+  it('points a work-history agent at the cockpit that dispatched it, and grants the one tool', async () => {
+    const stub = stubClaude(workspace, 'claude-history');
+    const reports = await run(39153, 'sess-history', {
+      claudePath: stub.path,
+      harness: resolveHarness('lean+work-history'),
+    });
+
+    const argv: string[] = JSON.parse(readFileSync(stub.argvLog, 'utf8'));
+    expect(argv.slice(-2)).toEqual(['--allowedTools', 'mcp__devpilot-history__devpilot_history']);
+
+    const configs = JSON.parse(readFileSync(`${stub.cfgLog}.all`, 'utf8'));
+    const servers = Object.assign({}, ...configs.map((c: any) => c.mcpServers));
+    expect(Object.keys(servers)).toEqual(['devpilot-history']);
+    expect(servers['devpilot-history'].env).toEqual({
+      DEVPILOT_MCP_TOOLS: 'history',
+      DEVPILOT_COCKPIT_URL: `http://127.0.0.1:${CALLBACK_PORT}`,
+      DEVPILOT_REPO: 'acme/widget',
+    });
+
+    // It is told what it has, ahead of the task.
+    const prompt = readFileSync(stub.argvLog.replace('.argv.json', '.prompt.txt'), 'utf8');
+    expect(prompt.startsWith('# Work history')).toBe(true);
+    expect(prompt.endsWith('do the thing')).toBe(true);
+
+    const stamps = new Set(reports.map((r) => r.body?.telemetry?.harness).filter(Boolean));
+    expect(stamps).toEqual(new Set(['lean+work-history@1']));
   });
 });

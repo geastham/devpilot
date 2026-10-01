@@ -5,7 +5,17 @@ import { getConductorGraph, threadFor } from '@/lib/conductor-graph';
 import { withConductorRun } from '@/lib/conductor-resume';
 import { getServerOrchestrator } from '@/lib/orchestrator';
 import { recordRun } from '@/lib/conductor-memory';
-import { buildSpecContentForItem } from '@devpilot.sh/core/wave-planner';
+import {
+  assignWaves,
+  buildSpecContentForItem,
+  codeGraphOf,
+  dependentClaimsOf,
+  describeCodeGraph,
+  type CodeGraphReview,
+  type ParsedWavePlan,
+  type PlanCodeGraph,
+  type WaveAdjustment,
+} from '@devpilot.sh/core/wave-planner';
 
 // Never prerendered. A GET handler that touches no request API is treated by
 // `next build` as static, and its build-time answer is then served for ever —
@@ -23,6 +33,10 @@ interface RouteParams {
  *   POST { decision: … }      → resume a run paused at review
  *   POST { waveOutcome: … }   → resume a run paused waiting for a wave
  *   GET                       → current state without advancing it
+ *
+ * Every answer carries `codeGraph`: whether the plan was laid out with a code
+ * graph, each task's blast radius, and the tasks it sequenced — see
+ * `codeGraphFor`.
  *
  * One thread per item, so a second POST while a run is live resumes that run
  * rather than starting a competing one.
@@ -71,6 +85,73 @@ function describe(result: Record<string, unknown>) {
   };
 }
 
+/**
+ * What a code graph said about the run's plan, for whoever is reviewing it:
+ * per task, how many files depend on what it changes and which; and each task
+ * the wave assigner moved because of a dependency, in a sentence (TRD 27 §5.1,
+ * §5.3).
+ *
+ * Two sources, because a plan lives in two places over its life:
+ *
+ *  - Once approved it is a row, and the row holds both the graph's reading and
+ *    the adjustments the assigner actually made. That is the record.
+ *  - At review it exists only in the run's state. The reading is on the plan
+ *    (the generate port put it there), and the adjustments are worked out here
+ *    by running the same deterministic assigner over the same claims — which
+ *    is what `persistPlan` will do if the plan is approved, so the preview and
+ *    the record cannot disagree.
+ *
+ * `null` means nobody asked: there is no plan yet, or the plan was made before
+ * this existed. That is different from `{ used: false, reason }`, which is a
+ * plan that was made without the graph and says why. Neither is an error, and
+ * the run proceeds identically in all three cases.
+ */
+async function codeGraphFor(result: Record<string, unknown>): Promise<CodeGraphReview | null> {
+  if (typeof result.wavePlanId === 'string') {
+    const row = await db.query.wavePlans.findFirst({
+      where: eq(wavePlans.id, result.wavePlanId),
+      columns: { codeGraph: true, adjustments: true },
+    });
+    if (row) {
+      // Shape-checked like the one in state: it is JSON another version may
+      // have written.
+      const recorded = codeGraphOf({ codeGraph: row.codeGraph });
+      return recorded ? describeCodeGraph(recorded, row.adjustments ?? null) : null;
+    }
+  }
+
+  const interrupts = (result.__interrupt__ ?? []) as Array<{ value?: unknown }>;
+  const reviewing = (interrupts[0]?.value as { plan?: unknown } | undefined)?.plan;
+  const plan = reviewing ?? result.plan;
+
+  const codeGraph = codeGraphOf(plan);
+  if (!codeGraph) return null;
+  return describeCodeGraph(codeGraph, previewAdjustments(plan as ParsedWavePlan, codeGraph));
+}
+
+/**
+ * The adjustments approving this plan would produce. Null when they cannot be
+ * worked out — a plan in state that the assigner rejects (a cycle) — so that
+ * "could not say" is never shown as "moved nothing".
+ */
+function previewAdjustments(plan: ParsedWavePlan, codeGraph: PlanCodeGraph): WaveAdjustment[] | null {
+  try {
+    const dependentClaims = dependentClaimsOf(codeGraph);
+    return assignWaves(
+      (plan.waves ?? []).flatMap((wave) => wave.tasks ?? []),
+      plan.dependencyEdges ?? [],
+      dependentClaims ? { dependentClaims } : undefined
+    ).adjustments;
+  } catch {
+    return null;
+  }
+}
+
+/** `describe`, plus the code graph block — which needs the database. */
+async function respond(result: Record<string, unknown>) {
+  return { ...describe(result), codeGraph: await codeGraphFor(result) };
+}
+
 export async function POST(request: NextRequest, { params }: RouteParams) {
   try {
     const { id } = await params;
@@ -104,7 +185,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
         graph.invoke(new Command({ resume: body.decision as ReviewDecision }), thread)
       );
       maybeRecord(result as Record<string, unknown>);
-      return NextResponse.json(describe(result as Record<string, unknown>));
+      return NextResponse.json(await respond(result as Record<string, unknown>));
     }
 
     if (body.waveOutcome) {
@@ -112,7 +193,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
         graph.invoke(new Command({ resume: body.waveOutcome }), thread)
       );
       maybeRecord(result as Record<string, unknown>);
-      return NextResponse.json(describe(result as Record<string, unknown>));
+      return NextResponse.json(await respond(result as Record<string, unknown>));
     }
 
     // --- Start --------------------------------------------------------------
@@ -154,7 +235,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     );
 
     maybeRecord(result as Record<string, unknown>);
-    return NextResponse.json(describe(result as Record<string, unknown>));
+    return NextResponse.json(await respond(result as Record<string, unknown>));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error('Conductor run failed:', error);
@@ -387,10 +468,11 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ status: null, awaiting: null }, { status: 404 });
     }
 
-    const described = describe({
+    const state = {
       ...(snapshot.values as Record<string, unknown>),
       __interrupt__: snapshot.tasks.flatMap((t) => t.interrupts ?? []),
-    });
+    };
+    const described = describe(state);
     const outcome = await outcomeFor(id);
 
     /**
@@ -436,6 +518,10 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
       // What the run produced, so the bridge can tell Linear something worth
       // recording rather than "complete".
       outcome: outcome ? { ...outcome, failures } : outcome,
+      // Each task's blast radius, and why any task was sequenced on account of
+      // it — or that the plan was made without a code graph, and why. Local:
+      // file paths and counts from the index on this machine.
+      codeGraph: await codeGraphFor(state),
       next: snapshot.next,
     });
   } catch (error) {

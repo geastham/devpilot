@@ -22,6 +22,9 @@ export * from './wave-assigner';
 // Plan scoring
 export * from './plan-scorer';
 
+// Code graph → blast radius and the assigner's dependent claims (TRD 27)
+export * from './plan-code-graph';
+
 // Model IDs (single source of truth — see models.ts on why)
 export * from './models';
 
@@ -52,6 +55,9 @@ export * from './ticket-description';
 
 // Prompt templates
 export * from './prompt-templates';
+
+// Work history — what past tasks did to a file (TRD 27 §4, the L2 layer)
+export * from './work-history';
 
 // Execution
 export * from './execution';

@@ -705,6 +705,33 @@ var wavePlans = sqliteTable5("wave_plans", {
    */
   runBranch: text5("run_branch"),
   runHeadSha: text5("run_head_sha"),
+  /**
+   * What the wave assigner changed about the planner's layout, and why: each
+   * task it moved for a shared file, for a dependency between two tasks' files,
+   * or to fit the fleet's capacity, with a sentence of reason.
+   *
+   * Until this column the assigner's adjustments were computed, counted into
+   * `wave_plan_metrics.file_conflicts_avoided`, and thrown away — so a plan
+   * review could show THAT two tasks had been sequenced and never why.
+   *
+   * NULL is "not recorded": the plan predates the column. That is not `[]`,
+   * which is an assignment that moved nothing.
+   */
+  adjustments: text5("adjustments", { mode: "json" }).$type(),
+  /**
+   * Whether this plan's waves were assigned with a code graph, and what the
+   * graph said about each task: how many files depend on what it changes, the
+   * first of them, and the claims the assigner sequenced on (TRD 27 §5.1,
+   * §5.3). When the graph was not used, the reason it was not.
+   *
+   * A snapshot from when the plan was made, of an index that goes stale as the
+   * code changes; `indexedAt` inside it says how old the index was then.
+   *
+   * NULL is "not asked": the plan predates the column, or was written by a
+   * caller that does not ask. Such a plan was assigned from its tasks' own
+   * files alone, exactly as every plan was before.
+   */
+  codeGraph: text5("code_graph", { mode: "json" }).$type(),
   startedAt: integer5("started_at", { mode: "timestamp" }),
   completedAt: integer5("completed_at", { mode: "timestamp" }),
   createdAt: integer5("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date()),
@@ -1304,6 +1331,8 @@ CREATE TABLE IF NOT EXISTS wave_plans (
   isolation_note TEXT,
   run_branch TEXT,
   run_head_sha TEXT,
+  adjustments TEXT,
+  code_graph TEXT,
   started_at INTEGER,
   completed_at INTEGER,
   created_at INTEGER NOT NULL,
@@ -1435,6 +1464,8 @@ function createSQLiteAdapter(path) {
   ensureColumn(sqliteConnection, "wave_tasks", "commit_sha", "commit_sha TEXT");
   ensureColumn(sqliteConnection, "wave_tasks", "files_changed", "files_changed TEXT");
   ensureColumn(sqliteConnection, "wave_tasks", "merged_at", "merged_at INTEGER");
+  ensureColumn(sqliteConnection, "wave_plans", "adjustments", "adjustments TEXT");
+  ensureColumn(sqliteConnection, "wave_plans", "code_graph", "code_graph TEXT");
   sqliteDb = drizzle(sqliteConnection, { schema: schema_exports });
   return sqliteDb;
 }

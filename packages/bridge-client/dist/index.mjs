@@ -262,6 +262,62 @@ var BridgeClient = class {
     }
   }
   /**
+   * What the hosted plane already holds of a repository's code graph: which
+   * files, at which content hash. The caller diffs its own index against this
+   * and sends only what changed.
+   *
+   * `disabled` is its own outcome because the caller must say something
+   * different for it: the workspace has not turned the hosted code graph on
+   * (it is a premium, opt-in feature), which is not a failure.
+   */
+  async graphManifest(repo, branch) {
+    try {
+      const q = `repo=${encodeURIComponent(repo)}&branch=${encodeURIComponent(branch)}`;
+      const body = await this.request(
+        `/api/graph/manifest?${q}`
+      );
+      return { status: "ok", graph: body.graph ?? null, files: body.files ?? {} };
+    } catch (error) {
+      if (error instanceof BridgeError && error.status === 403) {
+        return { status: "disabled", message: error.message };
+      }
+      return { status: "error", message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  /**
+   * Send one batch of a code graph's STRUCTURE: file paths and hashes, symbol
+   * names and kinds, and which symbol refers to which.
+   *
+   * There is no field here for a signature, a docstring or any source text,
+   * and the hosted route rejects a request that carries a key it does not
+   * know — so the boundary is held on both sides rather than trusted to one.
+   */
+  async graphSync(batch) {
+    try {
+      const body = await this.request("/api/graph/sync", {
+        method: "POST",
+        body: JSON.stringify(batch)
+      });
+      return { ok: true, counts: body?.counts };
+    } catch (error) {
+      return {
+        ok: false,
+        status: error instanceof BridgeError ? error.status : 0,
+        message: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+  /** Remove a repository's graph from the hosted plane. */
+  async graphDelete(repo, branch) {
+    try {
+      const q = `repo=${encodeURIComponent(repo)}&branch=${encodeURIComponent(branch)}`;
+      await this.request(`/api/graph?${q}`, { method: "DELETE" });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  /**
    * Send derived stream events for the live watch view.
    *
    * The same privacy line as telemetry, at event granularity: tool name,

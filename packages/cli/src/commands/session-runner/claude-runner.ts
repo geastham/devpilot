@@ -3,8 +3,9 @@ import { promisify } from 'util';
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, mkdirSync } from 'fs';
 import { tmpdir, homedir } from 'os';
 import { join } from 'path';
+import { recordWindowReading, statuslineDir } from '../../utils/statusline-store.js';
 import { TelemetryCollector, type SessionTelemetry } from './stream-events';
-import type { Harness } from './harness';
+import { sessionServerCommand, type Harness, type WorkHistorySource } from './harness';
 
 const execFileAsync = promisify(execFile);
 
@@ -218,9 +219,11 @@ function writeSessionMcpConfig(sessionLink: string): { dir: string; file: string
       {
         mcpServers: {
           'devpilot-session': {
-            command: 'npx',
-            args: ['-y', '@devpilot.sh/mcp-session'],
-            env: { DEVPILOT_SESSION_LINK: sessionLink },
+            ...sessionServerCommand(),
+            // `session` only: the whole of this server is granted to the agent
+            // below, and work history is a separate grant (the `work-history`
+            // technique) that a dispatch into a session must not carry with it.
+            env: { DEVPILOT_SESSION_LINK: sessionLink, DEVPILOT_MCP_TOOLS: 'session' },
           },
         },
       },
@@ -279,6 +282,18 @@ export interface RunClaudeOptions {
    * `baseline`, which adds nothing to the invocation.
    */
   harness?: Harness;
+  /**
+   * The code graph MCP server for the directory the agent runs in, when there
+   * is one. Only used if the harness includes the `code-graph` technique.
+   */
+  codeGraph?: { command: string; args: string[]; env?: Record<string, string> } | null;
+  /**
+   * The local cockpit this run can ask for work history, when there is one.
+   * Only used if the harness includes the `work-history` technique.
+   */
+  workHistory?: WorkHistorySource | null;
+  /** Where window readings are logged. Defaults to `~/.devpilot/statusline`; set in tests. */
+  statuslineDir?: string;
   /**
    * Called as the agent works, with the running picture of what it is doing.
    *
@@ -341,19 +356,50 @@ export async function runClaudeSession(
   // be configured on the machine, which would vary per operator and could reach
   // systems the dispatch never intended to touch.
   let mcpDir: string | undefined;
-  let effectivePrompt = prompt;
   if (sessionLink) {
     const cfg = writeSessionMcpConfig(sessionLink);
     mcpDir = cfg.dir;
     args.push('--mcp-config', cfg.file, '--strict-mcp-config');
-    effectivePrompt = sessionPreamble() + prompt;
   }
 
   // The harness goes last so its arguments are easy to find in a process
   // listing, and after the session wiring so a technique can tell whether an
   // MCP config has already been supplied.
-  const harnessBuild = harness?.build({ hasMcpConfig: Boolean(sessionLink) });
+  const harnessBuild = harness?.build({
+    hasMcpConfig: Boolean(sessionLink),
+    codeGraph: options.codeGraph,
+    workHistory: options.workHistory,
+  });
+  // The stamp for this run, not for the runner: a technique that could not
+  // take effect here (no index for this repository, say) is not in it.
+  const stamp = harnessBuild?.stamp ?? harness?.stamp;
   if (harnessBuild) args.push(...harnessBuild.args);
+
+  // The session's instructions stay first — "join before anything else" has to
+  // be the first thing read — then whatever a technique needs the agent to
+  // know it has, then the task.
+  const effectivePrompt = (sessionLink ? sessionPreamble() : '') + (harnessBuild?.preamble ?? '') + prompt;
+
+  /**
+   * Grant the MCP tools this run was given — last, and exactly once.
+   *
+   * A headless agent cannot be prompted, so an MCP tool it has not been granted
+   * is refused, and `acceptEdits` covers file edits only. Without this, the
+   * shared-session server and the code graph were both configured and both
+   * unusable: the agent was told to call `devpilot_session_join` first, was
+   * refused, and carried on without the session it was dispatched into.
+   *
+   * These are the servers the runner itself put in the config, on the
+   * operator's instruction (a dispatch into a shared session; a harness that
+   * names a technique) — not tools the dispatch asked for. `--allowedTools`
+   * takes a list, so it goes at the end where nothing can be read as part of
+   * it.
+   */
+  const allowedTools = [
+    ...(sessionLink ? ['mcp__devpilot-session'] : []),
+    ...(harnessBuild?.allowedTools ?? []),
+  ];
+  if (allowedTools.length > 0) args.push('--allowedTools', ...allowedTools);
 
   const outcome = await new Promise<{
     code: number | null;
@@ -378,6 +424,22 @@ export async function runClaudeSession(
     const collector = new TelemetryCollector(Date.now, workdir);
     let timedOut = false;
     let killed = false;
+
+    /**
+     * Write the account's window readings into the same log the status line
+     * keeps, so this agent's share of the window is attributed to it and not
+     * to whatever else was running. Only when something moved: the stream
+     * reports on every response and most reports change nothing.
+     */
+    let loggedWindow = '';
+    const logWindow = () => {
+      const reading = collector.windowReading();
+      if (!reading) return;
+      const key = JSON.stringify([reading.five, reading.seven, reading.c]);
+      if (key === loggedWindow) return;
+      loggedWindow = key;
+      recordWindowReading(reading, options.statuslineDir ?? statuslineDir());
+    };
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -406,7 +468,8 @@ export async function runClaudeSession(
       pending = lines.pop() ?? '';
       for (const line of lines) collector.ingestLine(line);
       if (lines.length > 0) {
-        options.onTelemetry?.({ ...collector.snapshot(), harness: harness?.stamp });
+        options.onTelemetry?.({ ...collector.snapshot(), harness: stamp });
+        logWindow();
       }
     });
     child.stderr.on('data', (chunk: Buffer) => {
