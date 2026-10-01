@@ -148,12 +148,26 @@ function scratchpadRoots(): string[] {
 }
 
 /**
+ * How long a scratchpad directory can vouch for a session that is writing
+ * nothing. Two hours: the quiet stretches that are still work — a long model
+ * call, a slow test suite, a big build — are minutes, an hour at the outside.
+ */
+export const SCRATCHPAD_VOUCHES_FOR_MS = 2 * 60 * 60 * 1000;
+
+/**
  * Is this session still running?
  *
  * mtime alone is not enough. A session that is *thinking* — a long model call,
  * a slow test run — writes nothing for minutes and would read as ended. The
- * scratchpad directory exists for the lifetime of the session, so its presence
- * is the stronger signal and mtime is the fallback.
+ * scratchpad directory is there while the session is, so its presence carries
+ * a quiet session past the short window.
+ *
+ * But only so far. The directory is there for as long as the TERMINAL is, and
+ * then until the machine restarts: an earlier version of this said it "exists
+ * for the lifetime of the session" and treated it as proof. On a real machine
+ * that made twenty-eight sessions "running" — left open, some untouched for
+ * weeks — beside the one that was. A scratchpad extends the window; it does
+ * not remove it.
  */
 function isLive(
   observation: SessionObservation,
@@ -162,7 +176,9 @@ function isLive(
   nowMs: number,
   existsImpl: (p: string) => boolean,
 ): boolean {
-  if (nowMs - observation.lastActivityMs <= liveWithinMs) return true;
+  const quietFor = nowMs - observation.lastActivityMs;
+  if (quietFor <= liveWithinMs) return true;
+  if (quietFor > SCRATCHPAD_VOUCHES_FOR_MS) return false;
   return scratchpadRoots().some((root) =>
     existsImpl(join(root, projectSlug, observation.sessionUuid)),
   );

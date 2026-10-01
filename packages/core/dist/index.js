@@ -12646,8 +12646,11 @@ function scratchpadRoots() {
   if (uid === null) return [];
   return [`/private/tmp/claude-${uid}`, `/tmp/claude-${uid}`];
 }
+var SCRATCHPAD_VOUCHES_FOR_MS = 2 * 60 * 60 * 1e3;
 function isLive(observation, projectSlug, liveWithinMs, nowMs, existsImpl) {
-  if (nowMs - observation.lastActivityMs <= liveWithinMs) return true;
+  const quietFor = nowMs - observation.lastActivityMs;
+  if (quietFor <= liveWithinMs) return true;
+  if (quietFor > SCRATCHPAD_VOUCHES_FOR_MS) return false;
   return scratchpadRoots().some(
     (root) => existsImpl((0, import_node_path.join)(root, projectSlug, observation.sessionUuid))
   );
