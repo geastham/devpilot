@@ -20,8 +20,14 @@ import { DEFAULT_CONFIG, type ConductorConfig, type ConductorPorts } from './typ
  *                                          ▼
  *                                      dispatch ─▶ awaitWave ─┬─(ok)──▶ advance ─┬─(more)─▶ dispatch
  *                                          ▲                  │                  └─(none)─▶ finish
- *                                          │                  └─(failed)─▶ retry? ─┬─▶ dispatch
- *                                          └───────────────────────────────────────┘   └─▶ fail (halt)
+ *                                          │                  ├─(failed)─▶ retry? ─┬─▶ dispatch
+ *                                          ├──────────────────│────────────────────┘   └─▶ fail (halt)
+ *                                          └──(in-flight)─────┘
+ *
+ * `dispatch` is the only node that starts agents, for the first pass over a
+ * wave and for every later one: a wave too large for the host's concurrency cap
+ * is drained by `in-flight` signals sending the run back through it, not by the
+ * host dispatching on the side.
  *
  * Every branch below was previously an `if` somewhere inside a 449-line
  * controller, spread across `approve`, `dispatchWave`, `onTaskComplete`,
@@ -76,11 +82,14 @@ export function createConductorGraph(options: ConductorAgentOptions) {
     return 'persist';
   }
 
-  /** After a wave settles: next wave, retry, or stop. */
+  /** After a wave answers: dispatch more of it, next wave, retry, or stop. */
   function afterWave(
     state: ConductorStateType
-  ): 'advance' | 'retryWave' | 'fail' | 'finish' {
-    const failed = !state.completedWaves.includes(state.currentWaveIndex);
+  ): 'dispatch' | 'advance' | 'retryWave' | 'fail' | 'finish' {
+    // Not an ending. Same wave, no retry consumed, nothing marked complete.
+    if (state.waveSignal?.state === 'in-flight') return 'dispatch';
+
+    const failed = state.waveSignal?.state !== 'complete';
 
     if (failed) {
       if (state.waveRetries < config.waveRetryLimit) return 'retryWave';
@@ -117,7 +126,13 @@ export function createConductorGraph(options: ConductorAgentOptions) {
     .addConditionalEdges('review', afterReview, ['persist', 'refine', 'fail'])
     .addEdge('persist', 'dispatch')
     .addEdge('dispatch', 'awaitWave')
-    .addConditionalEdges('awaitWave', afterWave, ['advance', 'retryWave', 'fail', 'finish'])
+    .addConditionalEdges('awaitWave', afterWave, [
+      'dispatch',
+      'advance',
+      'retryWave',
+      'fail',
+      'finish',
+    ])
     .addEdge('retryWave', 'dispatch')
     .addConditionalEdges('advance', afterAdvance, ['dispatch', 'finish'])
     .addEdge('finish', END)

@@ -5,8 +5,19 @@ import { basename, isAbsolute, resolve } from 'path';
 import { runClaudeSession } from './claude-runner';
 import { sendCompletion, sendStatus } from './callbacks';
 import { describeActivity, estimateProgress, type SessionTelemetry } from './stream-events';
+import {
+  IsolationError,
+  checkIsolatable,
+  finishTaskWorkspace,
+  integrateRun,
+  prepareTaskWorkspace,
+  refSafe,
+  workspacePreamble,
+  type TaskWorkspace,
+} from './isolation';
 import type {
   CreateSessionRequest,
+  IntegrateRequest,
   RunnerConfig,
   RunnerSession,
   StatusUpdate,
@@ -29,7 +40,22 @@ import type {
  * break at install time.
  */
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
+
+/**
+ * What this runner can do beyond the original contract, reported by
+ * `/v1/health` so a dispatcher can tell before it asks. A runner that predates
+ * a capability ignores the field it does not know, which for `isolation` would
+ * mean a task quietly run in the shared checkout — so the dispatcher checks.
+ */
+const CAPABILITIES = ['isolation'] as const;
+
+/** The first line of a commit message: one line, and short enough to read in a log. */
+function commitSubject(taskCode: string, title: string | undefined): string {
+  const line = (title ?? '').replace(/\s+/g, ' ').trim();
+  const subject = line ? `devpilot(${taskCode}): ${line}` : `devpilot: task ${taskCode}`;
+  return subject.length > 72 ? `${subject.slice(0, 71)}…` : subject;
+}
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
@@ -135,11 +161,31 @@ export class SessionRunner {
 
     try {
       session.status = 'running';
+
+      /**
+       * Give the task its own tree before the agent exists. A failure here is
+       * thrown into the catch below and reported as a failed task, with the
+       * reason — never answered by falling back to the shared checkout, which
+       * is the thing isolation was asked for to avoid.
+       */
+      let workspace: TaskWorkspace | undefined;
+      if (request.isolation) {
+        workspace = await prepareTaskWorkspace(session.workdir, request.isolation, this.config.isolation);
+        session.branch = workspace.branch;
+        this.config.log(
+          `[${session.externalSessionId}] task ${request.isolation.taskCode} on ${workspace.branch} ` +
+            `(from ${workspace.baseSha.slice(0, 8)})`
+        );
+      }
+      const rundir = workspace?.dir ?? session.workdir;
+
       session.progressPercent = 5;
       session.currentStep = 'session started';
       this.reportStatus(session, callbackUrl, callbackToken, {
         currentStep: 'session started',
-        message: `Claude Code session running in ${session.workdir}`,
+        message: workspace
+          ? `Claude Code session running on ${workspace.branch}`
+          : `Claude Code session running in ${session.workdir}`,
       });
 
       /**
@@ -170,8 +216,10 @@ export class SessionRunner {
       const REPORT_INTERVAL_MS = 3_000;
 
       const outcome = await runClaudeSession({
-        workdir: session.workdir,
-        prompt: request.prompt,
+        workdir: rundir,
+        prompt: workspace
+          ? workspacePreamble(workspace, this.config.isolation) + request.prompt
+          : request.prompt,
         sessionLink: request.sessionLink,
         model: request.model,
         claudePath: this.config.claudePath,
@@ -185,6 +233,7 @@ export class SessionRunner {
         permissionMode: this.config.permissionMode,
         resumeSessionId: request.resumeSessionId,
         timeoutMs: this.config.timeoutMs,
+        harness: this.config.harness,
         onLog: (line) => this.config.log(`[${session.externalSessionId}] ${line}`),
         onSpawn: (kill) => {
           session.kill = kill;
@@ -210,6 +259,42 @@ export class SessionRunner {
 
       clearInterval(heartbeat);
 
+      /**
+       * Commit the task and read its changes from git.
+       *
+       * For an isolated task this REPLACES the before/after snapshot the agent
+       * run made: that compared two `git status` readings, which is the best
+       * available in a tree other agents share, and here is simply less exact
+       * than asking git what the branch changed.
+       *
+       * Done for a failed task too — its partial work is kept on the branch. If
+       * the commit itself fails, the task did not produce a result anyone can
+       * merge, so it is reported as failed whatever the agent said.
+       */
+      if (workspace && request.isolation) {
+        try {
+          const result = await finishTaskWorkspace(workspace, {
+            message:
+              `${commitSubject(request.isolation.taskCode, request.isolation.title)}\n\n` +
+              `Run: ${request.isolation.runId}\n` +
+              `Session: ${session.devpilotSessionId}\n` +
+              (outcome.success ? '' : 'The agent did not finish this task; this is what it left.\n'),
+          });
+          outcome.filesModified = result.filesModified;
+          outcome.filesCreated = result.filesCreated;
+          outcome.filesDeleted = result.filesDeleted;
+          outcome.commitSha = result.commitSha;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          outcome.success = false;
+          outcome.error = outcome.error ? `${outcome.error}\n${message}` : message;
+          outcome.filesModified = [];
+          outcome.filesCreated = [];
+          outcome.filesDeleted = [];
+          outcome.commitSha = undefined;
+        }
+      }
+
       session.terminal = true;
       session.status = outcome.success ? 'complete' : 'error';
       session.progressPercent = outcome.success ? 100 : session.progressPercent;
@@ -230,6 +315,8 @@ export class SessionRunner {
           sessionId: session.devpilotSessionId,
           success: outcome.success,
           commitSha: outcome.commitSha,
+          branch: workspace?.branch,
+          baseSha: workspace?.baseSha,
           filesModified: outcome.filesModified,
           filesCreated: outcome.filesCreated,
           filesDeleted: outcome.filesDeleted,
@@ -238,6 +325,7 @@ export class SessionRunner {
           costUsd: outcome.costUsd,
           durationMinutes: outcome.durationMinutes,
           error: outcome.error,
+          telemetry: session.telemetry,
           metadata: request.metadata,
         },
         callbackToken,
@@ -312,6 +400,20 @@ export class SessionRunner {
       return json(res, 400, { error: 'REPO_NOT_FOUND', message: error });
     }
 
+    /**
+     * Refuse an isolation request that cannot be honoured, now, while the
+     * dispatcher is still listening. Creating the worktree happens after the
+     * response (it can be slow), but whether it is possible at all is known
+     * here, and a 400 with the reason is kinder than a 201 and a failure.
+     */
+    if (body.isolation !== undefined) {
+      const refusal = await this.isolationRefusal(body, workdir);
+      if (refusal) {
+        this.config.log(`create rejected: ${refusal}`);
+        return json(res, 400, { error: 'ISOLATION_UNAVAILABLE', message: refusal });
+      }
+    }
+
     const externalSessionId = `run_${randomUUID()}`;
     const session: RunnerSession = {
       externalSessionId,
@@ -344,6 +446,95 @@ export class SessionRunner {
     void this.execute(session, body);
   }
 
+  /** Why an isolation request cannot be honoured, or null if it can. */
+  private async isolationRefusal(body: CreateSessionRequest, workdir: string): Promise<string | null> {
+    const isolation = body.isolation;
+    if (
+      !isolation ||
+      typeof isolation.runId !== 'string' ||
+      typeof isolation.taskCode !== 'string' ||
+      !isolation.runId ||
+      !isolation.taskCode
+    ) {
+      return 'isolation needs a runId and a taskCode';
+    }
+    // A resumed conversation belongs to the directory it was started in:
+    // `claude --resume` looks for it there, and would not find it in a new tree.
+    if (body.resumeSessionId) {
+      return 'a resumed session runs where its conversation lives and cannot be isolated';
+    }
+    try {
+      refSafe(isolation.runId);
+      refSafe(isolation.taskCode);
+      await checkIsolatable(workdir);
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+    return null;
+  }
+
+  /**
+   * `POST /v1/integrate` — merge a wave's task branches into the run branch.
+   *
+   * Answers when the merge is done rather than calling back: it is a few ref
+   * updates, and the dispatcher needs the result (the new head, and which
+   * tasks conflicted) before it can decide what the next wave starts from.
+   */
+  private async handleIntegrate(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let body: IntegrateRequest;
+    try {
+      body = (await readBody(req)) as IntegrateRequest;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'invalid JSON';
+      return json(res, 400, { error: 'INVALID_PAYLOAD', message });
+    }
+
+    if (
+      !body?.repo ||
+      typeof body.runId !== 'string' ||
+      !body.runId ||
+      !Array.isArray(body.taskCodes) ||
+      body.taskCodes.some((code) => typeof code !== 'string' || !code)
+    ) {
+      return json(res, 400, {
+        error: 'INVALID_PAYLOAD',
+        message: 'repo, runId and taskCodes are required',
+      });
+    }
+
+    const { workdir, error } = this.resolveWorkdir(body.repo);
+    if (!workdir) return json(res, 400, { error: 'REPO_NOT_FOUND', message: error });
+
+    try {
+      const result = await integrateRun(
+        workdir,
+        { runId: body.runId, taskCodes: body.taskCodes },
+        this.config.isolation
+      );
+      this.config.log(
+        `integrate ${result.runBranch}: ${result.merged.length} merged, ` +
+          `${result.conflicts.length} conflicted, ${result.missing.length} missing ` +
+          `-> ${result.headSha.slice(0, 8)}`
+      );
+      return json(res, 200, result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.config.log(`integrate failed: ${message}`);
+      if (!(error instanceof IsolationError)) return json(res, 500, { error: 'INTERNAL', message });
+
+      // The dispatcher branches on the code; the status is for everything else.
+      const status =
+        error.code === 'RUN_BRANCH_MISSING'
+          ? 404
+          : error.code === 'RUN_BRANCH_CHECKED_OUT' || error.code === 'RUN_BRANCH_MOVED'
+            ? 409
+            : error.code === 'GIT_FAILED'
+              ? 500
+              : 400;
+      return json(res, status, { error: error.code, message });
+    }
+  }
+
   private handleGet(res: ServerResponse, externalSessionId: string): void {
     const session = this.sessions.get(externalSessionId);
     if (!session) return json(res, 404, { error: 'NOT_FOUND' });
@@ -355,6 +546,7 @@ export class SessionRunner {
       message: session.message,
       filesModified: session.filesModified,
       tokensUsed: session.tokensUsed,
+      branch: session.branch,
     });
   }
 
@@ -397,6 +589,11 @@ export class SessionRunner {
         status: 'healthy',
         version: VERSION,
         activeSessions: this.activeCount,
+        // How many agents this runner will run at once. It is the fleet's
+        // capacity as a fact rather than a setting somebody typed into the
+        // cockpit, and the score's utilization dimension is a ratio against it.
+        maxConcurrent: this.config.maxConcurrent,
+        capabilities: CAPABILITIES,
       });
     }
 
@@ -404,6 +601,10 @@ export class SessionRunner {
 
     if (path === '/v1/sessions' && req.method === 'POST') {
       return this.handleCreate(req, res);
+    }
+
+    if (path === '/v1/integrate' && req.method === 'POST') {
+      return this.handleIntegrate(req, res);
     }
 
     const match = path.match(/^\/v1\/sessions\/([^/]+)(\/messages|\/stop)?$/);

@@ -71,6 +71,7 @@ export async function POST(_request: NextRequest, { params }: RouteParams) {
     const { generation, planId } = await generatePlanForItem({
       horizonItemId: id,
       title: item.title,
+      description: item.description,
       repo: item.repo,
       workingDir,
       apiKey,

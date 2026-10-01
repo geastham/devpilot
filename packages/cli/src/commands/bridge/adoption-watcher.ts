@@ -1,7 +1,8 @@
 import { statSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { BridgeClient } from '@devpilot.sh/bridge-client';
-import { tailTranscript, initialTailState, type TailState } from './transcript-tail.js';
+import type { TailState } from './transcript-tail.js';
+import { canSendReadings, sendTranscriptReading } from './transcript-reading.js';
 
 /**
  * Keeping an adopted session's status honest — TRD 21 §6.6.
@@ -52,6 +53,12 @@ export interface AdoptionLedgerEntry {
    * 10-hour transcript on every restart is work for nothing.
    */
   tail?: TailState;
+  /** The last thing it was seen doing, kept so every reading can carry it. */
+  lastAction?: string;
+  /** The previous reading failed to land and is owed again. */
+  retryReading?: boolean;
+  /** The events landed but the cumulative reading did not. */
+  readingOwed?: boolean;
 }
 
 interface Ledger {
@@ -116,6 +123,12 @@ export class AdoptionWatcher {
     }
   }
 
+  /** Whether this watcher is already sending readings for a session. */
+  isTracking(adoptionKey: string): boolean {
+    const entry = this.entries.get(adoptionKey);
+    return entry !== undefined && !entry.settled;
+  }
+
   size(): number {
     return [...this.entries.values()].filter((e) => !e.settled).length;
   }
@@ -155,7 +168,7 @@ export class AdoptionWatcher {
        * its watch view sat empty while 1,800 events sat on disk.
        */
       const neverDerived = entry.tail === undefined;
-      if (mtimeMs > entry.lastMtimeMs || neverDerived) {
+      if (mtimeMs > entry.lastMtimeMs || neverDerived || entry.retryReading) {
         const grew = mtimeMs > entry.lastMtimeMs;
         entry.lastMtimeMs = mtimeMs;
         entry.lastReportedAt = new Date(now).toISOString();
@@ -163,41 +176,39 @@ export class AdoptionWatcher {
         /**
          * The transcript grew — derive what was appended and stream it up.
          * This is the sender that never existed: telemetry and the live watch
-         * both read from what lands here. Failure is tolerated per tick; the
-         * byte offset only advances after derivation, so nothing is skipped.
+         * both read from what lands here. Failure is tolerated per tick: a
+         * batch that does not land rewinds the read position, so the next tick
+         * derives it again rather than skipping it.
          */
         // Capability-guarded like the conductor watcher: an older installed
         // bridge-client simply has no streaming, and that degrades to the
         // status line below rather than a crash.
-        const canStream = typeof this.config.client.streamEvents === 'function';
-        entry.tail ??= initialTailState();
-        const derived = canStream
-          ? tailTranscript(entry.transcriptPath, entry.tail, entry.cwd)
-          : [];
-        this.persist();
-
-        if (derived.length > 0) {
-          const sent = await this.config.client.streamEvents(entry.sessionId, derived);
-          if (!sent) {
-            this.config.onLog?.(`stream for ${entry.identifier} did not land; will catch up next tick`);
-          }
-
-          const latest = derived[derived.length - 1];
-          const files = new Set<string>();
-          for (const e of derived) if (e.path) files.add(e.path);
-          if (typeof this.config.client.reportTelemetry === 'function')
-          await this.config.client.reportTelemetry(entry.sessionId, {
-            toolCalls: entry.tail.seq,
-            filesTouched: [...files].slice(0, 500),
-            currentAction: latest.path
-              ? `${latest.tool} · ${latest.path.split('/').slice(-2).join('/')}`
-              : latest.tool,
-            elapsedMs: Math.round(entry.tail.activeMs),
-            // mtimeMs is fractional on macOS; the schema's int() refuses a
-            // float and the client swallows the 400 — a silently empty table.
-            idleMs: Math.round(Math.max(0, now - mtimeMs)),
-          });
+        if (canSendReadings(this.config.client)) {
+          const target = {
+            sessionId: entry.sessionId,
+            label: entry.identifier,
+            transcriptPath: entry.transcriptPath,
+            cwd: entry.cwd,
+            tail: entry.tail,
+            lastAction: entry.lastAction,
+            readingOwed: entry.readingOwed,
+          };
+          const outcome = await sendTranscriptReading(
+            this.config.client,
+            target,
+            { now, mtimeMs },
+            this.config.onLog,
+          );
+          entry.tail = target.tail;
+          entry.lastAction = target.lastAction;
+          entry.readingOwed = target.readingOwed;
+          // A batch that did not land is owed again next tick whether or not
+          // the file grows in between — it may have been the session's last.
+          entry.retryReading = outcome === 'failed';
         }
+        // The read position and the meter both moved; keep them, or a restart
+        // would re-derive from a stale offset.
+        this.persist();
 
         if (grew) {
         try {

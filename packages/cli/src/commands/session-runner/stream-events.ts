@@ -22,11 +22,25 @@
  * recently at all.
  */
 
+import {
+  countUsage,
+  dominantModel,
+  initialUsageMeter,
+  emptyUsage,
+  priceAtReference,
+  priceMeter,
+  type UsageTotals,
+  type UsageMeterState,
+} from '../../utils/usage-meter.js';
+
 /** One decoded line from the stream. Shapes are Claude Code's, not ours. */
 interface StreamEvent {
   type?: string;
   subtype?: string;
   message?: {
+    id?: string;
+    model?: string;
+    usage?: TokenUsage;
     content?: {
       type?: string;
       name?: string;
@@ -38,6 +52,16 @@ interface StreamEvent {
   num_turns?: number;
   duration_ms?: number;
   usage?: TokenUsage;
+  /** On the final `result` only: the run's usage, split by the model that used it. */
+  modelUsage?: Record<
+    string,
+    {
+      inputTokens?: number;
+      outputTokens?: number;
+      cacheReadInputTokens?: number;
+      cacheCreationInputTokens?: number;
+    }
+  >;
 }
 
 interface TokenUsage {
@@ -45,36 +69,10 @@ interface TokenUsage {
   output_tokens?: number;
   cache_creation_input_tokens?: number;
   cache_read_input_tokens?: number;
-}
-
-/**
- * Per-million token prices, to put a number on the dial while work is running.
- *
- * `total_cost_usd` only arrives in the final `result` event, so the money
- * reading was $0.0000 for the entire life of a run — dark at exactly the moment
- * a conductor could still act on it. Each assistant turn carries its own usage,
- * including cache tokens, so the spend can be accumulated as it happens.
- *
- * These are Opus rates and this is an ESTIMATE. The authoritative number
- * replaces it the moment `result` lands, and `costIsEstimate` says which one
- * you are looking at — a made-up figure presented as fact is worse than a blank
- * dial, which is the whole reason the old progress bar had to go.
- */
-const PRICE_PER_MTOK = {
-  input: 5,
-  output: 25,
-  cacheWrite: 6.25,
-  cacheRead: 0.5,
-} as const;
-
-function priceUsage(usage: TokenUsage): number {
-  const m = 1_000_000;
-  return (
-    ((usage.input_tokens ?? 0) * PRICE_PER_MTOK.input) / m +
-    ((usage.output_tokens ?? 0) * PRICE_PER_MTOK.output) / m +
-    ((usage.cache_creation_input_tokens ?? 0) * PRICE_PER_MTOK.cacheWrite) / m +
-    ((usage.cache_read_input_tokens ?? 0) * PRICE_PER_MTOK.cacheRead) / m
-  );
+  cache_creation?: {
+    ephemeral_5m_input_tokens?: number;
+    ephemeral_1h_input_tokens?: number;
+  };
 }
 
 /** A single observed action, kept for the session timeline. */
@@ -91,6 +89,8 @@ export interface AgentAction {
 export interface SessionTelemetry {
   /** Tool calls the agent has issued. The honest denominator for progress. */
   toolCalls: number;
+  /** Of those, how many changed a file. */
+  writeCalls: number;
   /** Distinct files it has written to or edited, in the order first touched. */
   filesTouched: string[];
   /** Files it only read. Useful for seeing an agent orienting vs. producing. */
@@ -110,9 +110,32 @@ export interface SessionTelemetry {
   costUsd: number;
   /** True while `costUsd` is our arithmetic rather than Claude's own number. */
   costIsEstimate: boolean;
+  /**
+   * The tokens counted so far at their own models' API list prices, and the
+   * same tokens at the most expensive model's — see `priceAtReference`.
+   *
+   * A pair, from one price table, so that the only thing differing between
+   * them is the model. `costUsd` is not used for this: once the run ends it is
+   * Claude's own figure, which can cover calls the stream never showed, and a
+   * saving computed across two sources would partly measure their difference.
+   * Absent until a response with usage has been seen.
+   */
+  listCostUsd?: number;
+  referenceCostUsd?: number;
+  /** Which model `referenceCostUsd` was priced at. */
+  referenceModel?: string;
+  /** Input tokens processed fresh — not served from the prompt cache. */
   tokensIn: number;
   tokensOut: number;
+  /** Input tokens served from the prompt cache. */
+  tokensCacheRead: number;
+  /** Input tokens written to the prompt cache. */
+  tokensCacheWrite: number;
   turns: number;
+  /** The model that processed most of the tokens, once one has answered. */
+  model?: string;
+  /** Which harness profile launched this agent, e.g. `lean@1`. Set by the runner. */
+  harness?: string;
   /** Wall-clock ms since the first event; the fake "elapsed 0m" is gone. */
   elapsedMs: number;
   /** Ms since anything last happened. The stall signal. */
@@ -164,10 +187,15 @@ export class TelemetryCollector {
   private readonly commands: string[] = [];
   private readonly actions: AgentAction[] = [];
   private toolCalls = 0;
+  private writeCalls = 0;
   private costUsd = 0;
   private costIsEstimate = true;
-  private tokensIn = 0;
-  private tokensOut = 0;
+  /**
+   * Counted once per response. The stream repeats a response's usage on every
+   * content block it emits, exactly as the transcript does, so adding each
+   * event's usage inflated the running estimate by the number of blocks.
+   */
+  private readonly meter: UsageMeterState = initialUsageMeter();
   private turns = 0;
   private lastText?: string;
   private lastAction?: AgentAction;
@@ -206,11 +234,11 @@ export class TelemetryCollector {
     if (event.type === 'assistant') {
       // Each turn prices itself, so the dial moves during the run instead of
       // staying dark until it ends.
-      const usage = (event.message as { usage?: TokenUsage } | undefined)?.usage;
+      const usage = event.message?.usage;
       if (usage && this.costIsEstimate) {
-        this.costUsd += priceUsage(usage);
-        this.tokensIn += usage.input_tokens ?? 0;
-        this.tokensOut += usage.output_tokens ?? 0;
+        countUsage(this.meter, event.message?.id, usage, event.message?.model);
+        this.costUsd = priceMeter(this.meter);
+        this.turns = this.meter.turns;
       }
 
       for (const block of event.message?.content ?? []) {
@@ -229,13 +257,116 @@ export class TelemetryCollector {
       if (typeof event.total_cost_usd === 'number') this.costIsEstimate = false;
       this.costUsd = event.total_cost_usd ?? this.costUsd;
       this.turns = event.num_turns ?? this.turns;
-      this.tokensIn = event.usage?.input_tokens ?? this.tokensIn;
-      this.tokensOut = event.usage?.output_tokens ?? this.tokensOut;
+      if (event.usage) {
+        const t = this.meter.totals;
+        t.input = event.usage.input_tokens ?? t.input;
+        t.output = event.usage.output_tokens ?? t.output;
+        t.cacheRead = event.usage.cache_read_input_tokens ?? t.cacheRead;
+        t.cacheWrite = event.usage.cache_creation_input_tokens ?? t.cacheWrite;
+        const hour = event.usage.cache_creation?.ephemeral_1h_input_tokens;
+        if (typeof hour === 'number') t.cacheWrite1h = Math.min(hour, t.cacheWrite);
+      }
+      this.reconcileModels(event.modelUsage);
     }
+  }
+
+  /**
+   * Replace the per-model split with the one in the final result.
+   *
+   * WHY IT CANNOT BE LEFT AS COUNTED. While a run is in flight the stream
+   * reports each response's usage as it BEGINS: the input side is right, and
+   * the output count is a placeholder of a few tokens. The real output arrives
+   * only in the final result. Measured on a live run: 11 output tokens counted
+   * from the stream against 567 in the result.
+   *
+   * The totals above are corrected from the result, but the per-model buckets
+   * were not, so a finished session's tokens no longer added up to its total —
+   * and the difference, which is nearly all of the output, was priced as
+   * "tokens no model was named for", at the default rate. A Haiku run's output
+   * was being priced as Opus: $0.033 reported against Claude's own $0.018.
+   *
+   * The result names every model and what it used, so the buckets are rebuilt
+   * from it, and the totals with them when more than one model ran — the
+   * top-level usage can omit a model that only did background work.
+   *
+   * The one thing the per-model figures do not carry is how a cache write
+   * splits by lifetime. That is known for the run as a whole, so it is shared
+   * out in proportion to each model's cache writes.
+   */
+  private reconcileModels(modelUsage: StreamEvent['modelUsage']): void {
+    const entries = Object.entries(modelUsage ?? {});
+    if (entries.length === 0) {
+      this.attributeRemainder();
+      return;
+    }
+
+    const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
+    const byModel: Record<string, UsageTotals> = {};
+    const sum = emptyUsage();
+    for (const [model, usage] of entries) {
+      const bucket: UsageTotals = {
+        input: n(usage.inputTokens),
+        output: n(usage.outputTokens),
+        cacheRead: n(usage.cacheReadInputTokens),
+        cacheWrite: n(usage.cacheCreationInputTokens),
+        cacheWrite1h: 0,
+      };
+      byModel[model.slice(0, 80)] = bucket;
+      sum.input += bucket.input;
+      sum.output += bucket.output;
+      sum.cacheRead += bucket.cacheRead;
+      sum.cacheWrite += bucket.cacheWrite;
+    }
+
+    const hourShare =
+      sum.cacheWrite > 0
+        ? Math.min(1, (this.meter.totals.cacheWrite1h ?? 0) / Math.max(1, this.meter.totals.cacheWrite))
+        : 0;
+    for (const bucket of Object.values(byModel)) bucket.cacheWrite1h = bucket.cacheWrite * hourShare;
+    sum.cacheWrite1h = sum.cacheWrite * hourShare;
+
+    this.meter.byModel = byModel;
+    this.meter.totals = sum;
+  }
+
+  /**
+   * The same repair for a result that names no models — an older Claude Code.
+   *
+   * There is no authoritative split to rebuild from, so whatever the corrected
+   * totals hold beyond what was counted per model is given to the model that
+   * did most of the work, rather than left unattributed and priced at the
+   * default. For a run on one model, which is nearly all of them, that is
+   * exact.
+   */
+  private attributeRemainder(): void {
+    const model = dominantModel(this.meter);
+    const buckets = this.meter.byModel;
+    if (!model || !buckets) return;
+    // `dominantModel` drops a context-window suffix; find the bucket it named.
+    const key = Object.keys(buckets).find((k) => k === model || k.replace(/\[[^\]]*\]$/, '') === model);
+    if (!key) return;
+
+    const counted = emptyUsage();
+    for (const b of Object.values(buckets)) {
+      counted.input += b.input;
+      counted.output += b.output;
+      counted.cacheRead += b.cacheRead;
+      counted.cacheWrite += b.cacheWrite;
+      counted.cacheWrite1h = (counted.cacheWrite1h ?? 0) + (b.cacheWrite1h ?? 0);
+    }
+    const t = this.meter.totals;
+    const bucket = buckets[key];
+    bucket.input += Math.max(0, t.input - counted.input);
+    bucket.output += Math.max(0, t.output - counted.output);
+    bucket.cacheRead += Math.max(0, t.cacheRead - counted.cacheRead);
+    bucket.cacheWrite += Math.max(0, t.cacheWrite - counted.cacheWrite);
+    bucket.cacheWrite1h =
+      (bucket.cacheWrite1h ?? 0) + Math.max(0, (t.cacheWrite1h ?? 0) - (counted.cacheWrite1h ?? 0));
   }
 
   private recordTool(tool: string, input: Record<string, unknown>): void {
     this.toolCalls++;
+    if (WRITE_TOOLS.has(tool)) this.writeCalls++;
 
     const raw =
       typeof input.file_path === 'string'
@@ -263,10 +394,21 @@ export class TelemetryCollector {
     if (this.actions.length > MAX_ACTIONS) this.actions.shift();
   }
 
+  private referencePricing(): Pick<SessionTelemetry, 'listCostUsd' | 'referenceCostUsd' | 'referenceModel'> {
+    const reference = priceAtReference(this.meter.totals);
+    if (!reference) return {};
+    return {
+      listCostUsd: priceMeter(this.meter),
+      referenceCostUsd: reference.costUsd,
+      referenceModel: reference.model,
+    };
+  }
+
   snapshot(): SessionTelemetry {
     const now = this.now();
     return {
       toolCalls: this.toolCalls,
+      writeCalls: this.writeCalls,
       filesTouched: [...this.touched],
       filesRead: [...this.read],
       commands: [...this.commands],
@@ -275,9 +417,13 @@ export class TelemetryCollector {
       actions: [...this.actions],
       costUsd: this.costUsd,
       costIsEstimate: this.costIsEstimate,
-      tokensIn: this.tokensIn,
-      tokensOut: this.tokensOut,
+      ...this.referencePricing(),
+      tokensIn: this.meter.totals.input,
+      tokensOut: this.meter.totals.output,
+      tokensCacheRead: this.meter.totals.cacheRead,
+      tokensCacheWrite: this.meter.totals.cacheWrite,
       turns: this.turns,
+      model: dominantModel(this.meter) ?? undefined,
       elapsedMs: now - this.startedAt,
       idleMs: now - this.lastEventAt,
     };

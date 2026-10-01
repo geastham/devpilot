@@ -1,4 +1,4 @@
-import { O as OrchestratorConfig, a as OrchestratorHealth, D as DispatchRequest, b as DispatchResponse, C as CompletionReport, I as IOrchestratorAdapter, c as OrchestratorMode, d as OrchestratorAdapterConfig, J as JobStatus, S as SendMessageResult, e as OrchestratorService, f as ClaudeSessionAdapter, g as CreateSessionParams, h as CreateSessionResult, H as HttpSessionTransport, i as IPushCapableAdapter, j as OrchestratorEvent, k as OrchestratorEventCallback, l as OrchestratorEventType, m as SessionTransport, n as StatusUpdate, T as TaskSpec, o as createClaudeSessionAdapter, p as getOrchestratorService, q as getOrchestratorServiceOrNull, r as initOrchestratorService, s as isOrchestratorServiceInitialized, t as isPushCapableAdapter } from './service-ByKW5ZdE.mjs';
+import { O as OrchestratorConfig, a as OrchestratorHealth, D as DispatchRequest, b as DispatchResponse, C as CompletionReport, I as IOrchestratorAdapter, c as OrchestratorMode, d as OrchestratorAdapterConfig, J as JobStatus, S as SendMessageResult, e as OrchestratorService, f as ClaudeSessionAdapter, g as CreateSessionParams, h as CreateSessionResult, H as HttpSessionTransport, i as IPushCapableAdapter, j as ISOLATION_CAPABILITY, k as IntegrateOutcome, l as IntegrateRequest, m as IntegrationResult, n as IsolationSupport, o as OrchestratorEvent, p as OrchestratorEventCallback, q as OrchestratorEventType, r as SessionTransport, s as StatusUpdate, T as TaskIsolation, t as TaskSpec, u as createClaudeSessionAdapter, v as getOrchestratorService, w as getOrchestratorServiceOrNull, x as initOrchestratorService, y as isOrchestratorServiceInitialized, z as isPushCapableAdapter } from './service-BKzQ2dca.mjs';
 
 /**
  * HTTP client for communicating with the external agent-orchestrator
@@ -141,17 +141,57 @@ declare function createAoCliAdapter(config: OrchestratorAdapterConfig): AoCliAda
  * Session prompt envelope (spec/trd/01-TIER1-EXECUTION-LOOP.md §7.3).
  *
  * Composes the markdown task prompt handed to a Claude Code session at dispatch
- * time. The critical piece is the Reporting Protocol section: it tells the
- * session exactly how to POST status/completion callbacks (§7.2) so DevPilot's
- * ExecutionBridge learns when the wave task finishes. The same text is reused
- * verbatim for the `ao-cli` fallback (where the reporting section is harmless —
- * the ao poller supersedes it).
+ * time: the task, what the whole item is for, the files in scope, what the
+ * tasks before it reported, and how the session should finish.
+ *
+ * How it should finish depends on who reports to DevPilot (§7.2 allows either
+ * "the session (or runner on its behalf)"), and that is the `reporting` input:
+ *
+ * - `'runner'` — the session runner reports status and completion itself, from
+ *   the process exit code, `claude`'s result envelope and the repo's git state.
+ *   The agent is asked only for a good final message, because the runner sends
+ *   that message as the completion summary.
+ * - `'agent'` — the session is told to `curl` the callbacks itself: the
+ *   original Reporting Protocol section, unchanged.
+ *
+ * The prompt used to carry the Reporting Protocol unconditionally. On the
+ * runner path that instruction could not work — the token is a literal
+ * `<callback-token>` placeholder and the permission mode denies the `curl` —
+ * and it was not harmless either. In one run database 19 of 20 worker sessions
+ * spent turns attempting it, and 16 of the 20 completion summaries were about
+ * the failed callback rather than the work. Those summaries are what the next
+ * wave receives as "Context From Predecessors", so the instruction wasted turns
+ * in every session and then poisoned the handoff between them.
  */
+
+/** Who tells DevPilot how a session is going. See the module comment. */
+type SessionReporting = 'runner' | 'agent';
 interface SessionPromptPredecessor {
     taskCode: string;
     description: string;
     filesModified: string[];
+    /**
+     * What `filesModified` actually holds.
+     *
+     * - `'changed'` — what git says the task's branch changed, from the commit
+     *   it was cut from to its head. Only an isolated task has this. Exact: an
+     *   empty list means the task changed nothing.
+     * - `'touched'` — files the runner observed the session write to, as of its
+     *   last status report. Real, but possibly short of the final few edits.
+     * - `'scoped'` — the files the plan assigned to the task. Nothing checked
+     *   that the task stayed inside them, or touched them at all.
+     *
+     * Defaults to `'scoped'`. That is what the one caller has always passed, and
+     * the prompt nevertheless presented it as "Files modified".
+     */
+    filesSource?: 'changed' | 'touched' | 'scoped';
     completionSummary: string;
+}
+/** The horizon item a task belongs to: what the work as a whole is for. */
+interface SessionPromptGoal {
+    title: string;
+    /** The ticket body. Untrusted text; rendered as a labelled block. */
+    description?: string | null;
 }
 interface SessionPromptInput {
     taskDescription: string;
@@ -162,7 +202,42 @@ interface SessionPromptInput {
     constraints?: string[];
     callbackUrl: string;
     sessionId: string;
+    /**
+     * Who reports status and completion. Defaults to `'agent'`, which is what
+     * this function did before the option existed; pass `'runner'` when the
+     * session runner reports on the session's behalf.
+     */
+    reporting?: SessionReporting;
+    /**
+     * The item this task is one part of. Without it a worker is handed a
+     * one-sentence task and no idea what the work around it is for.
+     */
+    goal?: SessionPromptGoal;
+    /**
+     * True when the predecessors' work is actually in the checkout this session
+     * will be given: the plan is isolated, and every predecessor listed has been
+     * merged into the branch this task's worktree is cut from.
+     *
+     * The prompt then says so. Left false or absent it says only that they
+     * completed — which is all that is known in a shared checkout, where a
+     * predecessor's edits are there unless something has since written over
+     * them, and nothing checked.
+     */
+    predecessorsMerged?: boolean;
 }
+/**
+ * Which reporting mode an orchestrator mode needs.
+ *
+ * - `claude-session`: the session runner reports on the agent's behalf (see
+ *   the header of the CLI's `session-runner/claude-runner.ts`), so the agent
+ *   is not asked to.
+ * - `ao-cli`, `http`: kept on agent reporting. Both are also polled, and the
+ *   module comment here used to call the section "harmless" for ao-cli — but
+ *   neither the `ao` CLI nor a remote HTTP orchestrator is code in this
+ *   repository, so nothing here can show that their completions do not lean on
+ *   the session's own report. Until something does, their prompt is unchanged.
+ */
+declare function sessionReportingForMode(mode: OrchestratorMode): SessionReporting;
 /**
  * Build the composed task prompt for a session dispatch.
  */
@@ -305,6 +380,11 @@ declare const index_DispatchResponse: typeof DispatchResponse;
 declare const index_HttpSessionTransport: typeof HttpSessionTransport;
 declare const index_IOrchestratorAdapter: typeof IOrchestratorAdapter;
 declare const index_IPushCapableAdapter: typeof IPushCapableAdapter;
+declare const index_ISOLATION_CAPABILITY: typeof ISOLATION_CAPABILITY;
+declare const index_IntegrateOutcome: typeof IntegrateOutcome;
+declare const index_IntegrateRequest: typeof IntegrateRequest;
+declare const index_IntegrationResult: typeof IntegrationResult;
+declare const index_IsolationSupport: typeof IsolationSupport;
 declare const index_JobStatus: typeof JobStatus;
 declare const index_OrchestratorAdapterConfig: typeof OrchestratorAdapterConfig;
 type index_OrchestratorClient = OrchestratorClient;
@@ -317,13 +397,16 @@ declare const index_OrchestratorHealth: typeof OrchestratorHealth;
 declare const index_OrchestratorMode: typeof OrchestratorMode;
 declare const index_OrchestratorService: typeof OrchestratorService;
 declare const index_SendMessageResult: typeof SendMessageResult;
+type index_SessionPromptGoal = SessionPromptGoal;
 type index_SessionPromptInput = SessionPromptInput;
 type index_SessionPromptPredecessor = SessionPromptPredecessor;
+type index_SessionReporting = SessionReporting;
 declare const index_SessionTransport: typeof SessionTransport;
 type index_StatusPoller = StatusPoller;
 declare const index_StatusPoller: typeof StatusPoller;
 type index_StatusPollerConfig = StatusPollerConfig;
 declare const index_StatusUpdate: typeof StatusUpdate;
+declare const index_TaskIsolation: typeof TaskIsolation;
 declare const index_TaskSpec: typeof TaskSpec;
 declare const index_buildDispatchRequest: typeof buildDispatchRequest;
 declare const index_buildSessionPrompt: typeof buildSessionPrompt;
@@ -342,8 +425,9 @@ declare const index_isOrchestratorConfigured: typeof isOrchestratorConfigured;
 declare const index_isOrchestratorServiceInitialized: typeof isOrchestratorServiceInitialized;
 declare const index_isPushCapableAdapter: typeof isPushCapableAdapter;
 declare const index_isStatusPollerInitialized: typeof isStatusPollerInitialized;
+declare const index_sessionReportingForMode: typeof sessionReportingForMode;
 declare namespace index {
-  export { index_AoCliAdapter as AoCliAdapter, index_ClaudeSessionAdapter as ClaudeSessionAdapter, index_CompletionReport as CompletionReport, index_CreateSessionParams as CreateSessionParams, index_CreateSessionResult as CreateSessionResult, index_DispatchRequest as DispatchRequest, index_DispatchResponse as DispatchResponse, index_HttpSessionTransport as HttpSessionTransport, index_IOrchestratorAdapter as IOrchestratorAdapter, index_IPushCapableAdapter as IPushCapableAdapter, index_JobStatus as JobStatus, index_OrchestratorAdapterConfig as OrchestratorAdapterConfig, index_OrchestratorClient as OrchestratorClient, index_OrchestratorConfig as OrchestratorConfig, index_OrchestratorEvent as OrchestratorEvent, index_OrchestratorEventCallback as OrchestratorEventCallback, index_OrchestratorEventType as OrchestratorEventType, index_OrchestratorHealth as OrchestratorHealth, index_OrchestratorMode as OrchestratorMode, index_OrchestratorService as OrchestratorService, index_SendMessageResult as SendMessageResult, type index_SessionPromptInput as SessionPromptInput, type index_SessionPromptPredecessor as SessionPromptPredecessor, index_SessionTransport as SessionTransport, index_StatusPoller as StatusPoller, type index_StatusPollerConfig as StatusPollerConfig, index_StatusUpdate as StatusUpdate, index_TaskSpec as TaskSpec, index_buildDispatchRequest as buildDispatchRequest, index_buildSessionPrompt as buildSessionPrompt, index_createAoCliAdapter as createAoCliAdapter, index_createClaudeSessionAdapter as createClaudeSessionAdapter, index_createDbStatusPollerCallbacks as createDbStatusPollerCallbacks, index_getOrchestratorClient as getOrchestratorClient, index_getOrchestratorService as getOrchestratorService, index_getOrchestratorServiceOrNull as getOrchestratorServiceOrNull, index_getStatusPoller as getStatusPoller, index_getStatusPollerOrNull as getStatusPollerOrNull, index_initOrchestratorClient as initOrchestratorClient, index_initOrchestratorService as initOrchestratorService, index_initStatusPoller as initStatusPoller, index_isOrchestratorConfigured as isOrchestratorConfigured, index_isOrchestratorServiceInitialized as isOrchestratorServiceInitialized, index_isPushCapableAdapter as isPushCapableAdapter, index_isStatusPollerInitialized as isStatusPollerInitialized };
+  export { index_AoCliAdapter as AoCliAdapter, index_ClaudeSessionAdapter as ClaudeSessionAdapter, index_CompletionReport as CompletionReport, index_CreateSessionParams as CreateSessionParams, index_CreateSessionResult as CreateSessionResult, index_DispatchRequest as DispatchRequest, index_DispatchResponse as DispatchResponse, index_HttpSessionTransport as HttpSessionTransport, index_IOrchestratorAdapter as IOrchestratorAdapter, index_IPushCapableAdapter as IPushCapableAdapter, index_ISOLATION_CAPABILITY as ISOLATION_CAPABILITY, index_IntegrateOutcome as IntegrateOutcome, index_IntegrateRequest as IntegrateRequest, index_IntegrationResult as IntegrationResult, index_IsolationSupport as IsolationSupport, index_JobStatus as JobStatus, index_OrchestratorAdapterConfig as OrchestratorAdapterConfig, index_OrchestratorClient as OrchestratorClient, index_OrchestratorConfig as OrchestratorConfig, index_OrchestratorEvent as OrchestratorEvent, index_OrchestratorEventCallback as OrchestratorEventCallback, index_OrchestratorEventType as OrchestratorEventType, index_OrchestratorHealth as OrchestratorHealth, index_OrchestratorMode as OrchestratorMode, index_OrchestratorService as OrchestratorService, index_SendMessageResult as SendMessageResult, type index_SessionPromptGoal as SessionPromptGoal, type index_SessionPromptInput as SessionPromptInput, type index_SessionPromptPredecessor as SessionPromptPredecessor, type index_SessionReporting as SessionReporting, index_SessionTransport as SessionTransport, index_StatusPoller as StatusPoller, type index_StatusPollerConfig as StatusPollerConfig, index_StatusUpdate as StatusUpdate, index_TaskIsolation as TaskIsolation, index_TaskSpec as TaskSpec, index_buildDispatchRequest as buildDispatchRequest, index_buildSessionPrompt as buildSessionPrompt, index_createAoCliAdapter as createAoCliAdapter, index_createClaudeSessionAdapter as createClaudeSessionAdapter, index_createDbStatusPollerCallbacks as createDbStatusPollerCallbacks, index_getOrchestratorClient as getOrchestratorClient, index_getOrchestratorService as getOrchestratorService, index_getOrchestratorServiceOrNull as getOrchestratorServiceOrNull, index_getStatusPoller as getStatusPoller, index_getStatusPollerOrNull as getStatusPollerOrNull, index_initOrchestratorClient as initOrchestratorClient, index_initOrchestratorService as initOrchestratorService, index_initStatusPoller as initStatusPoller, index_isOrchestratorConfigured as isOrchestratorConfigured, index_isOrchestratorServiceInitialized as isOrchestratorServiceInitialized, index_isPushCapableAdapter as isPushCapableAdapter, index_isStatusPollerInitialized as isStatusPollerInitialized, index_sessionReportingForMode as sessionReportingForMode };
 }
 
-export { AoCliAdapter as A, OrchestratorClient as O, type SessionPromptInput as S, type SessionPromptPredecessor as a, StatusPoller as b, type StatusPollerConfig as c, buildDispatchRequest as d, buildSessionPrompt as e, createAoCliAdapter as f, createDbStatusPollerCallbacks as g, getOrchestratorClient as h, index as i, getStatusPoller as j, getStatusPollerOrNull as k, initOrchestratorClient as l, initStatusPoller as m, isOrchestratorConfigured as n, isStatusPollerInitialized as o };
+export { AoCliAdapter as A, OrchestratorClient as O, type SessionPromptGoal as S, type SessionPromptInput as a, type SessionPromptPredecessor as b, type SessionReporting as c, StatusPoller as d, type StatusPollerConfig as e, buildDispatchRequest as f, buildSessionPrompt as g, createAoCliAdapter as h, index as i, createDbStatusPollerCallbacks as j, getOrchestratorClient as k, getStatusPoller as l, getStatusPollerOrNull as m, initOrchestratorClient as n, initStatusPoller as o, isOrchestratorConfigured as p, isStatusPollerInitialized as q, sessionReportingForMode as s };

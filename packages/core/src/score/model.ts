@@ -57,8 +57,15 @@ export const SCORE_MODEL: readonly ScoreDimension[] = [
     label: 'Runway health',
     meaning: 'How consistently you kept work queued ahead of the fleet',
     method:
-      'Time-weighted average runway across the session, normalised against the ' +
-      '4h amber threshold. Sustained runway above 4h approaches full marks.',
+      'Time-weighted mean of min(1, runway hours ÷ 4) over the scoring window, ' +
+      'where 4h is the amber threshold: runway held at or above 4h is full ' +
+      'marks. Each runway sample holds until the next one, for at most 15 ' +
+      'minutes; time before the first sample, and time when sampling had ' +
+      'stopped, is left out rather than counted as empty or as full. ' +
+      'Unmeasured with fewer than 2 samples or less than 60 minutes of ' +
+      'sampled time. Runway itself is an estimate ' +
+      '(queue length × a fixed duration per item), and this dimension ' +
+      'inherits that.',
   },
   {
     key: 'fleetUtilization',
@@ -66,9 +73,15 @@ export const SCORE_MODEL: readonly ScoreDimension[] = [
     label: 'Fleet utilization',
     meaning: 'How much of your agent capacity was actually working',
     method:
-      'Active sessions over available capacity, averaged over the session. A ' +
-      'RATIO, never a count — otherwise the score would reward buying more ' +
-      'agents rather than conducting them well.',
+      'Time-weighted mean of min(1, active sessions ÷ capacity), taken from ' +
+      'the first session start to the last session end inside the window, ' +
+      'leaving out any stretch of more than 30 minutes with nothing running ' +
+      '— so the time before the first dispatch, after the last finish, and ' +
+      'overnight is not counted as idle, and a short gap between tasks is. A ' +
+      'RATIO, never a count — ' +
+      'otherwise the score would reward buying more agents rather than ' +
+      'conducting them well. Unmeasured with no sessions or no declared ' +
+      'capacity.',
   },
   {
     key: 'planAccuracy',
@@ -76,8 +89,14 @@ export const SCORE_MODEL: readonly ScoreDimension[] = [
     label: 'Plan accuracy',
     meaning: 'How close your plan estimates landed to what actually happened',
     method:
-      'Per-task |estimated − actual| duration, aggregated and inverted. Tasks ' +
-      'that never ran are excluded rather than counted as perfect.',
+      'For each task with both an estimated and an actual duration, error = ' +
+      '|estimated − actual| ÷ the larger of the two; the result is 1 − the ' +
+      'mean error. A task’s estimate is the median of what tasks the plan ' +
+      'sized the same (S, M, L, XL) had taken before it started, so it ' +
+      'measures how consistently the plan sized its work. Tasks that never ' +
+      'ran, or had no estimate, are excluded rather than counted as perfect. ' +
+      'Unmeasured with fewer than 3 qualifying tasks — one lucky task is not ' +
+      'accuracy.',
   },
   {
     key: 'costEfficiency',
@@ -85,9 +104,11 @@ export const SCORE_MODEL: readonly ScoreDimension[] = [
     label: 'Cost efficiency',
     meaning: 'Saving against running everything on the most expensive model',
     method:
-      'Actual spend over an all-Sonnet baseline for the same task graph. ' +
-      'Weighted below throughput deliberately: being slow is more expensive ' +
-      'than being wasteful.',
+      '1 − (actual spend ÷ what the same tokens would have cost on the most ' +
+      'expensive model), floored at zero. A fleet that runs everything on the ' +
+      'most expensive model scores 0 here by construction. Weighted below ' +
+      'throughput deliberately: being slow is more expensive than being ' +
+      'wasteful. Unmeasured with no recorded spend.',
   },
   {
     key: 'velocityTrend',
@@ -95,8 +116,11 @@ export const SCORE_MODEL: readonly ScoreDimension[] = [
     label: 'Velocity trend',
     meaning: 'Whether your throughput is rising or falling',
     method:
-      'Ratio of recent completion rate to the session baseline. A tiebreak, ' +
-      'not a headline — it is the noisiest dimension.',
+      'Completions per hour over the last quarter of the scoring window, ' +
+      'divided by completions per hour over the whole window; half that ' +
+      'ratio, capped at 1. Steady throughput is half marks, doubling is full ' +
+      'marks, stopping is zero. Unmeasured with fewer than 4 completions. A ' +
+      'tiebreak, not a headline — it is the noisiest dimension.',
   },
   {
     key: 'parallelizationQuality',
@@ -104,9 +128,13 @@ export const SCORE_MODEL: readonly ScoreDimension[] = [
     label: 'Parallelization quality',
     meaning: 'How well your plans exploited work that was genuinely independent',
     method:
-      'Achieved parallelism against the theoretical maximum for the dependency ' +
-      'graph, penalised by file contention — two tasks touching one file were ' +
-      'not independent, whatever the plan said.',
+      'Achieved concurrency (total task time ÷ wall-clock time) over the most ' +
+      'the plan allowed (the smaller of fleet capacity and total task time ÷ ' +
+      'the longest dependency chain by actual duration), multiplied by 1 − ' +
+      'the share of concurrently running task pairs that touched a common ' +
+      'file — two tasks touching one file were not independent, whatever the ' +
+      'plan said. Plans are combined weighted by their total task time. ' +
+      'Unmeasured without a plan of at least 2 timed tasks.',
   },
 ];
 
@@ -118,11 +146,16 @@ export const SCORE_DIMENSIONS: Readonly<Record<ScoreDimensionKey, ScoreDimension
   >;
 
 /**
- * Bump whenever a `max` changes. Scores earned under an earlier model are not
- * comparable to later ones and are excluded from ranking (T16-AC-05) rather
- * than rescaled, which would invent standings nobody earned.
+ * Bump whenever a `max` OR A FORMULA changes. Scores earned under an earlier
+ * model are not comparable to later ones and are excluded from ranking
+ * (T16-AC-05) rather than rescaled, which would invent standings nobody earned.
+ *
+ * - 1: the stored counters. No dimension was computed by its method; a
+ *      completion added points and a failure took some away.
+ * - 2: the six methods in `compute.ts`, each measured from recorded events or
+ *      reported as unmeasured.
  */
-export const SCORE_MODEL_VERSION = 1;
+export const SCORE_MODEL_VERSION = 2;
 
 /** The invariant that makes the model rankable. Asserted in tests. */
 export function scoreModelIsValid(): boolean {

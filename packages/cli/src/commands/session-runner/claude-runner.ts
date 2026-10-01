@@ -4,16 +4,19 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, mkdirSync
 import { tmpdir, homedir } from 'os';
 import { join } from 'path';
 import { TelemetryCollector, type SessionTelemetry } from './stream-events';
+import type { Harness } from './harness';
 
 const execFileAsync = promisify(execFile);
 
 /**
  * Runs one Claude Code session and turns it into ground truth.
  *
- * The prompt DevPilot composes (`session-prompt.ts` §7.3) asks the *session* to
- * curl its own status and completion callbacks. This runner does not rely on
- * that, and TRD-01 §7.2 explicitly permits the alternative: "the session (or
- * runner on its behalf) POSTs".
+ * TRD-01 §7.2 lets either party report: "the session (or runner on its behalf)
+ * POSTs". This runner reports on the session's behalf, and for this adapter the
+ * prompt no longer asks the session to as well — it used to, with a `curl` the
+ * permission mode denied, and nineteen of twenty sessions spent turns trying.
+ * `session-prompt.ts` now asks only for a final message, which this module
+ * relays as the summary the next task reads.
  *
  * Reporting on its behalf is the honest option. A model may forget the final
  * callback, may send it twice, and — worst — will happily invent `tokensUsed`
@@ -193,8 +196,14 @@ function parseEnvelope(stdout: string): ClaudeResultEnvelope | null {
  *
  * The join link carries the session key, so it must not be observable. It is
  * written into a `0600` MCP config file and passed BY PATH — never as an argv
- * element, because `ps` on a shared machine shows argv to every user on it, and
- * never through the environment, which `/proc/<pid>/environ` exposes on Linux.
+ * element, because `ps` on a shared machine shows argv to every user on it.
+ *
+ * The config names it as an environment variable for the MCP server process,
+ * which is how `@devpilot.sh/mcp-session` receives it: `devpilot_session_join`
+ * called with no `url` reads `DEVPILOT_SESSION_LINK`. (An earlier version of
+ * this comment said the link never travelled through the environment. It did —
+ * the server's — and nothing read it there, so a dispatched agent told to
+ * "join with no url" could not. That is fixed on the server side.)
  *
  * The caller deletes the directory when the process exits; `finally` in
  * `runClaudeSession` guarantees it even on a throw.
@@ -266,6 +275,11 @@ export interface RunClaudeOptions {
   /** Receives the kill handle so the HTTP `stop` route can cancel the run. */
   onSpawn?: (kill: () => void) => void;
   /**
+   * How DevPilot configures this agent — see ./harness. Absent means
+   * `baseline`, which adds nothing to the invocation.
+   */
+  harness?: Harness;
+  /**
    * Called as the agent works, with the running picture of what it is doing.
    *
    * This is the difference between a status board and an instrument. Without it
@@ -278,7 +292,7 @@ export interface RunClaudeOptions {
 export async function runClaudeSession(
   options: RunClaudeOptions
 ): Promise<ClaudeRunOutcome> {
-  const { workdir, prompt, sessionLink, model, claudePath, permissionMode, timeoutMs, resumeSessionId, onLog, onSpawn } =
+  const { workdir, prompt, sessionLink, model, claudePath, permissionMode, timeoutMs, resumeSessionId, harness, onLog, onSpawn } =
     options;
 
   const before = await snapshot(workdir);
@@ -335,6 +349,12 @@ export async function runClaudeSession(
     effectivePrompt = sessionPreamble() + prompt;
   }
 
+  // The harness goes last so its arguments are easy to find in a process
+  // listing, and after the session wiring so a technique can tell whether an
+  // MCP config has already been supplied.
+  const harnessBuild = harness?.build({ hasMcpConfig: Boolean(sessionLink) });
+  if (harnessBuild) args.push(...harnessBuild.args);
+
   const outcome = await new Promise<{
     code: number | null;
     stdout: string;
@@ -385,7 +405,9 @@ export async function runClaudeSession(
       const lines = pending.split('\n');
       pending = lines.pop() ?? '';
       for (const line of lines) collector.ingestLine(line);
-      if (lines.length > 0) options.onTelemetry?.(collector.snapshot());
+      if (lines.length > 0) {
+        options.onTelemetry?.({ ...collector.snapshot(), harness: harness?.stamp });
+      }
     });
     child.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString();
@@ -409,6 +431,7 @@ export async function runClaudeSession(
     // The config holds the session key. Remove it as soon as the process is
     // gone, whether it exited, timed out, was killed, or threw.
     if (mcpDir) rmSync(mcpDir, { recursive: true, force: true });
+    if (harnessBuild?.cleanupDir) rmSync(harnessBuild.cleanupDir, { recursive: true, force: true });
   });
 
   const after = await snapshot(workdir);

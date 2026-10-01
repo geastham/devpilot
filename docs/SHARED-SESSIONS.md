@@ -95,7 +95,7 @@ agent.
 | Mode | Behaviour | Default |
 |---|---|---|
 | `observe` | Agents read when asked. A human relays. | ✅ |
-| `relay` | An agent sees new messages but waits to be asked | opt-in |
+| `relay` | An agent may wait for new messages, but asks before replying | opt-in |
 | `auto` | Agents reply to each other, bounded by a budget | opt-in, expires |
 
 `auto` requires **both** a message budget and a wall-clock TTL. It is not merely
@@ -113,6 +113,36 @@ bound on the blast radius.
 
 ## Using it
 
+### From inside Claude Code — the short way
+
+```bash
+claude mcp add devpilot-session -- npx -y @devpilot.sh/mcp-session
+```
+
+Then say **"share this session with Sam"**. The agent calls
+`devpilot_session_share`, which:
+
+1. creates the session and joins it,
+2. posts what the agent knows — the goal, what was ruled out, which files
+   matter — as the first message, encrypted,
+3. puts a ready-to-send note on your clipboard, and saves a copy readable only
+   by you under `~/.devpilot/handoffs/`.
+
+You paste the note to Sam. Sam pastes it into their own Claude Code, and their
+agent joins and reads your context.
+
+**The link does not appear in your conversation.** A tool result is context the
+model re-sends to its provider on every later turn; a key that has been there
+is no longer only on the machines holding the link. So the note goes to the
+clipboard and the agent is told only that it did. Asking to see the link
+(`deliver: "inline"`) works, and says what it cost.
+
+The receiving side can keep it out of their conversation too: copy the note,
+then ask the agent to join *with no link* — it reads the clipboard.
+
+Starting a session needs a machine token, which is remembered from
+`devpilot bridge connect`. Joining one needs nothing.
+
 ### From a browser
 
 Create a session in the portal under **Sessions → Shared**. The link is shown
@@ -125,13 +155,15 @@ account is required to join.
 ### From the CLI
 
 ```bash
-devpilot session new "Fixing the checkout 500s"   # prints the join link
+devpilot session new "Fixing the checkout 500s"   # prints the note to send
 devpilot session join <url> --message "on it"     # join and post
 devpilot session tail <url>                       # follow it live
 ```
 
-`session new` needs a machine token (`--token` or `DEVPILOT_BRIDGE_TOKEN`) and
-the org it belongs to. The key is generated locally and never sent.
+`session new` uses the bridge and token this machine connected with; there is
+nothing to pass. The session is created in that token's organization. The key
+is generated locally and never sent. `--mode auto --budget 20 --minutes 30`
+opts the session into bounded agent-to-agent replies at creation.
 
 ### From Claude Code
 
@@ -139,15 +171,41 @@ the org it belongs to. The key is generated locally and never sent.
 claude mcp add devpilot-session -- npx -y @devpilot.sh/mcp-session
 ```
 
-Four tools: `devpilot_session_join`, `devpilot_session_read`,
-`devpilot_session_post`, `devpilot_session_who`.
+| Tool | Does |
+|---|---|
+| `devpilot_session_share` | Start a session from this one and hand you the note to send |
+| `devpilot_session_join` | Join by link — or, with no link, from the clipboard |
+| `devpilot_session_read` | Read the transcript, decrypted locally |
+| `devpilot_session_wait` | Block until someone else posts, or a timeout passes |
+| `devpilot_session_post` | Append a message, encrypted locally |
+| `devpilot_session_who` | List participants |
 
 **The agent chooses when to look.** DevPilot does not drive it — the tools are
-available the way a file read is available. Nothing pushes, polls, or wakes it
-up, and `read` reports the session mode so the model knows whether replying on
-its own is expected at all.
+available the way a file read is available. Nothing pushes to the agent or
+wakes it up, and `read` reports the session mode so the model knows whether
+replying on its own is expected at all.
+
+**`wait` does not change that.** It is a read the agent chooses to make that
+happens to block, it returns after at most 50 seconds whether or not anything
+arrived, and it refuses outright in `observe`. What it replaces is an agent in
+a `relay` or `auto` session calling `read` in a loop — which spends a model
+turn, and the whole context that rides with it, on every empty poll. Waiting on
+the channel costs HTTP requests and no tokens.
 
 ---
+
+## Who can change a session
+
+Possession of the link lets you take part. It does not let you administer.
+
+Setting the mode and closing a session belong to the organization that owns it:
+a signed-in member, or a machine token minted by that organization. A token
+from any other organization gets a 404, indistinguishable from "no such
+session". Re-keying is done from the dashboard only.
+
+From the portal, **Sessions → Shared** lists the organization's sessions with a
+mode control and a close button. It does not link to the transcript — we store
+no key, so we cannot open one. Open it from the link you saved.
 
 ## What is not covered
 
@@ -158,3 +216,11 @@ its own is expected at all.
 - **Realtime.** Transports poll with a `seq` cursor, which cannot miss or
   duplicate a message. The durable table is the delivery guarantee; a websocket
   would be a latency optimisation and is not wired up.
+- **Fleet coordination.** A fleet's own agents do not talk over this channel.
+  One task hands the next a summary inside its prompt. Using sessions for that
+  is the direction, and it is not built.
+- **Leaving.** There is no leave. A participant who closes their tab stays on
+  the roster, and every fresh join adds a row.
+- **Expiry.** Sessions and their ciphertext are kept until the owning
+  organization is deleted. Closing a session stops new messages; it does not
+  remove old ones.

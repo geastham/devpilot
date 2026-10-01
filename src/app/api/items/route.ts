@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, horizonItems, activityEvents, eq, and, desc, isNull } from '@/lib/db';
+import { db, horizonItems, activityEvents, wavePlans, eq, and, desc, isNull } from '@/lib/db';
 import type { Zone, Complexity } from '@/lib/db';
 import { getConductorGraph, threadFor } from '@/lib/conductor-graph';
+import { resolveItemDescription } from '@devpilot.sh/core/wave-planner';
 import type { ConductorSummary } from '@/types';
 
 /**
@@ -36,7 +37,21 @@ async function conductorSummary(itemId: string): Promise<ConductorSummary | null
       | undefined;
     const waves = plan?.waves ?? [];
 
+    // Once approved, the run has a wave plan row, and that row — not the
+    // checkpoint — knows how it ended and where its work is. Without it a
+    // finished run had nothing to say on the board and read as "Planning".
+    const wavePlanId = (values.wavePlanId as string | undefined) ?? null;
+    const row = wavePlanId
+      ? await db.query.wavePlans.findFirst({
+          where: eq(wavePlans.id, wavePlanId),
+          columns: { status: true, failureReason: true, runBranch: true },
+        })
+      : undefined;
+
     return {
+      planStatus: row?.status ?? null,
+      planReason: row?.failureReason ?? null,
+      runBranch: row?.runBranch ?? null,
       status: String(values.status ?? 'planning'),
       awaiting: pending ? (waiting ? 'wave' : 'review') : null,
       waveCount: waves.length,
@@ -46,7 +61,7 @@ async function conductorSummary(itemId: string): Promise<ConductorSummary | null
         (values.score as { parallelizationScore?: number } | undefined)?.parallelizationScore ??
         null,
       currentWaveIndex: Number(values.currentWaveIndex ?? 0),
-      wavePlanId: (values.wavePlanId as string | undefined) ?? null,
+      wavePlanId,
     };
   } catch {
     // A board that renders is worth more than a board that 500s because one
@@ -130,9 +145,37 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    /**
+     * The ticket body. The bridge has always sent it; this handler read six
+     * named fields and dropped it, so the planner was handed the title alone.
+     *
+     * A ticket can be posted here more than once — after its item was swept
+     * off the board, or by a redelivery that raced the bridge's "is it already
+     * on the board?" check — and such a re-post may not carry the body again.
+     * So when none arrives, the new item inherits the latest one already held
+     * for the same ticket. Archived items count: sweeping an item is not a
+     * reason to forget what its ticket said.
+     */
+    const earlierDescriptions =
+      typeof linearTicketId === 'string' && linearTicketId
+        ? (
+            await db
+              .select({ description: horizonItems.description })
+              .from(horizonItems)
+              .where(eq(horizonItems.linearTicketId, linearTicketId))
+              .orderBy(desc(horizonItems.createdAt))
+          ).map((row) => row.description)
+        : [];
+
+    // Untrusted text — anyone who can edit the ticket wrote it. Stored as
+    // given apart from trimming and a length cap (20,000 characters, see
+    // MAX_ITEM_DESCRIPTION_CHARS for why), and never interpreted here.
+    const description = resolveItemDescription(body.description, earlierDescriptions);
+
     // Insert the new item
     const [item] = await db.insert(horizonItems).values({
       title,
+      description,
       zone: zone as Zone,
       repo,
       complexity: complexity as Complexity | undefined,

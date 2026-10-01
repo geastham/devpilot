@@ -5,14 +5,12 @@ import {
   inFlightFiles,
   touchedFiles,
   activityEvents,
-  conductorScores,
   completedTasks,
   eq,
 } from '@/lib/db';
-import { linear, score as scoreModel } from '@devpilot.sh/core';
+import { linear } from '@devpilot.sh/core';
 import type { CompletionReport } from '@devpilot.sh/core/orchestrator';
-import { getServerOrchestrator } from '@/lib/orchestrator';
-import { resumeConductorForTask, waveForSession } from '@/lib/conductor-resume';
+import { getServerOrchestrator, getExecutionBridge } from '@/lib/orchestrator';
 
 // POST /api/orchestrator/complete - Receive completion reports from orchestrator
 export async function POST(request: Request) {
@@ -24,6 +22,22 @@ export async function POST(request: Request) {
     }
 
     const report = await request.json() as CompletionReport;
+
+    // The session runner sends `error` as a string; the type says an object.
+    // Read as an object only, a failed session's reason was `undefined` and the
+    // activity feed said "Unknown error" for every failure the runner reported.
+    const rawError = (report as { error?: unknown }).error;
+    const errorMessage =
+      typeof rawError === 'string'
+        ? rawError
+        : (rawError as { message?: string } | undefined)?.message;
+
+    // The agent's final reading, when the runner sends one. Status reports are
+    // throttled, so the last one stored while the agent ran can be seconds
+    // short of the end — missing its last edits and, because the stream only
+    // reports output tokens when a run ends, most of its output. This is the
+    // complete reading, and it is what the score's cost dimension is read from.
+    const finalTelemetry = (report as { telemetry?: unknown }).telemetry;
 
     // Find the session
     const session = await db.query.rufloSessions.findFirst({
@@ -57,6 +71,9 @@ export async function POST(request: Request) {
         prUrl: report.prUrl,
         tokensUsed: report.tokensUsed,
         costUsd: Math.round(report.costUsd * 100),
+        ...(finalTelemetry && typeof finalTelemetry === 'object'
+          ? { telemetry: finalTelemetry as NonNullable<typeof session.telemetry> }
+          : {}),
         updatedAt: new Date(),
       })
       .where(eq(rufloSessions.id, report.sessionId));
@@ -109,7 +126,7 @@ export async function POST(request: Request) {
       type: 'SESSION_COMPLETE',
       message: report.success
         ? `Session completed: "${session.ticketTitle}"${report.prUrl ? ` - PR: ${report.prUrl}` : ''}`
-        : `Session failed: "${session.ticketTitle}" - ${report.error?.message || 'Unknown error'}`,
+        : `Session failed: "${session.ticketTitle}" - ${errorMessage || 'no reason reported'}`,
       repo: session.repo,
       ticketId: session.linearTicketId,
       metadata: {
@@ -124,26 +141,10 @@ export async function POST(request: Request) {
       },
     });
 
-    // Update conductor score
-    const score = await db.query.conductorScores.findFirst();
-    if (score) {
-      const scoreDelta = report.success ? 15 : -5;
-      const costEfficiencyDelta = report.costUsd < (score.costEfficiency / 100 * 0.5) ? 5 : -2;
-
-      await db.update(conductorScores)
-        .set({
-          total: Math.max(0, Math.min(1000, score.total + scoreDelta)),
-          velocityTrend: scoreModel.clampDimension('velocityTrend', score.velocityTrend + (report.success ? 3 : -2)),
-          costEfficiency: scoreModel.clampDimension('costEfficiency', score.costEfficiency + costEfficiencyDelta),
-        })
-        .where(eq(conductorScores.id, score.id));
-
-      await db.insert(activityEvents).values({
-        type: 'SCORE_UPDATE',
-        message: `Score ${scoreDelta > 0 ? '+' : ''}${scoreDelta} for ${report.success ? 'completion' : 'failure'}`,
-        metadata: { delta: scoreDelta, reason: report.success ? 'completion' : 'failure' },
-      });
-    }
+    // No score is touched here. A completion used to add fifteen points and a
+    // failure take five away, with a cost adjustment compared against the
+    // score itself. The Conductor Score is now computed from recorded events
+    // (src/lib/score.ts); the session row written above is one of them.
 
     // Sync completion to Linear if configured
     if (session.linearTicketId && linear.isLinearConfigured()) {
@@ -158,24 +159,49 @@ export async function POST(request: Request) {
 
     // Forward to the orchestrator service: feeds the push-adapter cache and
     // emits job:complete / job:error, which the ExecutionBridge consumes to
-    // advance the owning wave task.
-    try {
-      getServerOrchestrator().ingestCompletionReport(report);
-    } catch (ingestError) {
-      console.error('Failed to forward completion to orchestrator:', ingestError);
-    }
-
-    // Wake a suspended conductor run if this completion settled its wave.
-    // Best-effort by construction: `resumeConductorForTask` swallows its own
-    // errors, because a completion report must still return 200 even when no
-    // graph is listening — most sessions are dispatched outside a conductor run.
-    let conductor: Awaited<ReturnType<typeof resumeConductorForTask>> = {
+    // record the owning wave task and then tell whoever drives its plan.
+    //
+    // This route used to do the second half itself — look the wave up and
+    // resume the conductor graph — in parallel with the bridge doing the first.
+    // Whether the graph saw the task as finished depended on which of two
+    // promise chains reached the database first. The bridge now does both, in
+    // order, and this waits for it: `settlementFor` is the handler the emit
+    // above started, so the response goes out once the task is recorded and
+    // the run has been resumed (or deliberately not).
+    //
+    // The report goes through whole, as it was posted. For a task that ran on
+    // its own branch it also says where the work is (`branch`, `baseSha`,
+    // `commitSha`) and exactly which files changed, and the bridge writes
+    // those onto the wave task in the same statement that completes it —
+    // which is what the wave's merge, and the next wave's prompt, then read.
+    // Nothing here needs to pick them out; it must only not drop them.
+    //
+    // Best-effort by construction, as before: the bridge isolates its own
+    // faults, because a completion report must still return 200 even when no
+    // graph is listening — most sessions are dispatched outside a conductor
+    // run. A report the bridge fails to apply is picked up from the session
+    // row by its reconciler.
+    let conductor: { resumed: boolean; reason?: string } = {
       resumed: false,
       reason: 'no wave task for session',
     };
-    const wave = await waveForSession(report.sessionId).catch(() => null);
-    if (wave) {
-      conductor = await resumeConductorForTask(wave.wavePlanId, wave.waveIndex);
+    try {
+      getServerOrchestrator().ingestCompletionReport(report);
+
+      const settlement = await getExecutionBridge().settlementFor(report.sessionId);
+      if (settlement.error) {
+        conductor = { resumed: false, reason: settlement.error };
+      } else if (settlement.task) {
+        conductor = settlement.driver ?? {
+          resumed: false,
+          reason:
+            settlement.recorded === 'ignored'
+              ? 'report changed nothing (duplicate, or not the current attempt)'
+              : 'plan is not run by the conductor',
+        };
+      }
+    } catch (ingestError) {
+      console.error('Failed to forward completion to orchestrator:', ingestError);
     }
 
     return NextResponse.json({

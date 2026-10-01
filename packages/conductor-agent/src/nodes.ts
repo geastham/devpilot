@@ -6,6 +6,7 @@ import type {
   GeneratePlanInput,
   ReviewDecision,
   ReviewRequest,
+  WaveOutcome,
 } from './types';
 
 /**
@@ -130,8 +131,16 @@ export function makeNodes(ports: ConductorPorts, config: ConductorConfig) {
     return { wavePlanId, status: 'executing', currentWaveIndex: 0 };
   }
 
-  /** Dispatch every task in the current wave. */
+  /**
+   * Dispatch what can be dispatched of the current wave.
+   *
+   * Reached three ways — a wave's first dispatch, a wave retry, and an
+   * `in-flight` signal — and it is the same call each time; the port is
+   * required to be idempotent. The result's `settled` is carried into
+   * `waveSignal` so `awaitWave` does not wait on a wave that is already over.
+   */
   async function dispatch(state: ConductorStateType): Promise<ConductorUpdate> {
+    const backfill = state.waveSignal?.state === 'in-flight';
     const result = await ports.dispatchWave(state.wavePlanId!, state.currentWaveIndex);
 
     emit({
@@ -139,10 +148,17 @@ export function makeNodes(ports: ConductorPorts, config: ConductorConfig) {
       waveIndex: state.currentWaveIndex,
       dispatched: result.dispatched,
       queued: result.queued,
+      ...(backfill ? { backfill: true } : {}),
     });
 
     return {
+      // A run that is dispatching is executing. `persist` says so too, but a run
+      // that ADOPTS an existing plan enters here without passing through it, and
+      // reported `planning` for its whole life — so anything that narrates an
+      // executing run (DevPilot's bridge watcher does) said nothing about it.
+      status: 'executing',
       lastDispatch: { dispatched: result.dispatched, queued: result.queued },
+      waveSignal: result.settled ?? null,
       errors: result.errors.map((e) => `wave ${state.currentWaveIndex} ${e.taskCode}: ${e.error}`),
     };
   }
@@ -155,18 +171,32 @@ export function makeNodes(ports: ConductorPorts, config: ConductorConfig) {
    * done. That is the correct shape when a wave is a fleet of coding agents
    * running for an hour — holding an open promise across that is how you lose
    * the run to a restart.
+   *
+   * It does not wait at all when `dispatch` already knows how the wave ended.
+   * Nothing would ever answer: a wave with no task in flight has no completion
+   * callback coming, so the interrupt would never be resumed.
    */
   async function awaitWave(state: ConductorStateType): Promise<ConductorUpdate> {
-    const outcome = ports.waitForWave
-      ? await ports.waitForWave(state.wavePlanId!, state.currentWaveIndex)
-      : interrupt<{ wavePlanId: string; waveIndex: number }, Awaited<ReturnType<NonNullable<ConductorPorts['waitForWave']>>>>({
-          wavePlanId: state.wavePlanId!,
-          waveIndex: state.currentWaveIndex,
-        });
+    const known = state.waveSignal;
+
+    const outcome: WaveOutcome =
+      known && known.state !== 'in-flight'
+        ? known
+        : ports.waitForWave
+          ? await ports.waitForWave(state.wavePlanId!, state.currentWaveIndex)
+          : interrupt<{ wavePlanId: string; waveIndex: number }, WaveOutcome>({
+              wavePlanId: state.wavePlanId!,
+              waveIndex: state.currentWaveIndex,
+            });
+
+    // Still running; the branch after this node sends it back to `dispatch`.
+    if (outcome.state === 'in-flight') {
+      return { waveSignal: outcome };
+    }
 
     if (outcome.state === 'complete') {
       emit({ type: 'wave:complete', waveIndex: state.currentWaveIndex });
-      return { completedWaves: [state.currentWaveIndex] };
+      return { waveSignal: outcome, completedWaves: [state.currentWaveIndex] };
     }
 
     emit({
@@ -175,6 +205,7 @@ export function makeNodes(ports: ConductorPorts, config: ConductorConfig) {
       failures: outcome.failures.length,
     });
     return {
+      waveSignal: outcome,
       errors: outcome.failures.map(
         (f) => `wave ${state.currentWaveIndex} ${f.taskCode}: ${f.error}`
       ),
@@ -191,13 +222,23 @@ export function makeNodes(ports: ConductorPorts, config: ConductorConfig) {
     return { waveRetries: state.waveRetries + 1 };
   }
 
+  /**
+   * Both terminal nodes tell the host how the run ended before they return.
+   * A run aborted at review has no persisted plan and nothing to tell it about.
+   */
   async function finish(state: ConductorStateType): Promise<ConductorUpdate> {
+    if (state.wavePlanId) {
+      await ports.endRun?.(state.wavePlanId, { status: 'complete' });
+    }
     emit({ type: 'run:complete', waves: state.plan?.waves.length ?? 0 });
     return { status: 'complete' };
   }
 
   async function fail(state: ConductorStateType): Promise<ConductorUpdate> {
     const reason = state.errors[state.errors.length - 1] ?? 'unknown failure';
+    if (state.wavePlanId) {
+      await ports.endRun?.(state.wavePlanId, { status: 'failed', reason });
+    }
     emit({ type: 'run:failed', reason });
     return { status: 'failed' };
   }

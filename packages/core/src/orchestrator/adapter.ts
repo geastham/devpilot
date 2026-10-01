@@ -11,6 +11,9 @@ import type {
   OrchestratorHealth,
   StatusUpdate,
   CompletionReport,
+  IntegrateOutcome,
+  IntegrateRequest,
+  IsolationSupport,
 } from './types';
 
 /**
@@ -131,6 +134,22 @@ export interface IOrchestratorAdapter {
    * Get completion report for a finished job
    */
   getCompletionReport?(externalJobId: string): Promise<CompletionReport | null>;
+
+  /**
+   * Whether a task dispatched through this adapter can be given its own
+   * worktree and branch (`DispatchRequest.isolation`).
+   *
+   * Optional, and absent means no: only `claude-session` implements it. The
+   * wave dispatcher asks once per plan, before the plan's first task, and the
+   * answer is recorded on the plan — see `WaveDispatchCoordinator`.
+   */
+  isolationSupport?(): Promise<IsolationSupport>;
+
+  /**
+   * Merge a wave's task branches into the run branch. Only meaningful where
+   * `isolationSupport` is.
+   */
+  integrate?(request: IntegrateRequest): Promise<IntegrateOutcome>;
 
   /**
    * Stop polling/cleanup resources

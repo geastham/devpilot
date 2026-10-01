@@ -1,7 +1,15 @@
 import os from 'os';
 import { Command } from 'commander';
 import chalk from 'chalk';
-import { BridgeClient, DispatchLoop, HeartbeatService } from '@devpilot.sh/bridge-client';
+import {
+  BridgeClient,
+  DEFAULT_BRIDGE_URL,
+  DispatchLoop,
+  HeartbeatService,
+  bridgeCredentialsPath,
+  resolveBridgeCredentials,
+  saveBridgeCredentials,
+} from '@devpilot.sh/bridge-client';
 import { createBridgeDispatchHandler } from './dispatch-handler';
 import { createConductorDispatchHandler } from './conductor-handler';
 import { homedir } from 'node:os';
@@ -70,6 +78,7 @@ interface ConnectOptions {
   httpUrl?: string;
   aoProject?: string;
   aoPath?: string;
+  save?: boolean;
   discover?: boolean;
   observe?: boolean;
   adopt?: boolean;
@@ -126,6 +135,7 @@ export const connectCommand = new Command('connect')
    * and a flag someone set once should not keep writing to their team's Linear
    * every time a laptop reconnects.
    */
+  .option('--no-save', 'Do not remember the bridge URL and token on this machine')
   .option('--no-discover', 'Do not report which repos this machine has agent history for')
   .option(
     '--no-observe',
@@ -142,6 +152,18 @@ export const connectCommand = new Command('connect')
     false,
   )
   .action(async (options: ConnectOptions) => {
+    /**
+     * Flag, then environment, then what this machine connected with last time.
+     *
+     * A token is shown once, when it is minted. Nothing kept it, so
+     * reconnecting after a reboot meant minting another — and the command the
+     * marketing page prints, a bare `devpilot bridge connect`, only ever
+     * worked for someone who had exported two variables first.
+     */
+    const credentials = resolveBridgeCredentials({ url: options.url, token: options.token });
+    options.url = credentials.url ?? (credentials.token ? DEFAULT_BRIDGE_URL : undefined);
+    options.token = credentials.token;
+
     if (!options.url) {
       console.error(chalk.red('✗ Bridge URL required (--url or DEVPILOT_BRIDGE_URL)'));
       process.exit(1);
@@ -199,6 +221,18 @@ export const connectCommand = new Command('connect')
 
     console.log(chalk.green('✓ Registered'));
     console.log(chalk.gray(`   orchestrator: ${registration.orchestratorId}`));
+
+    /**
+     * Remember it — only once the bridge has accepted it, so a mistyped token
+     * is never what gets saved. Owner-readable only; `--no-save` for a machine
+     * that should not keep one (a shared box, a CI runner).
+     */
+    if (options.save !== false && credentials.source !== 'saved') {
+      const saved = saveBridgeCredentials({ url: options.url, token: options.token });
+      if (saved) {
+        console.log(chalk.gray(`   remembered in ${bridgeCredentialsPath()} — reconnect with no flags`));
+      }
+    }
     console.log(chalk.gray(`   repos: ${repos.join(', ') || '(none)'}`));
     if (repos.length === 0) {
       console.log(chalk.yellow('   ⚠ No repos specified — nothing can route to this machine.'));
@@ -301,6 +335,10 @@ export const connectCommand = new Command('connect')
             client,
             machineName: options.name ?? stableMachineName(),
             repos,
+            // A session placed on a board is already followed by the adoption
+            // watcher; everything else gets its instruments from the observer.
+            isWatched: (key) => adoptionWatcher.isTracking(key),
+            readingsStatePath: join(homedir(), '.devpilot', 'observed-readings.json'),
             onLog: (line) => console.log(chalk.gray(`   ${line}`)),
           })
         : null;

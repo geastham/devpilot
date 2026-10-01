@@ -16,6 +16,7 @@ import {
 import type { Model, Complexity, FileStatus } from '../db';
 import { generateWavePlan } from './generator';
 import type { WavePlanGenerationResult } from './generator';
+import { normalizeItemDescription, renderTicketDescription } from './ticket-description';
 
 export interface ProjectedPlanIds {
   planId: string;
@@ -54,9 +55,14 @@ function estimateTaskCostUsd(model: Model, complexity: Complexity): number {
 /**
  * Build spec markdown from an item + optional existing plan.
  * Ported from the Next route's buildSpecContent() (typed, no `any`).
+ *
+ * Order: the title as the only top-level heading, then the ticket description
+ * when the item has one, then whatever the existing plan contributes. An item
+ * with no description produces exactly what it did before descriptions existed.
  */
 export function buildSpecContentForItem(item: {
   title: string;
+  description?: string | null;
   plan?: {
     acceptanceCriteria?: string[];
     workstreams?: { label: string; tasks: { label: string; filePaths?: string[] }[] }[];
@@ -66,6 +72,17 @@ export function buildSpecContentForItem(item: {
 
   lines.push(`# ${item.title}`);
   lines.push('');
+
+  // Untrusted text from the tracker: rendered as a labelled, delimited block
+  // and never spliced into the spec's own structure. Normalised again here
+  // because not every row was written through the route that caps it.
+  const description = normalizeItemDescription(item.description);
+  if (description) {
+    lines.push('## Ticket Description');
+    lines.push('');
+    lines.push(renderTicketDescription(description));
+    lines.push('');
+  }
 
   const acceptanceCriteria = item.plan?.acceptanceCriteria;
   if (acceptanceCriteria && acceptanceCriteria.length > 0) {
@@ -108,15 +125,18 @@ export function buildSpecContentForItem(item: {
 export async function generatePlanForItem(params: {
   horizonItemId: string;
   title: string;
+  /** The item's ticket description, when it has one. */
+  description?: string | null;
   repo: string;
   workingDir: string;
   apiKey: string;
 }): Promise<{ generation: WavePlanGenerationResult; planId: string }> {
-  const { horizonItemId, title, repo, workingDir, apiKey } = params;
+  const { horizonItemId, title, description, repo, workingDir, apiKey } = params;
   const db = getDatabase();
 
-  // No plan yet → spec content is derived from the title alone.
-  const specContent = buildSpecContentForItem({ title });
+  // No plan yet → spec content is the title, plus the ticket description when
+  // the item has one.
+  const specContent = buildSpecContentForItem({ title, description });
 
   // Create the plans row FIRST — the generator needs a planId to attach the
   // wave plan to. Cost / confidence fields are filled in later by

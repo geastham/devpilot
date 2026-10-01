@@ -22,6 +22,8 @@ export {
   type GeneratePlanOutput,
   type DispatchWaveResult,
   type WaveOutcome,
+  type SettledWaveOutcome,
+  type RunResult,
   type ReviewRequest,
   type ReviewDecision,
 } from './types';

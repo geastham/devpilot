@@ -475,9 +475,15 @@ var HeartbeatService = class {
 import {
   sessionCrypto,
   parseJoinLink,
+  buildJoinLink,
   JOIN_PROOF_HEADER,
+  SESSION_LIMITS,
   formatApiError as formatApiError2
 } from "@devpilot.sh/bridge-protocol";
+function baseUrlOf(link) {
+  const base = link.slice(0, link.indexOf("/s/")).replace(/\/+$/, "");
+  return /^https?:\/\//i.test(base) ? base : `https://${base}`;
+}
 var SYSTEM_PREFIX = "system:";
 var _key, _token, _participantId, _session, _joinOptions, _fetchImpl, _SharedSessionClient_static, requestJoin_fn, _SharedSessionClient_instances, request_fn, decode_fn;
 var _SharedSessionClient = class _SharedSessionClient {
@@ -501,8 +507,9 @@ var _SharedSessionClient = class _SharedSessionClient {
   /** Joins by link. The key is taken from the fragment and kept in memory. */
   static async join(options) {
     var _a;
-    const { sessionId, key } = parseJoinLink(options.link);
-    const baseUrl = options.link.slice(0, options.link.indexOf("/s/")).replace(/\/+$/, "");
+    const link = options.link.trim();
+    const { sessionId, key } = parseJoinLink(link);
+    const baseUrl = baseUrlOf(link);
     const fetchImpl = options.fetchImpl ?? globalThis.fetch;
     const joinOptions = {
       displayName: options.displayName,
@@ -521,6 +528,74 @@ var _SharedSessionClient = class _SharedSessionClient {
       joinOptions,
       fetchImpl
     });
+  }
+  /**
+   * Creates a session, joins it, and returns the link — the path that lets an
+   * agent START a shared session instead of only being handed one.
+   *
+   * The key is generated here. What reaches the bridge is sha256(verifier), a
+   * separate HKDF branch that can neither join nor decrypt, exactly as
+   * `devpilot session new` does it. The returned `link` is the only place the
+   * key appears outside this instance, and the caller is responsible for where
+   * it goes next: it is a credential, not a status string.
+   */
+  static async create(options) {
+    const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+    const baseUrl = options.baseUrl.replace(/\/+$/, "");
+    const headers = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${options.token}`
+    };
+    const key = sessionCrypto.generateKey();
+    const { joinKeyHash } = await sessionCrypto.deriveJoinCredentials(key);
+    const created = await fetchImpl(`${baseUrl}/api/sessions/shared`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        title: options.title,
+        joinKeyHash,
+        ...options.linearIdentifier ? { linearIdentifier: options.linearIdentifier } : {}
+      })
+    });
+    if (!created.ok) {
+      const body = await created.json().catch(() => null);
+      throw new BridgeError(
+        formatApiError2(body, `Could not create the session: ${created.status}`),
+        created.status
+      );
+    }
+    const { session } = await created.json();
+    const mode = options.mode ?? "observe";
+    if (mode !== "observe") {
+      const res = await fetchImpl(`${baseUrl}/api/sessions/shared/${session.id}/mode`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          mode,
+          ...mode === "auto" ? {
+            autoBudget: options.autoBudget ?? SESSION_LIMITS.autoDefaultBudget,
+            autoTtlMinutes: options.autoTtlMinutes ?? SESSION_LIMITS.autoDefaultTtlMinutes
+          } : {}
+        })
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new BridgeError(
+          formatApiError2(body, `Created the session but could not set it to ${mode}: ${res.status}`),
+          res.status
+        );
+      }
+    }
+    const link = buildJoinLink(baseUrl, session.id, key);
+    const client = await _SharedSessionClient.join({
+      link,
+      displayName: options.displayName,
+      kind: options.kind,
+      agentKind: options.agentKind,
+      orchestratorId: options.orchestratorId,
+      fetchImpl
+    });
+    return { client, link };
   }
   get participantId() {
     return __privateGet(this, _participantId);
@@ -547,6 +622,29 @@ var _SharedSessionClient = class _SharedSessionClient {
     const page = await __privateMethod(this, _SharedSessionClient_instances, request_fn).call(this, `/api/sessions/shared/${this.sessionId}/messages?since=${since}`);
     const entries = await Promise.all(page.messages.map((m) => __privateMethod(this, _SharedSessionClient_instances, decode_fn).call(this, m)));
     return { entries, latestSeq: page.latestSeq, hasMore: page.hasMore };
+  }
+  /**
+   * Blocks until something new arrives, or the timeout passes.
+   *
+   * An agent waiting for a reply has two bad options without this: ask its
+   * model to call `read` in a loop, which spends a turn — and the whole
+   * context that rides along with it — on every empty poll, or stop and wait
+   * for a person to nudge it. Waiting here costs HTTP requests and no tokens.
+   *
+   * Resolves with an empty page on timeout; that is an answer, not an error.
+   */
+  async wait(since, opts = {}) {
+    const timeoutMs = opts.timeoutMs ?? 45e3;
+    const intervalMs = Math.max(250, opts.intervalMs ?? 2e3);
+    const deadline = Date.now() + timeoutMs;
+    for (; ; ) {
+      const page = await this.read(since);
+      if (page.entries.length > 0) return { ...page, timedOut: false };
+      if (opts.signal?.aborted || Date.now() + intervalMs > deadline) {
+        return { ...page, latestSeq: Math.max(page.latestSeq, since), timedOut: true };
+      }
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
   }
   async who() {
     const { verifier } = await sessionCrypto.deriveJoinCredentials(__privateGet(this, _key));
@@ -662,6 +760,59 @@ decode_fn = async function(m) {
 __privateAdd(_SharedSessionClient, _SharedSessionClient_static);
 var SharedSessionClient = _SharedSessionClient;
 
+// src/credentials.ts
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { homedir } from "os";
+import { dirname, join } from "path";
+var DEFAULT_BRIDGE_URL = "https://devpilot.sh";
+function bridgeCredentialsPath(home = homedir()) {
+  return join(home, ".devpilot", "bridge.json");
+}
+function loadBridgeCredentials(path = bridgeCredentialsPath()) {
+  try {
+    if (!existsSync(path)) return null;
+    const saved = JSON.parse(readFileSync(path, "utf8"));
+    if (typeof saved.url !== "string" || typeof saved.token !== "string") return null;
+    if (!saved.url || !saved.token) return null;
+    return { url: saved.url.replace(/\/+$/, ""), token: saved.token };
+  } catch {
+    return null;
+  }
+}
+function saveBridgeCredentials(credentials, path = bridgeCredentialsPath()) {
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 448 });
+    writeFileSync(
+      path,
+      JSON.stringify({ url: credentials.url.replace(/\/+$/, ""), token: credentials.token }, null, 2),
+      { encoding: "utf8", mode: 384 }
+    );
+    chmodSync(path, 384);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function clearBridgeCredentials(path = bridgeCredentialsPath()) {
+  try {
+    rmSync(path, { force: true });
+  } catch {
+  }
+}
+function resolveBridgeCredentials(explicit = {}, env = process.env, path = bridgeCredentialsPath()) {
+  const saved = loadBridgeCredentials(path);
+  const trim = (u) => u?.replace(/\/+$/, "");
+  const url = trim(explicit.url) ?? trim(env.DEVPILOT_BRIDGE_URL) ?? saved?.url;
+  const direct = explicit.token ?? env.DEVPILOT_BRIDGE_TOKEN;
+  if (direct) {
+    return { url, token: direct, source: explicit.token ? "explicit" : "env" };
+  }
+  if (saved && (!url || url === saved.url)) {
+    return { url: saved.url, token: saved.token, source: "saved" };
+  }
+  return { url, token: void 0, source: "none" };
+}
+
 // src/pubsub.ts
 var REMOVED = "@devpilot.sh/bridge-client: the Pub/Sub transport was removed in 0.2.0. Upgrade the DevPilot CLI (npm i -g @devpilot.sh/cli) and use `devpilot bridge connect`. GCP credentials are no longer required.";
 var PubSubSubscriber = class {
@@ -672,10 +823,16 @@ var PubSubSubscriber = class {
 export {
   BridgeClient,
   BridgeError,
+  DEFAULT_BRIDGE_URL,
   DispatchLoop,
   HeartbeatService,
   PubSubSubscriber,
   RealtimeSubscriber,
-  SharedSessionClient
+  SharedSessionClient,
+  bridgeCredentialsPath,
+  clearBridgeCredentials,
+  loadBridgeCredentials,
+  resolveBridgeCredentials,
+  saveBridgeCredentials
 };
 //# sourceMappingURL=index.mjs.map

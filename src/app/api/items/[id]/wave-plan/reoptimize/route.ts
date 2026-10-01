@@ -9,7 +9,11 @@ import {
   eq,
   type WaveTask,
 } from '@/lib/db';
-import { WavePlanGenerator, resolvePlannerModel } from '@devpilot.sh/core/wave-planner';
+import {
+  WavePlanGenerator,
+  resolvePlannerModel,
+  buildSpecContentForItem,
+} from '@devpilot.sh/core/wave-planner';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -143,10 +147,16 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     // Get the working directory from environment or use default
     const workingDir = process.env.WORKING_DIR || process.cwd();
 
+    // The spec is the ticket description when the item has one. Items without
+    // one keep the bare title they have always been re-planned from.
+    const specContent = item.description
+      ? buildSpecContentForItem({ title: item.title, description: item.description })
+      : item.title;
+
     // Reoptimize the wave plan
     const result = await generator.reoptimize(
       wavePlanId,
-      item.title, // Horizon items have no separate spec field; use the title
+      specContent,
       item.title,
       item.repo,
       {

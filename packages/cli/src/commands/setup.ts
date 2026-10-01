@@ -14,11 +14,6 @@ import {
   generateOrchestratorConfig,
   writeOrchestratorConfig,
   orchestratorConfigExists,
-  isRtkInstalled,
-  installRtk,
-  initRtkHook,
-  isCavemanInstalled,
-  installCaveman,
 } from '../utils/orchestrator';
 
 /**
@@ -181,61 +176,29 @@ export const setupCommand = new Command('setup')
       }
     }
 
-    // Step 4: RTK Token Optimization
-    if (!options.linearOnly && !options.orchestratorOnly) {
-      console.log(chalk.bold('Step 4: RTK Token Optimization'));
-      console.log(chalk.gray('RTK reduces LLM token consumption by 60-90% across fleet agents.\n'));
-
-      const rtkInstalled = isRtkInstalled();
-      if (rtkInstalled) {
-        console.log(chalk.green('  RTK is already installed.'));
-        console.log(chalk.gray('  Ensuring Claude Code hook is configured...'));
-        initRtkHook();
-      } else if (nonInteractive) {
-        console.log(chalk.gray('  Installing RTK (non-interactive mode)...'));
-        const success = installRtk();
-        if (success) {
-          initRtkHook();
-        }
-      } else {
-        const install = await confirm('  Install RTK for token-optimized agent sessions?');
-        if (install) {
-          const success = installRtk();
-          if (success) {
-            initRtkHook();
-          }
-        } else {
-          console.log(chalk.gray('  Skipping RTK installation. Install later with:'));
-          console.log(chalk.cyan('    cargo install --git https://github.com/rtk-ai/rtk'));
-          console.log(chalk.cyan('    rtk init -g\n'));
-        }
-      }
-      console.log('');
-    }
-
-    // Step 5: Caveman Plugin
-    if (!options.linearOnly && !options.orchestratorOnly) {
-      console.log(chalk.bold('Step 5: Caveman Output Compression'));
-      console.log(chalk.gray('Caveman reduces output token usage by ~65-75% across fleet agents.\n'));
-
-      const cavemanInstalled = isCavemanInstalled();
-      if (cavemanInstalled) {
-        console.log(chalk.green('  Caveman plugin is already installed.'));
-        console.log(chalk.gray('  Activate in any session with /caveman (modes: lite, full, ultra)'));
-      } else if (nonInteractive) {
-        console.log(chalk.gray('  Installing Caveman plugin (non-interactive mode)...'));
-        installCaveman();
-      } else {
-        const install = await confirm('  Install Caveman plugin for compressed agent output?');
-        if (install) {
-          installCaveman();
-        } else {
-          console.log(chalk.gray('  Skipping Caveman installation. Install later with:'));
-          console.log(chalk.cyan('    npx skills add JuliusBrussee/caveman\n'));
-        }
-      }
-      console.log('');
-    }
+    /**
+     * There used to be two more steps here, installing RTK and Caveman —
+     * third-party token-reduction tools — with a default of yes and, under
+     * `--yes`, without asking. They are gone, for three reasons:
+     *
+     *   They did not do what this wizard said. It printed the projects' own
+     *   headline figures ("60-90%", "~65-75%") as though DevPilot had measured
+     *   them. Independent paired benchmarks on agentic Claude Code sessions
+     *   found RTK cost-neutral to slightly worse (JetBrains, July 2026: +7.6%
+     *   per task at low effort, +0.1% at high) and Caveman worth 8.5% of
+     *   output tokens against an advertised 65%.
+     *
+     *   They work on the small end. DevPilot's own metering shows a long
+     *   session is almost entirely its context re-read from cache each turn;
+     *   output is a fraction of a percent of the tokens.
+     *
+     *   And one of them never applied. Caveman is switched on per session with
+     *   a slash command, which a headless fleet agent does not type.
+     *
+     * What replaced them is in commands/session-runner/harness.ts: settings of
+     * the agent itself, shipped and versioned here, each one switchable so its
+     * effect can be measured before it is turned on for anyone.
+     */
 
     // Summary
     console.log(chalk.bold.green('\nSetup Complete!\n'));
@@ -243,8 +206,13 @@ export const setupCommand = new Command('setup')
     console.log(chalk.gray('  1. Run ') + chalk.cyan('devpilot serve') + chalk.gray(' to start the UI'));
     console.log(chalk.gray('  2. Run ') + chalk.cyan('ao start') + chalk.gray(' to start agent orchestrator'));
     console.log(chalk.gray('  3. Use the UI to create items and dispatch to the fleet'));
-    console.log(chalk.gray('  4. Run ') + chalk.cyan('rtk gain') + chalk.gray(' to monitor token savings'));
-    console.log(chalk.gray('  5. Use ') + chalk.cyan('/caveman') + chalk.gray(' in sessions for compressed output\n'));
+    // What a session actually spent is on the Efficiency page — metered from
+    // the session's own record, not from a tool's estimate of its own effect.
+    console.log(
+      chalk.gray('  4. Connect this machine with ') +
+        chalk.cyan('devpilot bridge connect') +
+        chalk.gray(' to see what each session spends\n'),
+    );
   });
 
 /**

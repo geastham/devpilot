@@ -9,8 +9,6 @@ export interface SystemRequirements {
   git: { installed: boolean; version: string | null; meetsMinimum: boolean };
   tmux: { installed: boolean };
   gh: { installed: boolean; authenticated: boolean };
-  rtk: { installed: boolean; version: string | null };
-  caveman: { installed: boolean };
 }
 
 export interface OrchestratorConfig {
@@ -90,19 +88,11 @@ export function checkSystemRequirements(): SystemRequirements {
     }
   }
 
-  // Check RTK
-  const rtk = checkCommand('rtk');
-
-  // Check Caveman plugin
-  const cavemanInstalled = isCavemanInstalled();
-
   return {
     node: { ...node, meetsMinimum: nodeMeetsMin },
     git: { ...git, meetsMinimum: gitMeetsMin },
     tmux: { installed: tmux.installed },
     gh: { installed: gh.installed, authenticated: ghAuthenticated },
-    rtk: { installed: rtk.installed, version: rtk.version },
-    caveman: { installed: cavemanInstalled },
   };
 }
 
@@ -146,20 +136,6 @@ export function printRequirementsStatus(reqs: SystemRequirements): void {
   } else {
     console.log(chalk.yellow('  ⚠ GitHub CLI not found (optional, for PR creation)'));
   }
-
-  // RTK
-  if (reqs.rtk.installed) {
-    console.log(chalk.green(`  ✓ RTK ${reqs.rtk.version || ''} (token optimization)`));
-  } else {
-    console.log(chalk.yellow('  ⚠ RTK not found (recommended, for 60-90% token savings)'));
-  }
-
-  // Caveman
-  if (reqs.caveman.installed) {
-    console.log(chalk.green('  ✓ Caveman plugin (output token compression)'));
-  } else {
-    console.log(chalk.yellow('  ⚠ Caveman not found (optional, for ~65-75% output token savings)'));
-  }
 }
 
 /**
@@ -190,128 +166,6 @@ export function installOrchestrator(): boolean {
     console.log(chalk.red('✗ Failed to install @composio/ao-cli'));
     console.log(chalk.gray('  Try manually: npm install -g @composio/ao-cli'));
     return false;
-  }
-}
-
-/**
- * Check if RTK (Rust Token Killer) is installed
- */
-export function isRtkInstalled(): boolean {
-  try {
-    const result = spawnSync('rtk', ['--version'], { encoding: 'utf-8', stdio: 'pipe' });
-    return result.status === 0;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Install RTK via cargo (requires Rust toolchain)
- */
-export function installRtk(): boolean {
-  // Try cargo install first (most reliable)
-  const hasCargo = spawnSync('cargo', ['--version'], { encoding: 'utf-8', stdio: 'pipe' }).status === 0;
-
-  if (hasCargo) {
-    console.log(chalk.cyan('\n  Installing RTK via cargo (this may take a few minutes)...'));
-    try {
-      execSync('cargo install --git https://github.com/rtk-ai/rtk', { stdio: 'inherit' });
-      console.log(chalk.green('  ✓ RTK installed successfully'));
-      return true;
-    } catch {
-      console.log(chalk.red('  ✗ Failed to install RTK via cargo'));
-    }
-  }
-
-  // Try curl install script as fallback
-  console.log(chalk.cyan('\n  Installing RTK via install script...'));
-  try {
-    execSync('curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh', {
-      stdio: 'inherit',
-    });
-    console.log(chalk.green('  ✓ RTK installed successfully'));
-    return true;
-  } catch {
-    console.log(chalk.red('  ✗ Failed to install RTK'));
-    console.log(chalk.gray('  Install manually: cargo install --git https://github.com/rtk-ai/rtk'));
-    console.log(chalk.gray('  Or: brew install rtk'));
-    return false;
-  }
-}
-
-/**
- * Initialize RTK Claude Code hook for automatic command rewriting
- */
-export function initRtkHook(): boolean {
-  console.log(chalk.cyan('\n  Initializing RTK hook for Claude Code...'));
-  try {
-    execSync('rtk init -g', { encoding: 'utf-8', stdio: 'pipe' });
-    console.log(chalk.green('  ✓ RTK hook initialized'));
-    return true;
-  } catch {
-    console.log(chalk.yellow('  ⚠ RTK hook init requires manual step: rtk init -g'));
-    return false;
-  }
-}
-
-/**
- * Check if the Caveman Claude Code plugin is installed.
- * Detects by checking for the caveman hook scripts in ~/.claude/hooks/
- * or for caveman entries in ~/.claude/settings.json.
- */
-export function isCavemanInstalled(): boolean {
-  const claudeDir = join(homedir(), '.claude');
-
-  // Check for hook script (installed via hooks/install.sh or npx skills add)
-  if (existsSync(join(claudeDir, 'hooks', 'caveman-activate.js'))) {
-    return true;
-  }
-
-  // Check settings.json for caveman hook entries
-  const settingsPath = join(claudeDir, 'settings.json');
-  if (existsSync(settingsPath)) {
-    try {
-      const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
-      const settingsStr = JSON.stringify(settings);
-      if (settingsStr.includes('caveman')) {
-        return true;
-      }
-    } catch {
-      // Ignore parse errors
-    }
-  }
-
-  return false;
-}
-
-/**
- * Install the Caveman plugin for Claude Code using npx skills add.
- * This installs the plugin hooks and skill definitions automatically.
- */
-export function installCaveman(): boolean {
-  console.log(chalk.cyan('\n  Installing Caveman plugin for Claude Code...'));
-  try {
-    execSync('npx -y skills add JuliusBrussee/caveman', {
-      stdio: 'inherit',
-      timeout: 120000,
-    });
-    console.log(chalk.green('  ✓ Caveman plugin installed successfully'));
-    return true;
-  } catch {
-    // Fallback: try the hook install script directly
-    console.log(chalk.yellow('  npx skills add failed, trying hook install script...'));
-    try {
-      execSync(
-        'bash <(curl -fsSL https://raw.githubusercontent.com/JuliusBrussee/caveman/main/hooks/install.sh)',
-        { stdio: 'inherit', shell: '/bin/bash', timeout: 60000 }
-      );
-      console.log(chalk.green('  ✓ Caveman hooks installed successfully'));
-      return true;
-    } catch {
-      console.log(chalk.red('  ✗ Failed to install Caveman plugin'));
-      console.log(chalk.gray('  Install manually: npx skills add JuliusBrussee/caveman'));
-      return false;
-    }
   }
 }
 
@@ -444,14 +298,6 @@ export function getInstallInstructions(reqs: SystemRequirements): string[] {
     instructions.push('GitHub CLI: brew install gh (macOS) or https://cli.github.com');
   } else if (!reqs.gh.authenticated) {
     instructions.push('GitHub CLI auth: gh auth login');
-  }
-
-  if (!reqs.rtk.installed) {
-    instructions.push('RTK (token savings): cargo install --git https://github.com/rtk-ai/rtk');
-  }
-
-  if (!reqs.caveman.installed) {
-    instructions.push('Caveman (output compression): npx skills add JuliusBrussee/caveman');
   }
 
   return instructions;

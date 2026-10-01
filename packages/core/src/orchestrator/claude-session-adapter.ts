@@ -30,7 +30,15 @@ import type {
   OrchestratorHealth,
   StatusUpdate,
   CompletionReport,
+  IntegrateOutcome,
+  IntegrateRequest,
+  IntegrationResult,
+  IsolationSupport,
+  TaskIsolation,
 } from './types';
+
+/** The `/v1/health` capability a runner reports when it can isolate a task. */
+export const ISOLATION_CAPABILITY = 'isolation';
 
 /**
  * Parameters for creating a session-native dispatch.
@@ -51,6 +59,16 @@ export interface CreateSessionParams {
   callbackToken?: string;
   /** Managed environment the session should run in, if applicable. */
   environmentId?: string;
+  /**
+   * Give this session its own git worktree and branch — one task of a run.
+   *
+   * A transport MUST NOT send this to a runner that has not said it can do it.
+   * A runner from before the capability ignores a field it does not know, so
+   * the task would run in the shared checkout while everything upstream
+   * believed it was isolated — and the merge at the end of the wave would then
+   * find no branch. `HttpSessionTransport` checks; see `capabilities`.
+   */
+  isolation?: TaskIsolation;
   metadata?: Record<string, unknown>;
 }
 
@@ -78,13 +96,51 @@ export interface SessionTransport {
   getSession?(externalSessionId: string): Promise<Partial<JobStatus> | null>;
   /** Optional health probe. */
   health?(): Promise<Pick<OrchestratorHealth, 'status' | 'version'>>;
+  /**
+   * Optional. What the runner says it can do beyond the original contract
+   * (`/v1/health` → `capabilities`), or null when it could not be asked.
+   *
+   * Null is not the same as an empty list: an empty list is a runner that
+   * answered and listed nothing, and null is no answer at all. A transport
+   * without this method cannot isolate, and is treated as saying so.
+   */
+  capabilities?(): Promise<string[] | null>;
+  /**
+   * Optional. Merge a wave's task branches into the run branch
+   * (`POST /v1/integrate`). Never rejects: a runner that cannot be reached is
+   * an answer (`ok: false`), because the caller has to do something with it.
+   */
+  integrate?(request: IntegrateRequest): Promise<IntegrateOutcome>;
 }
+
+/**
+ * How long a merge may take before this side gives up on the answer.
+ *
+ * Deliberately longer than a create. The runner's own cap is two minutes PER
+ * git command, and a merge is several; giving up at the default thirty seconds
+ * would fail a run whose merge then went on to succeed, leaving a run branch
+ * that holds work the plan row says was never merged.
+ */
+const INTEGRATE_TIMEOUT_MS = 5 * 60_000;
 
 /**
  * Default transport speaking the §7.1 dispatcher API over HTTP. All routes are
  * versioned under `/v1`; auth is `Authorization: Bearer <sessionApiKey>`.
  */
 export class HttpSessionTransport implements SessionTransport {
+  /**
+   * The runner's capabilities, once it has told us.
+   *
+   * Cached because every isolated create asks, and a wave is many creates. It
+   * is dropped whenever the runner fails to do something it was asked — a
+   * refused create, a failed merge, no answer at all — because the usual
+   * reason a runner starts behaving differently is that it is a different
+   * runner: restarted, upgraded, or put back to an older version. The next
+   * question then goes to `/v1/health` again rather than to a memory of a
+   * process that may no longer exist. A read that fails is never cached.
+   */
+  private knownCapabilities: string[] | null = null;
+
   constructor(
     private readonly baseUrl: string,
     private readonly apiKey?: string,
@@ -97,7 +153,49 @@ export class HttpSessionTransport implements SessionTransport {
     return j.externalSessionId ?? j.sessionId ?? j.id;
   }
 
+  async capabilities(): Promise<string[] | null> {
+    if (this.knownCapabilities) return this.knownCapabilities;
+    try {
+      const res = await this.fetch('/v1/health');
+      if (!res.ok) return null;
+      const json = (await res.json()) as { capabilities?: unknown };
+      // A runner from before capabilities has no such field: it answered, and
+      // it can do none of them.
+      const capabilities = Array.isArray(json.capabilities)
+        ? json.capabilities.filter((c): c is string => typeof c === 'string')
+        : [];
+      this.knownCapabilities = capabilities;
+      return capabilities;
+    } catch {
+      return null;
+    }
+  }
+
   async createSession(params: CreateSessionParams): Promise<CreateSessionResult> {
+    /**
+     * Never send `isolation` to a runner that has not said it understands it.
+     *
+     * The plan decided to run isolated because a runner said it could. This
+     * is the same question asked again at the last moment, for the case where
+     * the runner behind the URL is no longer that one. Refusing here fails the
+     * task with a reason; sending would start an agent in the shared checkout
+     * with nothing recording that it was not isolated.
+     */
+    if (params.isolation) {
+      const capabilities = await this.capabilities();
+      if (!capabilities?.includes(ISOLATION_CAPABILITY)) {
+        this.knownCapabilities = null;
+        return {
+          accepted: false,
+          error:
+            'ISOLATION_UNAVAILABLE: this run gives each task its own branch, and the session runner ' +
+            (capabilities
+              ? 'does not report that it can (it may have been replaced by an older version)'
+              : 'did not answer when asked whether it can'),
+        };
+      }
+    }
+
     try {
       const res = await this.fetch('/v1/sessions', {
         method: 'POST',
@@ -126,9 +224,98 @@ export class HttpSessionTransport implements SessionTransport {
         return { accepted: false, error: 'CAPACITY' };
       }
 
-      return { accepted: false, error: `Session create failed: ${res.status} ${await res.text().catch(() => '')}` };
+      // Anything else is the runner declining. Ask it what it is again before
+      // the next isolated create (see `knownCapabilities`).
+      this.knownCapabilities = null;
+      const body = await res.text().catch(() => '');
+
+      // The runner can isolate in general and cannot here — not a repository,
+      // no commits yet. Its message says which, and is the whole reason the
+      // task failed, so it is passed on as written rather than inside a JSON
+      // body somebody has to read around.
+      const refusal = HttpSessionTransport.readRefusal(body);
+      if (refusal?.error === 'ISOLATION_UNAVAILABLE') {
+        return { accepted: false, error: `ISOLATION_UNAVAILABLE: ${refusal.message ?? 'no reason given'}` };
+      }
+
+      return { accepted: false, error: `Session create failed: ${res.status} ${body}` };
     } catch (error) {
+      this.knownCapabilities = null;
       return { accepted: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  private static readRefusal(body: string): { error?: string; message?: string } | null {
+    try {
+      const json = JSON.parse(body) as { error?: unknown; message?: unknown };
+      return {
+        error: typeof json.error === 'string' ? json.error : undefined,
+        message: typeof json.message === 'string' ? json.message : undefined,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async integrate(request: IntegrateRequest): Promise<IntegrateOutcome> {
+    try {
+      const res = await this.fetch(
+        '/v1/integrate',
+        { method: 'POST', body: JSON.stringify(request) },
+        INTEGRATE_TIMEOUT_MS
+      );
+      const text = await res.text().catch(() => '');
+
+      if (res.status === 200) {
+        const result = HttpSessionTransport.readIntegration(text);
+        if (result) return { ok: true, result };
+        this.knownCapabilities = null;
+        return {
+          ok: false,
+          code: 'BAD_RESPONSE',
+          message: 'the session runner answered the merge with something that is not a merge result',
+        };
+      }
+
+      this.knownCapabilities = null;
+      const refusal = HttpSessionTransport.readRefusal(text);
+      return {
+        ok: false,
+        code: refusal?.error ?? `HTTP_${res.status}`,
+        // The runner's own sentence when it sent one: it says what is in the
+        // way and what to do about it. A runner with no `/v1/integrate` at all
+        // answers a bare 404, and that needs saying in words.
+        message:
+          refusal?.message ??
+          `the session runner answered ${res.status}${refusal?.error ? ` (${refusal.error})` : ''} ` +
+            `when asked to merge the wave — it may predate a branch per task`,
+      };
+    } catch (error) {
+      this.knownCapabilities = null;
+      return {
+        ok: false,
+        code: 'UNREACHABLE',
+        message: `the session runner could not be reached to merge the wave (${
+          error instanceof Error ? error.message : String(error)
+        })`,
+      };
+    }
+  }
+
+  /** A merge result, if that is what the body is. Shape-checked: it is acted on. */
+  private static readIntegration(body: string): IntegrationResult | null {
+    try {
+      const json = JSON.parse(body) as Partial<IntegrationResult>;
+      if (typeof json.runBranch !== 'string' || typeof json.headSha !== 'string') return null;
+      return {
+        runBranch: json.runBranch,
+        headSha: json.headSha,
+        merged: Array.isArray(json.merged) ? json.merged : [],
+        conflicts: Array.isArray(json.conflicts) ? json.conflicts : [],
+        missing: Array.isArray(json.missing) ? json.missing : [],
+      };
+    } catch {
+      return null;
     }
   }
 
@@ -184,12 +371,16 @@ export class HttpSessionTransport implements SessionTransport {
     }
   }
 
-  private async fetch(path: string, options: RequestInit = {}): Promise<Response> {
+  private async fetch(
+    path: string,
+    options: RequestInit = {},
+    timeoutMs: number = this.timeoutMs
+  ): Promise<Response> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (this.apiKey) headers['Authorization'] = `Bearer ${this.apiKey}`;
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       return await fetch(`${this.baseUrl}${path}`, {
         ...options,
@@ -267,6 +458,10 @@ export class ClaudeSessionAdapter
       callbackUrl: request.callbackUrl,
       callbackToken: this.config.callbackToken,
       environmentId: this.config.sessionEnvironmentId,
+      // Absent for every dispatch that is not a task of an isolated plan, and
+      // then absent from the request body too: the runner runs the session in
+      // the checkout itself, as it always has.
+      ...(request.isolation ? { isolation: request.isolation } : {}),
       metadata: request.metadata,
     });
 
@@ -340,6 +535,57 @@ export class ClaudeSessionAdapter
 
   async getCompletionReport(externalJobId: string): Promise<CompletionReport | null> {
     return this.cache.get(externalJobId)?.completion ?? null;
+  }
+
+  /**
+   * Whether the runner behind this adapter can give a task its own branch.
+   *
+   * Three ways to be told no, and each is worded for the person who will read
+   * it on the plan: the transport has no way to ask or to merge; the runner did
+   * not answer; the runner answered and does not list the capability.
+   *
+   * "Did not answer" is reported as unsupported rather than waited out. The
+   * plan's first task is about to be sent to that same runner; if it really is
+   * down the dispatch fails and says so, and if it was a blip the plan runs
+   * un-isolated with this reason on its row. What it must not do is guess.
+   */
+  async isolationSupport(): Promise<IsolationSupport> {
+    if (!this.transport.capabilities || !this.transport.integrate) {
+      return {
+        supported: false,
+        reason: 'the session transport in use cannot give a task its own branch or merge a wave',
+      };
+    }
+
+    const capabilities = await this.transport.capabilities();
+    if (capabilities === null) {
+      return {
+        supported: false,
+        reason:
+          'the session runner did not answer /v1/health when the run started, so it could not be ' +
+          'asked whether it gives each task its own branch',
+      };
+    }
+    if (!capabilities.includes(ISOLATION_CAPABILITY)) {
+      return {
+        supported: false,
+        reason:
+          `the session runner does not report the '${ISOLATION_CAPABILITY}' capability ` +
+          '(it predates a worktree and branch per task) — upgrade the runner to isolate tasks',
+      };
+    }
+    return { supported: true };
+  }
+
+  async integrate(request: IntegrateRequest): Promise<IntegrateOutcome> {
+    if (!this.transport.integrate) {
+      return {
+        ok: false,
+        code: 'UNSUPPORTED',
+        message: 'the session transport in use cannot merge a wave',
+      };
+    }
+    return this.transport.integrate(request);
   }
 
   async shutdown(): Promise<void> {

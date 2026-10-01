@@ -69,6 +69,23 @@ describe('what crosses the line', () => {
     expect(events[0]).toMatchObject({ tool: 'Bash', path: 'tests/unit/app.test.ts' });
   });
 
+  /**
+   * The hosted route refuses a whole batch for one tool name over 64
+   * characters, and MCP tool names run past that. Found on a real fleet: two
+   * sessions that used such a tool had stopped streaming at that event.
+   */
+  it('keeps an over-long tool name from costing the batch', () => {
+    const name = 'mcp__claude_ai_Some_Production_Server__get_persona_decision_architecture';
+    expect(name.length).toBeGreaterThan(64);
+
+    const p = fresh(line(0, [tool(name)]) + line(1, [tool('Read', { file_path: `${CWD}/a.ts` })]));
+    const events = tailTranscript(p, initialTailState(), CWD);
+
+    expect(events).toHaveLength(2);
+    expect(events[0].tool).toHaveLength(64);
+    expect(events[0].tool.startsWith('mcp__claude_ai_Some_Production_Server__')).toBe(true);
+  });
+
   it('ignores prose blocks entirely', () => {
     const p = fresh(line(0, [{ type: 'text', text: 'here is your entire source file: …' }]));
     expect(tailTranscript(p, initialTailState(), CWD)).toEqual([]);
@@ -148,5 +165,146 @@ describe('time is active time', () => {
     );
     const events = tailTranscript(p, initialTailState(), CWD);
     expect(events[1].t).toBe(90);
+  });
+});
+
+/**
+ * Usage, counted once per response.
+ *
+ * Claude Code writes one line per content block and repeats the response's
+ * usage on each. Measured against real transcripts, a plain sum overcounts by
+ * 2× to 5× — a figure that looks measured and is not.
+ */
+describe('what the session cost', () => {
+  function reply(
+    tsOffsetS: number,
+    id: string,
+    usage: Record<string, number>,
+    blocks: unknown[],
+  ): string {
+    return (
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: new Date(1_700_000_000_000 + tsOffsetS * 1000).toISOString(),
+        message: { id, usage, content: blocks },
+      }) + '\n'
+    );
+  }
+
+  const USAGE = {
+    input_tokens: 10,
+    output_tokens: 200,
+    cache_read_input_tokens: 5_000,
+    cache_creation_input_tokens: 300,
+  };
+
+  it('counts a response once however many lines it spans', () => {
+    // One response: a text block and two tool calls, three lines, same usage.
+    const p = fresh(
+      reply(0, 'msg_1', USAGE, [{ type: 'text', text: 'looking' }]) +
+        reply(0, 'msg_1', USAGE, [tool('Read', { file_path: `${CWD}/a.ts` })]) +
+        reply(0, 'msg_1', USAGE, [tool('Read', { file_path: `${CWD}/b.ts` })])
+    );
+    const state = initialTailState();
+    tailTranscript(p, state, CWD);
+
+    expect(state.usage?.totals).toMatchObject({ input: 10, output: 200, cacheRead: 5_000, cacheWrite: 300 });
+    expect(state.usage?.turns).toBe(1);
+  });
+
+  it('adds a new response on top', () => {
+    const p = fresh(
+      reply(0, 'msg_1', USAGE, [tool('Read', { file_path: `${CWD}/a.ts` })]) +
+        reply(4, 'msg_2', USAGE, [tool('Edit', { file_path: `${CWD}/a.ts` })])
+    );
+    const state = initialTailState();
+    tailTranscript(p, state, CWD);
+
+    expect(state.usage?.totals.cacheRead).toBe(10_000);
+    expect(state.usage?.turns).toBe(2);
+  });
+
+  it('does not double count a response split across two ticks', () => {
+    const p = fresh(reply(0, 'msg_1', USAGE, [{ type: 'text', text: 'looking' }]));
+    const state = initialTailState();
+    tailTranscript(p, state, CWD);
+
+    appendFileSync(p, reply(0, 'msg_1', USAGE, [tool('Read', { file_path: `${CWD}/a.ts` })]));
+    tailTranscript(p, state, CWD);
+
+    expect(state.usage?.totals.output).toBe(200);
+    expect(state.usage?.turns).toBe(1);
+  });
+
+  it('counts a response that used no tools — it still spent tokens', () => {
+    const p = fresh(reply(0, 'msg_1', USAGE, [{ type: 'text', text: 'thinking out loud' }]));
+    const state = initialTailState();
+    expect(tailTranscript(p, state, CWD)).toEqual([]);
+    expect(state.usage?.totals.output).toBe(200);
+  });
+
+  it('survives the ledger round trip a restarted bridge puts it through', () => {
+    const p = fresh(reply(0, 'msg_1', USAGE, [{ type: 'text', text: 'looking' }]));
+    const state = initialTailState();
+    tailTranscript(p, state, CWD);
+
+    const restored = JSON.parse(JSON.stringify(state));
+    appendFileSync(p, reply(0, 'msg_1', USAGE, [tool('Read', { file_path: `${CWD}/a.ts` })]));
+    tailTranscript(p, restored, CWD);
+
+    expect(restored.usage.totals.output).toBe(200);
+  });
+
+  /**
+   * A bridge upgraded mid-session restores a tail whose offset is already past
+   * everything so far. Counting from there would report a long session as
+   * having spent only what it spent since the upgrade.
+   */
+  it('backfills a tail written before usage was derived, without re-emitting events', () => {
+    const p = fresh(
+      reply(0, 'msg_1', USAGE, [tool('Edit', { file_path: `${CWD}/a.ts` })]) +
+        reply(5, 'msg_2', USAGE, [tool('Read', { file_path: `${CWD}/b.ts` })])
+    );
+    const state = initialTailState();
+    expect(tailTranscript(p, state, CWD)).toHaveLength(2);
+
+    // What an older version left in the ledger: the offset, and no usage.
+    const legacy = { ...state, usage: undefined, written: undefined, writeCalls: undefined };
+    appendFileSync(p, reply(9, 'msg_3', USAGE, [tool('Write', { file_path: `${CWD}/c.ts` })]));
+    const events = tailTranscript(p, legacy, CWD);
+
+    expect(events.map((e) => e.seq)).toEqual([2]);
+    expect(legacy.usage?.totals.output).toBe(600);
+    expect(legacy.usage?.turns).toBe(3);
+    expect(legacy.written).toEqual(['a.ts', 'c.ts']);
+    expect(legacy.writeCalls).toBe(2);
+  });
+});
+
+describe('written files', () => {
+  it('keeps the files the session changed, across ticks, once each', () => {
+    const p = fresh(
+      line(0, [tool('Read', { file_path: `${CWD}/a.ts` })]) +
+        line(1, [tool('Edit', { file_path: `${CWD}/a.ts` })]) +
+        line(2, [tool('Edit', { file_path: `${CWD}/a.ts` })])
+    );
+    const state = initialTailState();
+    tailTranscript(p, state, CWD);
+    appendFileSync(p, line(3, [tool('Write', { file_path: `${CWD}/b.ts` })]));
+    tailTranscript(p, state, CWD);
+
+    expect(state.written).toEqual(['a.ts', 'b.ts']);
+    // Three edits to two files: the count is of calls, the list is of files.
+    expect(state.writeCalls).toBe(3);
+  });
+
+  it('does not count a file that was only read or only named in a command', () => {
+    const p = fresh(
+      line(0, [tool('Read', { file_path: `${CWD}/a.ts` })]) +
+        line(1, [tool('Bash', { command: 'cat src/secret.ts' })])
+    );
+    const state = initialTailState();
+    tailTranscript(p, state, CWD);
+    expect(state.written).toEqual([]);
   });
 });

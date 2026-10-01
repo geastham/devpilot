@@ -11,11 +11,10 @@ interface FleetStatusPanelProps {
 
 export function FleetStatusPanel({ className }: FleetStatusPanelProps) {
   const sessions = useFleetStore((state) => state.sessions);
-  const avgVelocityTasksPerHour = useFleetStore((state) => state.avgVelocityTasksPerHour);
+  const fleetCapacity = useFleetStore((state) => state.fleetCapacity);
 
   const activeSessions = sessions.filter((s) => s.status === 'active');
   const completedSessions = sessions.filter((s) => s.status === 'complete');
-  const totalWorkers = sessions.reduce((sum, s) => sum + 1, 0); // Simplified
 
   return (
     <div
@@ -54,7 +53,7 @@ export function FleetStatusPanel({ className }: FleetStatusPanelProps) {
             />
             <p className="text-sm font-medium text-text-secondary">No active sessions</p>
             <p className="mt-1 text-xs text-text-muted">
-              Dispatch an item to start a Ruflo hive
+              Dispatch a ready item and its agents appear here
             </p>
           </div>
         ) : (
@@ -73,17 +72,28 @@ export function FleetStatusPanel({ className }: FleetStatusPanelProps) {
       </div>
 
       {/* Footer Stats */}
+      {/*
+        Three lines stood here and none was a measurement. "Total workers"
+        counted the cards above it. "Avg velocity" printed a store field nothing
+        ever set, so it read 0.0 tasks/h for everyone, always. "Fleet
+        utilization" divided running sessions by listed sessions, so one
+        running agent and nothing else read 100%.
+
+        What is known is how many agents are running, and — when the operator
+        or the session runner has said — how many the fleet can run at once.
+      */}
       <div className="border-t border-border-default bg-bg-panel px-4 py-3">
         <div className="text-xs text-text-muted space-y-1">
-          <p>Total workers: {totalWorkers}</p>
-          <p>Avg velocity: {avgVelocityTasksPerHour.toFixed(1)} tasks/h</p>
           <p>
-            Fleet utilization:{' '}
-            {sessions.length > 0
-              ? Math.round((activeSessions.length / sessions.length) * 100)
-              : 0}
-            %
+            Agents running: {activeSessions.length}
+            {fleetCapacity !== null && ` of ${fleetCapacity}`}
           </p>
+          {fleetCapacity === null && (
+            <p>
+              Fleet capacity is not known. Set DEVPILOT_FLEET_CAPACITY, or
+              connect a session runner, to see how full the fleet is.
+            </p>
+          )}
         </div>
       </div>
     </div>

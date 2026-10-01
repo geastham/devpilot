@@ -63,6 +63,21 @@ export interface ConductorSummary {
   parallelizationScore: number | null;
   currentWaveIndex: number;
   wavePlanId: string | null;
+  /**
+   * How the run stands, from its wave plan row once it has one: `completed`,
+   * `failed`, `paused`, `executing`… Null before approval, when the plan lives
+   * only in the graph's checkpoint.
+   */
+  planStatus: string | null;
+  /** Why a plan is failed, or paused when nobody paused it. */
+  planReason: string | null;
+  /**
+   * The local branch the run's work was merged into, for a run whose tasks
+   * each had their own branch. Null until the first wave is merged, and for a
+   * run that could not be isolated — whose changes are uncommitted edits in the
+   * checkout instead.
+   */
+  runBranch: string | null;
 }
 
 export interface Plan {
@@ -202,14 +217,34 @@ export interface ConfidenceSignals {
 // Conductor Score
 // ============================================================================
 
+/** One dimension of the score, as the cockpit renders it. */
+export interface ConductorScoreDimension {
+  key: string;
+  label: string;
+  meaning: string;
+  max: number;
+  /** Whole points, or null when the events to measure it were not recorded. */
+  value: number | null;
+  /** Why it is unmeasured, in one sentence. Null when it was measured. */
+  unmeasured: string | null;
+}
+
+/**
+ * The Conductor Score as computed by `/api/fleet/state`.
+ *
+ * `total` is out of `measuredMax`, NOT out of `max`: a dimension that could
+ * not be measured adds nothing to either. Showing `total / 1000` would present
+ * every unmeasured dimension as a zero.
+ */
 export interface ConductorScore {
   total: number;
-  fleetUtilization: number;
-  runwayHealth: number;
-  planAccuracy: number;
-  costEfficiency: number;
-  velocityTrend: number;
-  leaderboardRank: number | null;
+  measuredMax: number;
+  max: number;
+  /** True only when all dimensions were measured. Only then is it comparable. */
+  complete: boolean;
+  dimensions: ConductorScoreDimension[];
+  windowHours: number;
+  modelVersion: number;
 }
 
 export interface ScoreHistory {

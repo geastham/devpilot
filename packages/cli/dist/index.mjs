@@ -11,7 +11,7 @@ import { Command as Command18 } from "commander";
 import updateNotifier from "update-notifier";
 
 // src/version.ts
-var VERSION = "0.5.14";
+var VERSION = "0.6.0";
 
 // src/commands/init.ts
 import { Command } from "commander";
@@ -183,33 +183,103 @@ var serveCommand = new Command2("serve").description("Start the local DevPilot C
 // src/commands/status.ts
 import { Command as Command3 } from "commander";
 import chalk3 from "chalk";
-var statusCommand = new Command3("status").description("Show current fleet and runway status").option("-v, --verbose", "Show detailed information").action(async (options) => {
-  console.log(chalk3.cyan("\u{1F4CA} DevPilot Status"));
-  console.log("");
-  console.log(chalk3.white("Fleet Status:"));
-  console.log(chalk3.gray("  Active Sessions: ") + chalk3.green("3"));
-  console.log(chalk3.gray("  Needs Spec: ") + chalk3.yellow("1"));
-  console.log(chalk3.gray("  Fleet Utilization: ") + chalk3.cyan("75%"));
-  console.log("");
-  console.log(chalk3.white("Runway:"));
-  console.log(chalk3.gray("  Ready Items: ") + chalk3.green("2"));
-  console.log(chalk3.gray("  Refining: ") + chalk3.blue("1"));
-  console.log(chalk3.gray("  Shaping: ") + chalk3.magenta("2"));
-  console.log(chalk3.gray("  Directional: ") + chalk3.gray("3"));
-  console.log(chalk3.gray("  Runway Hours: ") + chalk3.green("4.2h"));
-  console.log("");
-  console.log(chalk3.white("Conductor Score:"));
-  console.log(chalk3.gray("  Total: ") + chalk3.magenta("742") + chalk3.gray("/1000"));
-  console.log(chalk3.gray("  Rank: ") + chalk3.cyan("#23"));
-  if (options.verbose) {
-    console.log("");
-    console.log(chalk3.white("Score Breakdown:"));
-    console.log(chalk3.gray("  Fleet Utilization: ") + chalk3.white("156/200"));
-    console.log(chalk3.gray("  Runway Health: ") + chalk3.white("148/200"));
-    console.log(chalk3.gray("  Plan Accuracy: ") + chalk3.white("162/200"));
-    console.log(chalk3.gray("  Cost Efficiency: ") + chalk3.white("138/200"));
-    console.log(chalk3.gray("  Velocity Trend: ") + chalk3.white("138/200"));
+import { loadBridgeCredentials } from "@devpilot.sh/bridge-client";
+function asComputedScore(value) {
+  if (!value || typeof value !== "object") return null;
+  const s = value;
+  if (typeof s.total !== "number" || typeof s.measuredMax !== "number" || typeof s.complete !== "boolean" || !Array.isArray(s.dimensions)) {
+    return null;
   }
+  return s;
+}
+function formatScore(value) {
+  const score = asComputedScore(value);
+  if (!score) return [];
+  const lines = [];
+  const measured = score.dimensions.filter((d) => d.value !== null);
+  const days = score.windowHours / 24;
+  const period = score.windowHours <= 0 ? "" : Number.isInteger(days) ? ` (last ${days === 1 ? "24 hours" : `${days} days`})` : ` (last ${score.windowHours} hours)`;
+  if (measured.length === 0) {
+    lines.push(`Conductor Score: nothing measured yet${period}`);
+  } else if (score.complete) {
+    lines.push(`Conductor Score: ${score.total} of ${score.max}${period}`);
+  } else {
+    lines.push(
+      `Conductor Score: ${score.total} of ${score.measuredMax} measured${period} \u2014 ${measured.length} of ${score.dimensions.length} dimensions`
+    );
+  }
+  const width = Math.max(0, ...score.dimensions.map((d) => d.label.length));
+  for (const d of score.dimensions) {
+    const label = d.label.padEnd(width);
+    lines.push(
+      d.value === null ? `  ${label}  not measured \u2014 ${d.unmeasured ?? "no data"}` : `  ${label}  ${String(d.value).padStart(3)} / ${d.max}`
+    );
+  }
+  if (measured.length > 0 && !score.complete) {
+    lines.push("  A partial score is a personal reading; it is not comparable with another.");
+  }
+  return lines;
+}
+async function getJson(url) {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(2500) });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+var statusCommand = new Command3("status").description("Show what the local cockpit and the bridge connection report").option(
+  "--cockpit-url <url>",
+  "Local cockpit base URL",
+  process.env.DEVPILOT_COCKPIT_URL || "http://127.0.0.1:3847"
+).action(async (options) => {
+  console.log(chalk3.cyan("DevPilot status"));
+  console.log("");
+  const saved = loadBridgeCredentials();
+  console.log(chalk3.white("Bridge"));
+  if (saved) {
+    console.log(chalk3.gray("  Connected to: ") + saved.url);
+    console.log(chalk3.gray("  Run `devpilot bridge connect` to report this machine's sessions."));
+  } else {
+    console.log(chalk3.gray("  No bridge saved on this machine."));
+    console.log(chalk3.gray("  `devpilot bridge connect --token <token>` connects it; mint a token in"));
+    console.log(chalk3.gray("  the dashboard under Settings \u2192 Tokens."));
+  }
+  console.log("");
+  const base = options.cockpitUrl.replace(/\/+$/, "");
+  const fleet = await getJson(`${base}/api/fleet/state`);
+  console.log(chalk3.white("Local cockpit"));
+  if (!fleet) {
+    console.log(chalk3.gray(`  Not reachable at ${base}.`));
+    console.log(chalk3.gray("  Start it with `devpilot serve`. Fleet, runway and score are read from"));
+    console.log(chalk3.gray("  it \u2014 this command does not report them from anywhere else."));
+    console.log("");
+    return;
+  }
+  const sessions = fleet.sessions ?? [];
+  const active = sessions.filter((s) => (s.status ?? "").toUpperCase() === "ACTIVE").length;
+  const capacity = fleet.fleet?.maxSessions;
+  console.log(
+    chalk3.gray("  Sessions: ") + `${sessions.length}` + chalk3.gray(
+      `  (${active} active` + (typeof capacity === "number" ? ` of ${capacity} the fleet can run` : "") + ")"
+    )
+  );
+  const runwayHours = fleet.runway?.hours ?? fleet.runwayHours;
+  if (typeof runwayHours === "number") {
+    const state = fleet.runway?.status ?? fleet.runwayStatus;
+    console.log(
+      chalk3.gray("  Runway: ") + `${runwayHours.toFixed(1)}h` + (state ? chalk3.gray(`  (${state})`) : "")
+    );
+    console.log(chalk3.gray("          an estimate from queue length, not a measured rate"));
+  }
+  const scoreLines = formatScore(fleet.conductorScore);
+  if (scoreLines.length > 0) {
+    console.log("");
+    console.log(chalk3.gray("  ") + scoreLines[0]);
+    for (const line of scoreLines.slice(1)) console.log(chalk3.gray(`  ${line}`));
+  }
+  console.log("");
 });
 
 // src/commands/config.ts
@@ -327,9 +397,8 @@ import { linear as linear2 } from "@devpilot.sh/core";
 
 // src/utils/orchestrator.ts
 import { execSync, spawnSync } from "child_process";
-import { existsSync as existsSync4, readFileSync as readFileSync2, writeFileSync as writeFileSync3 } from "fs";
+import { existsSync as existsSync4, writeFileSync as writeFileSync3 } from "fs";
 import { join as join4, basename } from "path";
-import { homedir } from "os";
 import chalk5 from "chalk";
 function checkCommand(cmd, versionArg = "--version") {
   try {
@@ -359,8 +428,8 @@ function versionMeetsMinimum(version, minimum) {
 function checkSystemRequirements() {
   const node = checkCommand("node");
   const nodeMeetsMin = versionMeetsMinimum(node.version, "20.0.0");
-  const git2 = checkCommand("git");
-  const gitMeetsMin = versionMeetsMinimum(git2.version, "2.25.0");
+  const git3 = checkCommand("git");
+  const gitMeetsMin = versionMeetsMinimum(git3.version, "2.25.0");
   const tmux = checkCommand("tmux", "-V");
   const gh = checkCommand("gh");
   let ghAuthenticated = false;
@@ -372,15 +441,11 @@ function checkSystemRequirements() {
       ghAuthenticated = false;
     }
   }
-  const rtk = checkCommand("rtk");
-  const cavemanInstalled = isCavemanInstalled();
   return {
     node: { ...node, meetsMinimum: nodeMeetsMin },
-    git: { ...git2, meetsMinimum: gitMeetsMin },
+    git: { ...git3, meetsMinimum: gitMeetsMin },
     tmux: { installed: tmux.installed },
-    gh: { installed: gh.installed, authenticated: ghAuthenticated },
-    rtk: { installed: rtk.installed, version: rtk.version },
-    caveman: { installed: cavemanInstalled }
+    gh: { installed: gh.installed, authenticated: ghAuthenticated }
   };
 }
 function printRequirementsStatus(reqs) {
@@ -412,16 +477,6 @@ function printRequirementsStatus(reqs) {
   } else {
     console.log(chalk5.yellow("  \u26A0 GitHub CLI not found (optional, for PR creation)"));
   }
-  if (reqs.rtk.installed) {
-    console.log(chalk5.green(`  \u2713 RTK ${reqs.rtk.version || ""} (token optimization)`));
-  } else {
-    console.log(chalk5.yellow("  \u26A0 RTK not found (recommended, for 60-90% token savings)"));
-  }
-  if (reqs.caveman.installed) {
-    console.log(chalk5.green("  \u2713 Caveman plugin (output token compression)"));
-  } else {
-    console.log(chalk5.yellow("  \u26A0 Caveman not found (optional, for ~65-75% output token savings)"));
-  }
 }
 function isOrchestratorInstalled() {
   try {
@@ -444,94 +499,6 @@ function installOrchestrator() {
     console.log(chalk5.red("\u2717 Failed to install @composio/ao-cli"));
     console.log(chalk5.gray("  Try manually: npm install -g @composio/ao-cli"));
     return false;
-  }
-}
-function isRtkInstalled() {
-  try {
-    const result = spawnSync("rtk", ["--version"], { encoding: "utf-8", stdio: "pipe" });
-    return result.status === 0;
-  } catch {
-    return false;
-  }
-}
-function installRtk() {
-  const hasCargo = spawnSync("cargo", ["--version"], { encoding: "utf-8", stdio: "pipe" }).status === 0;
-  if (hasCargo) {
-    console.log(chalk5.cyan("\n  Installing RTK via cargo (this may take a few minutes)..."));
-    try {
-      execSync("cargo install --git https://github.com/rtk-ai/rtk", { stdio: "inherit" });
-      console.log(chalk5.green("  \u2713 RTK installed successfully"));
-      return true;
-    } catch {
-      console.log(chalk5.red("  \u2717 Failed to install RTK via cargo"));
-    }
-  }
-  console.log(chalk5.cyan("\n  Installing RTK via install script..."));
-  try {
-    execSync("curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh", {
-      stdio: "inherit"
-    });
-    console.log(chalk5.green("  \u2713 RTK installed successfully"));
-    return true;
-  } catch {
-    console.log(chalk5.red("  \u2717 Failed to install RTK"));
-    console.log(chalk5.gray("  Install manually: cargo install --git https://github.com/rtk-ai/rtk"));
-    console.log(chalk5.gray("  Or: brew install rtk"));
-    return false;
-  }
-}
-function initRtkHook() {
-  console.log(chalk5.cyan("\n  Initializing RTK hook for Claude Code..."));
-  try {
-    execSync("rtk init -g", { encoding: "utf-8", stdio: "pipe" });
-    console.log(chalk5.green("  \u2713 RTK hook initialized"));
-    return true;
-  } catch {
-    console.log(chalk5.yellow("  \u26A0 RTK hook init requires manual step: rtk init -g"));
-    return false;
-  }
-}
-function isCavemanInstalled() {
-  const claudeDir = join4(homedir(), ".claude");
-  if (existsSync4(join4(claudeDir, "hooks", "caveman-activate.js"))) {
-    return true;
-  }
-  const settingsPath = join4(claudeDir, "settings.json");
-  if (existsSync4(settingsPath)) {
-    try {
-      const settings = JSON.parse(readFileSync2(settingsPath, "utf-8"));
-      const settingsStr = JSON.stringify(settings);
-      if (settingsStr.includes("caveman")) {
-        return true;
-      }
-    } catch {
-    }
-  }
-  return false;
-}
-function installCaveman() {
-  console.log(chalk5.cyan("\n  Installing Caveman plugin for Claude Code..."));
-  try {
-    execSync("npx -y skills add JuliusBrussee/caveman", {
-      stdio: "inherit",
-      timeout: 12e4
-    });
-    console.log(chalk5.green("  \u2713 Caveman plugin installed successfully"));
-    return true;
-  } catch {
-    console.log(chalk5.yellow("  npx skills add failed, trying hook install script..."));
-    try {
-      execSync(
-        "bash <(curl -fsSL https://raw.githubusercontent.com/JuliusBrussee/caveman/main/hooks/install.sh)",
-        { stdio: "inherit", shell: "/bin/bash", timeout: 6e4 }
-      );
-      console.log(chalk5.green("  \u2713 Caveman hooks installed successfully"));
-      return true;
-    } catch {
-      console.log(chalk5.red("  \u2717 Failed to install Caveman plugin"));
-      console.log(chalk5.gray("  Install manually: npx skills add JuliusBrussee/caveman"));
-      return false;
-    }
   }
 }
 function detectRepoInfo(cwd) {
@@ -619,12 +586,6 @@ function getInstallInstructions(reqs) {
     instructions.push("GitHub CLI: brew install gh (macOS) or https://cli.github.com");
   } else if (!reqs.gh.authenticated) {
     instructions.push("GitHub CLI auth: gh auth login");
-  }
-  if (!reqs.rtk.installed) {
-    instructions.push("RTK (token savings): cargo install --git https://github.com/rtk-ai/rtk");
-  }
-  if (!reqs.caveman.installed) {
-    instructions.push("Caveman (output compression): npx skills add JuliusBrussee/caveman");
   }
   return instructions;
 }
@@ -750,63 +711,14 @@ var setupCommand = new Command5("setup").description("Interactive setup wizard f
       }
     }
   }
-  if (!options.linearOnly && !options.orchestratorOnly) {
-    console.log(chalk6.bold("Step 4: RTK Token Optimization"));
-    console.log(chalk6.gray("RTK reduces LLM token consumption by 60-90% across fleet agents.\n"));
-    const rtkInstalled = isRtkInstalled();
-    if (rtkInstalled) {
-      console.log(chalk6.green("  RTK is already installed."));
-      console.log(chalk6.gray("  Ensuring Claude Code hook is configured..."));
-      initRtkHook();
-    } else if (nonInteractive) {
-      console.log(chalk6.gray("  Installing RTK (non-interactive mode)..."));
-      const success = installRtk();
-      if (success) {
-        initRtkHook();
-      }
-    } else {
-      const install = await confirm("  Install RTK for token-optimized agent sessions?");
-      if (install) {
-        const success = installRtk();
-        if (success) {
-          initRtkHook();
-        }
-      } else {
-        console.log(chalk6.gray("  Skipping RTK installation. Install later with:"));
-        console.log(chalk6.cyan("    cargo install --git https://github.com/rtk-ai/rtk"));
-        console.log(chalk6.cyan("    rtk init -g\n"));
-      }
-    }
-    console.log("");
-  }
-  if (!options.linearOnly && !options.orchestratorOnly) {
-    console.log(chalk6.bold("Step 5: Caveman Output Compression"));
-    console.log(chalk6.gray("Caveman reduces output token usage by ~65-75% across fleet agents.\n"));
-    const cavemanInstalled = isCavemanInstalled();
-    if (cavemanInstalled) {
-      console.log(chalk6.green("  Caveman plugin is already installed."));
-      console.log(chalk6.gray("  Activate in any session with /caveman (modes: lite, full, ultra)"));
-    } else if (nonInteractive) {
-      console.log(chalk6.gray("  Installing Caveman plugin (non-interactive mode)..."));
-      installCaveman();
-    } else {
-      const install = await confirm("  Install Caveman plugin for compressed agent output?");
-      if (install) {
-        installCaveman();
-      } else {
-        console.log(chalk6.gray("  Skipping Caveman installation. Install later with:"));
-        console.log(chalk6.cyan("    npx skills add JuliusBrussee/caveman\n"));
-      }
-    }
-    console.log("");
-  }
   console.log(chalk6.bold.green("\nSetup Complete!\n"));
   console.log(chalk6.white("Next steps:"));
   console.log(chalk6.gray("  1. Run ") + chalk6.cyan("devpilot serve") + chalk6.gray(" to start the UI"));
   console.log(chalk6.gray("  2. Run ") + chalk6.cyan("ao start") + chalk6.gray(" to start agent orchestrator"));
   console.log(chalk6.gray("  3. Use the UI to create items and dispatch to the fleet"));
-  console.log(chalk6.gray("  4. Run ") + chalk6.cyan("rtk gain") + chalk6.gray(" to monitor token savings"));
-  console.log(chalk6.gray("  5. Use ") + chalk6.cyan("/caveman") + chalk6.gray(" in sessions for compressed output\n"));
+  console.log(
+    chalk6.gray("  4. Connect this machine with ") + chalk6.cyan("devpilot bridge connect") + chalk6.gray(" to see what each session spends\n")
+  );
 });
 async function configureLinear(configPath, config) {
   console.log("");
@@ -895,7 +807,15 @@ import { Command as Command9 } from "commander";
 import os from "os";
 import { Command as Command6 } from "commander";
 import chalk10 from "chalk";
-import { BridgeClient, DispatchLoop, HeartbeatService } from "@devpilot.sh/bridge-client";
+import {
+  BridgeClient,
+  DEFAULT_BRIDGE_URL,
+  DispatchLoop,
+  HeartbeatService,
+  bridgeCredentialsPath,
+  resolveBridgeCredentials,
+  saveBridgeCredentials
+} from "@devpilot.sh/bridge-client";
 
 // src/commands/bridge/dispatch-handler.ts
 import { orchestrator } from "@devpilot.sh/core";
@@ -1294,13 +1214,21 @@ async function say(o, progressPercent, message) {
 }
 
 // src/commands/bridge/connect.ts
-import { homedir as homedir3 } from "os";
-import { join as join7, dirname as dirname3 } from "path";
-import { readFileSync as readFileSync6, writeFileSync as writeFileSync7, mkdirSync as mkdirSync5, existsSync as existsSync8 } from "fs";
+import { homedir as homedir2 } from "os";
+import { join as join7, dirname as dirname4 } from "path";
+import { readFileSync as readFileSync7, writeFileSync as writeFileSync8, mkdirSync as mkdirSync6, existsSync as existsSync9 } from "fs";
 
 // src/commands/bridge/conductor-watcher.ts
 import { readFileSync as readFileSync4, writeFileSync as writeFileSync5, mkdirSync as mkdirSync3, unlinkSync, existsSync as existsSync6 } from "fs";
 import { dirname } from "path";
+function whereTheWorkIs(state) {
+  const isolation = state.outcome?.isolation;
+  if (!isolation) return "";
+  if (isolation.isolated) return isolation.summary ? `
+
+${isolation.summary}` : "";
+  return "\n\nThis run was not given a branch per task" + (isolation.reason ? ` (${isolation.reason})` : "") + ", so its changes are uncommitted edits in the checkout on the machine that ran it.";
+}
 function progressReport(state, links) {
   if (state.awaiting === "review") {
     const waves = state.review?.plan?.waves?.length ?? 0;
@@ -1310,6 +1238,15 @@ function progressReport(state, links) {
       signature: "review",
       message: `Plan ready \u2014 ${waves} wave${waves === 1 ? "" : "s"}, ${tasks} task${tasks === 1 ? "" : "s"}, ${pct}% parallel. ` + (links.hosted ? `[Review it in the cockpit](${links.hosted}/sessions/${links.sessionId}) to dispatch` : "Review it in the cockpit to dispatch") + `, or reply here with constraints to re-plan. Awaiting review.`,
       percent: 40
+    };
+  }
+  const pausedReason = state.outcome?.pausedReason;
+  if (pausedReason) {
+    const done = state.completedWaves?.length ?? 0;
+    return {
+      signature: `paused:${pausedReason}`,
+      message: `Run paused \u2014 ${pausedReason}`,
+      percent: Math.min(60 + done * 15, 95)
     };
   }
   if (state.status === "executing") {
@@ -1341,9 +1278,9 @@ function successSummary(state) {
   const files = o.filesChanged ?? [];
   const head = `DevPilot finished ${tasks} task${tasks === 1 ? "" : "s"} across ${waves} wave${waves === 1 ? "" : "s"}` + (typeof o.costUsd === "number" && o.costUsd > 0 ? ` for $${o.costUsd.toFixed(2)}` : "") + ".";
   if (files.length === 0) {
-    return o.filesChanged ? `${head}
+    return (o.filesChanged ? `${head}
 
-**No files were changed.** Worth checking whether the plan matched the intent.` : head;
+**No files were changed.** Worth checking whether the plan matched the intent.` : head) + whereTheWorkIs(state);
   }
   const shown = files.slice(0, MAX_LISTED_FILES).map((f) => `- \`${f}\``);
   const more = files.length > MAX_LISTED_FILES ? `
@@ -1351,7 +1288,7 @@ function successSummary(state) {
   return `${head}
 
 **${files.length} file${files.length === 1 ? "" : "s"} changed**
-${shown.join("\n")}${more}`;
+${shown.join("\n")}${more}` + whereTheWorkIs(state);
 }
 function failureSummary(state) {
   const o = state.outcome ?? {};
@@ -1363,11 +1300,11 @@ function failureSummary(state) {
     return `${head}
 
 **Failed tasks**
-${lines.join("\n")}`;
+${lines.join("\n")}` + whereTheWorkIs(state);
   }
-  return last ? `${head}
+  return (last ? `${head}
 
-${last}` : head;
+${last}` : head) + whereTheWorkIs(state);
 }
 var ConductorWatcher = class {
   constructor(opts) {
@@ -1450,7 +1387,12 @@ var ConductorWatcher = class {
       if (sessions.length === 0) return;
       const files = /* @__PURE__ */ new Set();
       let toolCalls = 0;
+      let writeCalls = 0;
       let costUsd = 0;
+      const tokens = { in: 0, out: 0, cacheRead: 0, cacheWrite: 0, turns: 0 };
+      let sawTokens = false;
+      let harness;
+      const modelTokens = /* @__PURE__ */ new Map();
       let estimated = false;
       let elapsedMs = 0;
       let idleMs = Number.MAX_SAFE_INTEGER;
@@ -1459,23 +1401,45 @@ var ConductorWatcher = class {
         const t = s.telemetry;
         if (!t) continue;
         toolCalls += t.toolCalls ?? 0;
+        writeCalls += t.writeCalls ?? 0;
         costUsd += t.costUsd ?? 0;
+        if (typeof t.tokensIn === "number" || typeof t.tokensOut === "number") sawTokens = true;
+        tokens.in += t.tokensIn ?? 0;
+        tokens.out += t.tokensOut ?? 0;
+        tokens.cacheRead += t.tokensCacheRead ?? 0;
+        tokens.cacheWrite += t.tokensCacheWrite ?? 0;
+        tokens.turns += t.turns ?? 0;
+        harness ?? (harness = t.harness);
+        if (t.model) {
+          const size = (t.tokensIn ?? 0) + (t.tokensOut ?? 0) + (t.tokensCacheRead ?? 0) + (t.tokensCacheWrite ?? 0);
+          modelTokens.set(t.model, (modelTokens.get(t.model) ?? 0) + size);
+        }
         estimated = estimated || Boolean(t.costIsEstimate);
         elapsedMs = Math.max(elapsedMs, t.elapsedMs ?? 0);
         idleMs = Math.min(idleMs, t.idleMs ?? Number.MAX_SAFE_INTEGER);
         for (const f of t.filesTouched ?? []) files.add(f);
         if (!action && t.lastAction) {
           const file = t.lastAction.path?.split("/").slice(-1)[0];
-          action = t.lastAction.tool === "Bash" ? (t.commands?.at(-1) ?? "shell").split(/\s+/).slice(0, 3).join(" ") : `${t.lastAction.tool.toLowerCase()}${file ? ` ${file}` : ""}`;
+          action = t.lastAction.tool === "Bash" ? programOf(t.commands?.at(-1)) : `${t.lastAction.tool.toLowerCase()}${file ? ` ${file}` : ""}`;
         }
       }
       if (toolCalls === 0 && files.size === 0) return;
       await this.opts.client.reportTelemetry(run.sessionId, {
         toolCalls,
+        writeCalls,
         filesTouched: [...files],
         currentAction: action,
         costUsd: costUsd > 0 ? costUsd : void 0,
         costEstimated: estimated,
+        ...sawTokens ? {
+          tokensIn: tokens.in,
+          tokensOut: tokens.out,
+          tokensCacheRead: tokens.cacheRead,
+          tokensCacheWrite: tokens.cacheWrite,
+          turns: tokens.turns || void 0
+        } : {},
+        ...harness ? { harness } : {},
+        ...modelTokens.size > 0 ? { model: [...modelTokens.entries()].sort((a, b) => b[1] - a[1])[0][0] } : {},
         elapsedMs: elapsedMs || void 0,
         idleMs: idleMs === Number.MAX_SAFE_INTEGER ? void 0 : idleMs
       });
@@ -1625,6 +1589,15 @@ var ConductorWatcher = class {
     return this.runs.size;
   }
 };
+function programOf(command) {
+  const words = (command ?? "").trim().split(/\s+/).filter(Boolean);
+  const program = words.find(
+    (w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) && w !== "export" && w !== "env" && /^[\w.@+/-]+$/.test(w)
+  );
+  if (!program) return "shell";
+  const name = program.split("/").pop() ?? program;
+  return /^[\w.@+-]{1,40}$/.test(name) ? name : "shell";
+}
 
 // src/commands/bridge/command-applier.ts
 var CommandApplier = class {
@@ -1704,15 +1677,193 @@ import { dirname as dirname2 } from "path";
 
 // src/commands/bridge/transcript-tail.ts
 import { openSync, readSync, fstatSync, closeSync } from "fs";
+
+// src/utils/usage-meter.ts
+function emptyUsage() {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 };
+}
+function initialUsageMeter() {
+  return { totals: emptyUsage(), turns: 0, last: null };
+}
+function toTotals(usage) {
+  const n = (v) => typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
+  const cacheWrite = n(usage.cache_creation_input_tokens);
+  return {
+    input: n(usage.input_tokens),
+    output: n(usage.output_tokens),
+    cacheRead: n(usage.cache_read_input_tokens),
+    cacheWrite,
+    // Never more than the write it is part of, whatever the client reports.
+    cacheWrite1h: Math.min(n(usage.cache_creation?.ephemeral_1h_input_tokens), cacheWrite)
+  };
+}
+function apply(into, add, subtract) {
+  into.input += add.input - (subtract?.input ?? 0);
+  into.output += add.output - (subtract?.output ?? 0);
+  into.cacheRead += add.cacheRead - (subtract?.cacheRead ?? 0);
+  into.cacheWrite += add.cacheWrite - (subtract?.cacheWrite ?? 0);
+  into.cacheWrite1h = (into.cacheWrite1h ?? 0) + (add.cacheWrite1h ?? 0) - (subtract?.cacheWrite1h ?? 0);
+}
+function modelKey(model) {
+  if (!model || model.startsWith("<")) return null;
+  return model.slice(0, 80);
+}
+function countUsage(state, messageId, usage, model) {
+  var _a;
+  if (!usage) return;
+  const next = toTotals(usage);
+  const key = modelKey(model);
+  const bucket = key ? (_a = state.byModel ?? (state.byModel = {}))[key] ?? (_a[key] = emptyUsage()) : null;
+  if (messageId && state.last?.id === messageId) {
+    const prev = state.last.counted;
+    apply(state.totals, next, prev);
+    const earlier = state.last.model ? state.byModel?.[state.last.model] : null;
+    if (earlier) apply(earlier, next, prev);
+    state.last.counted = next;
+    return;
+  }
+  apply(state.totals, next);
+  if (bucket) apply(bucket, next);
+  state.turns += 1;
+  state.last = messageId ? { id: messageId, model: key ?? void 0, counted: next } : null;
+}
+function totalTokens(t) {
+  return t.input + t.output + t.cacheRead + t.cacheWrite;
+}
+function standard(input, output, cacheRead = input * 0.1) {
+  return { input, output, cacheRead, cacheWrite: input * 1.25 };
+}
+var PRICES = [
+  ["claude-fable-5-1", standard(10, 50, 0.25)],
+  ["claude-mythos-5-1", standard(10, 50, 0.25)],
+  ["claude-fable-5", standard(10, 50)],
+  ["claude-mythos-5", standard(10, 50)],
+  ["claude-opus-5-5", standard(4, 20, 0.2)],
+  ["claude-opus-5", standard(5, 25)],
+  ["claude-opus-4", standard(5, 25)],
+  ["claude-sonnet-5-5", standard(2, 10)],
+  ["claude-sonnet-5", standard(2, 10)],
+  ["claude-sonnet-4", standard(3, 15)],
+  ["claude-haiku-4-5", standard(1, 5)]
+];
+var DEFAULT_PRICE = standard(5, 25);
+function priceFor(model) {
+  if (!model) return DEFAULT_PRICE;
+  for (const [prefix, price] of PRICES) if (model.startsWith(prefix)) return price;
+  return DEFAULT_PRICE;
+}
+function priceUsage(t, model) {
+  const p = priceFor(model);
+  const m = 1e6;
+  const write1h = Math.min(t.cacheWrite1h ?? 0, t.cacheWrite);
+  return t.input * p.input / m + t.output * p.output / m + t.cacheRead * p.cacheRead / m + (t.cacheWrite - write1h) * p.cacheWrite / m + write1h * p.input * 2 / m;
+}
+function priceMeter(state) {
+  const models = Object.entries(state.byModel ?? {});
+  if (models.length === 0) return priceUsage(state.totals);
+  let cost = 0;
+  const attributed = emptyUsage();
+  for (const [model, totals] of models) {
+    cost += priceUsage(totals, model);
+    apply(attributed, totals);
+  }
+  const rest = {
+    input: Math.max(0, state.totals.input - attributed.input),
+    output: Math.max(0, state.totals.output - attributed.output),
+    cacheRead: Math.max(0, state.totals.cacheRead - attributed.cacheRead),
+    cacheWrite: Math.max(0, state.totals.cacheWrite - attributed.cacheWrite),
+    cacheWrite1h: Math.max(0, (state.totals.cacheWrite1h ?? 0) - (attributed.cacheWrite1h ?? 0))
+  };
+  return cost + priceUsage(rest);
+}
+function priceAtReference(t) {
+  if (totalTokens(t) <= 0) return null;
+  let best = null;
+  for (const [model] of PRICES) {
+    const costUsd = priceUsage(t, model);
+    if (!best || costUsd > best.costUsd) best = { costUsd, model };
+  }
+  return best;
+}
+function dominantModel(state) {
+  let best = null;
+  let most = -1;
+  for (const [model, totals] of Object.entries(state.byModel ?? {})) {
+    const size = totalTokens(totals);
+    if (size > most) {
+      most = size;
+      best = model;
+    }
+  }
+  return best ? best.replace(/\[[^\]]*\]$/, "") : null;
+}
+
+// src/commands/bridge/transcript-tail.ts
 var IDLE_MS = 5 * 60 * 1e3;
 var PAUSE_BEAT_MS = 30 * 1e3;
+var WRITE_TOOLS = /* @__PURE__ */ new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+var MAX_WRITTEN = 500;
+var MAX_PATH_LENGTH = 500;
+var MAX_TOOL_LENGTH = 64;
 function initialTailState() {
-  return { byteOffset: 0, remainder: "", seq: 0, lastEventMs: null, activeMs: 0 };
+  return {
+    byteOffset: 0,
+    remainder: "",
+    seq: 0,
+    lastEventMs: null,
+    activeMs: 0,
+    usage: initialUsageMeter(),
+    written: [],
+    writeCalls: 0
+  };
 }
 function pathFromCommand(command) {
   if (typeof command !== "string") return null;
   const m = command.match(/[\w./-]+\.(?:ts|tsx|js|jsx|py|sql|md|json|css|sh|mjs|go|rs)\b/);
   return m ? m[0] : null;
+}
+function parse(line) {
+  if (!line) return null;
+  try {
+    return JSON.parse(line);
+  } catch {
+    return null;
+  }
+}
+function relativePath(tool, input, cwd) {
+  let path = typeof input.file_path === "string" && input.file_path || typeof input.path === "string" && input.path || typeof input.notebook_path === "string" && input.notebook_path || null;
+  if (!path && tool === "Bash") path = pathFromCommand(input.command);
+  if (path && cwd && path.startsWith(cwd)) path = path.slice(cwd.length + 1);
+  if (path && path.startsWith("/")) path = null;
+  return path;
+}
+function noteWritten(state, tool, path) {
+  if (!WRITE_TOOLS.has(tool)) return;
+  state.writeCalls = (state.writeCalls ?? 0) + 1;
+  if (!path) return;
+  if (path.length > MAX_PATH_LENGTH) return;
+  const written = state.written ?? (state.written = []);
+  if (written.length >= MAX_WRITTEN || written.includes(path)) return;
+  written.push(path);
+}
+function backfill(fd, state, cwd) {
+  state.usage = initialUsageMeter();
+  state.written = [];
+  state.writeCalls = 0;
+  if (state.byteOffset === 0) return;
+  const buf = Buffer.alloc(state.byteOffset);
+  readSync(fd, buf, 0, buf.length, 0);
+  const lines = buf.toString("utf8").split("\n");
+  lines.pop();
+  for (const line of lines) {
+    const o = parse(line);
+    if (!o || o.type !== "assistant") continue;
+    countUsage(state.usage, o.message?.id, o.message?.usage, o.message?.model);
+    for (const block of o.message?.content ?? []) {
+      if (block.type !== "tool_use" || !block.name) continue;
+      noteWritten(state, block.name, relativePath(block.name, block.input ?? {}, cwd));
+    }
+  }
 }
 function tailTranscript(transcriptPath, state, cwd) {
   let fd;
@@ -1727,7 +1878,11 @@ function tailTranscript(transcriptPath, state, cwd) {
     if (size < state.byteOffset) {
       state.byteOffset = 0;
       state.remainder = "";
+      state.usage = initialUsageMeter();
+      state.written = [];
+      state.writeCalls = 0;
     }
+    if (state.usage === void 0) backfill(fd, state, cwd);
     if (size === state.byteOffset) {
       return [];
     }
@@ -1740,25 +1895,19 @@ function tailTranscript(transcriptPath, state, cwd) {
   }
   const lines = chunk.split("\n");
   state.remainder = lines.pop() ?? "";
+  const usage = state.usage ?? (state.usage = initialUsageMeter());
   const events = [];
   for (const line of lines) {
-    if (!line) continue;
-    let o;
-    try {
-      o = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (o.type !== "assistant") continue;
+    const o = parse(line);
+    if (!o || o.type !== "assistant") continue;
+    countUsage(usage, o.message?.id, o.message?.usage, o.message?.model);
     const ms = o.timestamp ? Date.parse(o.timestamp) : NaN;
     if (!Number.isFinite(ms)) continue;
     for (const block of o.message?.content ?? []) {
       if (block.type !== "tool_use" || !block.name) continue;
-      const input = block.input ?? {};
-      let path = typeof input.file_path === "string" && input.file_path || typeof input.path === "string" && input.path || typeof input.notebook_path === "string" && input.notebook_path || null;
-      if (!path && block.name === "Bash") path = pathFromCommand(input.command);
-      if (path && cwd && path.startsWith(cwd)) path = path.slice(cwd.length + 1);
-      if (path && path.startsWith("/")) path = null;
+      let path = relativePath(block.name, block.input ?? {}, cwd);
+      noteWritten(state, block.name, path);
+      if (path && path.length > MAX_PATH_LENGTH) path = null;
       if (state.lastEventMs !== null) {
         const gap = ms - state.lastEventMs;
         state.activeMs += gap >= IDLE_MS ? PAUSE_BEAT_MS : Math.max(gap, 0);
@@ -1767,12 +1916,70 @@ function tailTranscript(transcriptPath, state, cwd) {
       events.push({
         seq: state.seq++,
         t: Math.round(state.activeMs / 1e3),
-        tool: block.name,
+        tool: block.name.slice(0, MAX_TOOL_LENGTH),
         path
       });
     }
   }
   return events;
+}
+
+// src/commands/bridge/transcript-reading.ts
+function canSendReadings(client2) {
+  return typeof client2.streamEvents === "function" && typeof client2.reportTelemetry === "function";
+}
+async function sendTranscriptReading(client2, target, at, onLog) {
+  const before = target.tail ? structuredClone(target.tail) : void 0;
+  target.tail ?? (target.tail = initialTailState());
+  const tokensBefore = before?.usage ? totalTokens(before.usage.totals) : -1;
+  const derived = tailTranscript(target.transcriptPath, target.tail, target.cwd);
+  if (derived.length > 0) {
+    const sent = await client2.streamEvents(target.sessionId, derived);
+    if (!sent) {
+      target.tail = before;
+      onLog?.(`stream for ${target.label} did not land; will catch up next tick`);
+      return "failed";
+    }
+  }
+  const usage = target.tail.usage?.totals;
+  const tokensNow = usage ? totalTokens(usage) : -1;
+  if (derived.length === 0 && tokensNow === tokensBefore && !target.readingOwed) return "nothing";
+  const latest = derived[derived.length - 1];
+  if (latest) {
+    target.lastAction = latest.path ? `${latest.tool} \xB7 ${latest.path.split("/").slice(-2).join("/")}` : latest.tool;
+  }
+  const landed = await client2.reportTelemetry(target.sessionId, {
+    toolCalls: target.tail.seq,
+    writeCalls: target.tail.writeCalls ?? 0,
+    filesTouched: target.tail.written ?? [],
+    // Remembered, not re-derived: the hosted row is replaced whole, so a
+    // tokens-only update that omitted this would blank the line that says what
+    // the session is doing.
+    ...target.lastAction ? { currentAction: target.lastAction } : {},
+    ...usage ? {
+      tokensIn: usage.input,
+      tokensOut: usage.output,
+      tokensCacheRead: usage.cacheRead,
+      tokensCacheWrite: usage.cacheWrite,
+      turns: target.tail.usage?.turns,
+      // Our arithmetic at API list prices, each model's tokens at its own
+      // rate. Not a bill: a subscription was not charged this, and the
+      // hosted plane labels it so.
+      costUsd: Math.min(Number(priceMeter(target.tail.usage).toFixed(4)), 1e4),
+      costEstimated: true,
+      ...dominantModel(target.tail.usage) ? { model: dominantModel(target.tail.usage) } : {}
+    } : {},
+    elapsedMs: Math.round(target.tail.activeMs),
+    // mtimeMs is fractional on macOS; the schema's int() refuses a float and
+    // the client swallows the 400 — a silently empty table.
+    idleMs: Math.round(Math.max(0, at.now - at.mtimeMs))
+  });
+  target.readingOwed = !landed;
+  if (!landed) {
+    onLog?.(`reading for ${target.label} did not land; will send it again next tick`);
+    return "failed";
+  }
+  return "sent";
 }
 
 // src/commands/bridge/adoption-watcher.ts
@@ -1816,6 +2023,11 @@ var AdoptionWatcher = class {
       return 0;
     }
   }
+  /** Whether this watcher is already sending readings for a session. */
+  isTracking(adoptionKey) {
+    const entry = this.entries.get(adoptionKey);
+    return entry !== void 0 && !entry.settled;
+  }
   size() {
     return [...this.entries.values()].filter((e) => !e.settled).length;
   }
@@ -1842,33 +2054,32 @@ var AdoptionWatcher = class {
         continue;
       }
       const neverDerived = entry.tail === void 0;
-      if (mtimeMs > entry.lastMtimeMs || neverDerived) {
+      if (mtimeMs > entry.lastMtimeMs || neverDerived || entry.retryReading) {
         const grew = mtimeMs > entry.lastMtimeMs;
         entry.lastMtimeMs = mtimeMs;
         entry.lastReportedAt = new Date(now).toISOString();
-        const canStream = typeof this.config.client.streamEvents === "function";
-        entry.tail ?? (entry.tail = initialTailState());
-        const derived = canStream ? tailTranscript(entry.transcriptPath, entry.tail, entry.cwd) : [];
-        this.persist();
-        if (derived.length > 0) {
-          const sent = await this.config.client.streamEvents(entry.sessionId, derived);
-          if (!sent) {
-            this.config.onLog?.(`stream for ${entry.identifier} did not land; will catch up next tick`);
-          }
-          const latest = derived[derived.length - 1];
-          const files = /* @__PURE__ */ new Set();
-          for (const e of derived) if (e.path) files.add(e.path);
-          if (typeof this.config.client.reportTelemetry === "function")
-            await this.config.client.reportTelemetry(entry.sessionId, {
-              toolCalls: entry.tail.seq,
-              filesTouched: [...files].slice(0, 500),
-              currentAction: latest.path ? `${latest.tool} \xB7 ${latest.path.split("/").slice(-2).join("/")}` : latest.tool,
-              elapsedMs: Math.round(entry.tail.activeMs),
-              // mtimeMs is fractional on macOS; the schema's int() refuses a
-              // float and the client swallows the 400 — a silently empty table.
-              idleMs: Math.round(Math.max(0, now - mtimeMs))
-            });
+        if (canSendReadings(this.config.client)) {
+          const target = {
+            sessionId: entry.sessionId,
+            label: entry.identifier,
+            transcriptPath: entry.transcriptPath,
+            cwd: entry.cwd,
+            tail: entry.tail,
+            lastAction: entry.lastAction,
+            readingOwed: entry.readingOwed
+          };
+          const outcome = await sendTranscriptReading(
+            this.config.client,
+            target,
+            { now, mtimeMs },
+            this.config.onLog
+          );
+          entry.tail = target.tail;
+          entry.lastAction = target.lastAction;
+          entry.readingOwed = target.readingOwed;
+          entry.retryReading = outcome === "failed";
         }
+        this.persist();
         if (grew) {
           try {
             await this.config.client.reportSessionStatus(entry.sessionId, {
@@ -1923,9 +2134,11 @@ function elapsed(startedAt, endMs) {
 
 // src/commands/bridge/observer.ts
 import chalk8 from "chalk";
+import { existsSync as existsSync8, mkdirSync as mkdirSync5, readFileSync as readFileSync6, statSync as statSync2, writeFileSync as writeFileSync7 } from "fs";
+import { dirname as dirname3 } from "path";
 
 // src/commands/sessions/scan-pipeline.ts
-import { homedir as homedir2 } from "os";
+import { homedir } from "os";
 import { join as join6 } from "path";
 import chalk7 from "chalk";
 import { adoption } from "@devpilot.sh/core";
@@ -1954,7 +2167,7 @@ async function runScanPipeline(options) {
     sinceMs: options.sinceMs,
     includePaths: options.includePaths,
     excludeSessionUuids: adoption.loadOwnedSessionIds(
-      join6(homedir2(), ".devpilot", "owned-sessions.json")
+      join6(homedir(), ".devpilot", "owned-sessions.json")
     )
   });
   let modelTitles = 0;
@@ -2059,6 +2272,7 @@ function renderPreview(rows, result) {
 var DEFAULT_INTERVAL_MS = 6e4;
 var DEFAULT_SINCE_MS = 24 * 60 * 60 * 1e3;
 var DEFAULT_SUMMARISE_BUDGET = 10;
+var FIRST_READINGS_PER_SWEEP = 8;
 var SessionObserver = class {
   constructor(config) {
     this.config = config;
@@ -2084,9 +2298,13 @@ var SessionObserver = class {
      * and it never leaves the process.
      */
     this.targets = /* @__PURE__ */ new Map();
+    /** `adoptionKey → read position and meter` for the instrument readings. */
+    this.readings = /* @__PURE__ */ new Map();
+    this.sendingReadings = false;
     this.intervalMs = config.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.sinceMs = config.sinceMs ?? DEFAULT_SINCE_MS;
     this.summariseBudget = config.summariseBudget ?? DEFAULT_SUMMARISE_BUDGET;
+    this.restoreReadings();
   }
   /**
    * Where a conversation lives on this machine, by adoption key.
@@ -2173,6 +2391,13 @@ var SessionObserver = class {
       });
       this.lastLive = live;
       if (response) {
+        if (response.sessionIds) {
+          void this.sendReadings(
+            result.candidates.map((c) => ({ key: c.adoptionKey, label: c.repo, live: c.live })),
+            response.sessionIds,
+            result.transcriptPaths
+          );
+        }
         return { observed: response.observed, ended: response.ended };
       }
       return null;
@@ -2183,6 +2408,93 @@ var SessionObserver = class {
       return null;
     } finally {
       this.running = false;
+    }
+  }
+  /**
+   * Send an instrument reading for each observed session that has something
+   * new to say.
+   *
+   * Live sessions first, and first-time readings capped per pass — see
+   * FIRST_READINGS_PER_SWEEP. A session that ended before this bridge started
+   * is still read once: what it cost is as much a fact about last week as what
+   * a running one costs is about now.
+   *
+   * Exposed for tests; never throws and never overlaps itself.
+   */
+  async sendReadings(candidates, sessionIds, locations, now = Date.now()) {
+    const client2 = this.config.client;
+    if (this.sendingReadings || !canSendReadings(client2)) return 0;
+    this.sendingReadings = true;
+    let sent = 0;
+    let first = 0;
+    try {
+      const ordered = [...candidates].sort((a, b) => Number(b.live) - Number(a.live));
+      for (const candidate of ordered) {
+        const sessionId = sessionIds[candidate.key];
+        const location = locations.get(candidate.key);
+        if (!sessionId || !location) continue;
+        if (this.config.isWatched?.(candidate.key)) continue;
+        let mtimeMs;
+        try {
+          mtimeMs = statSync2(location.transcriptPath).mtimeMs;
+        } catch {
+          this.readings.delete(candidate.key);
+          continue;
+        }
+        const known = this.readings.get(candidate.key);
+        if (known && mtimeMs <= known.lastMtimeMs && !known.retry) continue;
+        if (!known) {
+          if (first >= FIRST_READINGS_PER_SWEEP) continue;
+          first++;
+        }
+        const reading = known ?? {
+          sessionId,
+          label: candidate.label,
+          transcriptPath: location.transcriptPath,
+          cwd: location.cwd,
+          lastMtimeMs: 0
+        };
+        reading.sessionId = sessionId;
+        const outcome = await sendTranscriptReading(client2, reading, { now, mtimeMs }, this.config.onLog);
+        reading.retry = outcome === "failed";
+        if (outcome !== "failed") reading.lastMtimeMs = mtimeMs;
+        this.readings.set(candidate.key, reading);
+        if (outcome === "sent") sent++;
+      }
+      const current = new Set(candidates.map((c) => c.key));
+      for (const key of this.readings.keys()) if (!current.has(key)) this.readings.delete(key);
+      this.persistReadings();
+    } catch (err) {
+      this.config.onLog?.(
+        chalk8.gray(`instrument readings failed: ${err instanceof Error ? err.message : err}`)
+      );
+    } finally {
+      this.sendingReadings = false;
+    }
+    return sent;
+  }
+  restoreReadings() {
+    const path = this.config.readingsStatePath;
+    if (!path) return;
+    try {
+      if (!existsSync8(path)) return;
+      const parsed = JSON.parse(readFileSync6(path, "utf8"));
+      if (parsed?.version !== 1 || !parsed.readings) return;
+      for (const [key, reading] of Object.entries(parsed.readings)) this.readings.set(key, reading);
+    } catch {
+    }
+  }
+  persistReadings() {
+    const path = this.config.readingsStatePath;
+    if (!path) return;
+    try {
+      mkdirSync5(dirname3(path), { recursive: true });
+      writeFileSync7(
+        path,
+        JSON.stringify({ version: 1, readings: Object.fromEntries(this.readings) }),
+        "utf8"
+      );
+    } catch {
     }
   }
 };
@@ -2451,18 +2763,18 @@ function describe2(err) {
 
 // src/commands/bridge/connect.ts
 function stableMachineName() {
-  const path = join7(homedir3(), ".devpilot", "machine.json");
+  const path = join7(homedir2(), ".devpilot", "machine.json");
   try {
-    if (existsSync8(path)) {
-      const saved = JSON.parse(readFileSync6(path, "utf8"));
+    if (existsSync9(path)) {
+      const saved = JSON.parse(readFileSync7(path, "utf8"));
       if (saved.name) return saved.name;
     }
   } catch {
   }
   const name = os.hostname();
   try {
-    mkdirSync5(dirname3(path), { recursive: true });
-    writeFileSync7(path, JSON.stringify({ name }, null, 2), "utf8");
+    mkdirSync6(dirname4(path), { recursive: true });
+    writeFileSync8(path, JSON.stringify({ name }, null, 2), "utf8");
   } catch {
   }
   return name;
@@ -2487,7 +2799,7 @@ var connectCommand = new Command6("connect").description("Connect this machine t
   "--cockpit-url <url>",
   "Local cockpit base URL for --plan",
   process.env.DEVPILOT_COCKPIT_URL || "http://127.0.0.1:3000"
-).option("--no-discover", "Do not report which repos this machine has agent history for").option(
+).option("--no-save", "Do not remember the bridge URL and token on this machine").option("--no-discover", "Do not report which repos this machine has agent history for").option(
   "--no-observe",
   "Do not report the agent sessions running on this machine to the cockpit"
 ).option(
@@ -2499,6 +2811,9 @@ var connectCommand = new Command6("connect").description("Connect this machine t
   "With --adopt, include repos this machine does not route (names them first)",
   false
 ).action(async (options) => {
+  const credentials = resolveBridgeCredentials({ url: options.url, token: options.token });
+  options.url = credentials.url ?? (credentials.token ? DEFAULT_BRIDGE_URL : void 0);
+  options.token = credentials.token;
   if (!options.url) {
     console.error(chalk10.red("\u2717 Bridge URL required (--url or DEVPILOT_BRIDGE_URL)"));
     process.exit(1);
@@ -2545,6 +2860,12 @@ var connectCommand = new Command6("connect").description("Connect this machine t
   }
   console.log(chalk10.green("\u2713 Registered"));
   console.log(chalk10.gray(`   orchestrator: ${registration.orchestratorId}`));
+  if (options.save !== false && credentials.source !== "saved") {
+    const saved = saveBridgeCredentials({ url: options.url, token: options.token });
+    if (saved) {
+      console.log(chalk10.gray(`   remembered in ${bridgeCredentialsPath()} \u2014 reconnect with no flags`));
+    }
+  }
   console.log(chalk10.gray(`   repos: ${repos.join(", ") || "(none)"}`));
   if (repos.length === 0) {
     console.log(chalk10.yellow("   \u26A0 No repos specified \u2014 nothing can route to this machine."));
@@ -2561,7 +2882,7 @@ var connectCommand = new Command6("connect").description("Connect this machine t
     // Survives a restart. Without this, upgrading the CLI or closing a
     // laptop lid orphaned every in-flight run: the cockpit kept working
     // and Linear was never told how any of it ended.
-    statePath: join7(homedir3(), ".devpilot", "conductor-watch.json"),
+    statePath: join7(homedir2(), ".devpilot", "conductor-watch.json"),
     onLog: (line) => console.log(chalk10.blue(`   ${line}`)),
     onLost: (run) => console.log(
       chalk10.yellow(
@@ -2585,7 +2906,7 @@ var connectCommand = new Command6("connect").description("Connect this machine t
   }
   const adoptionWatcher = new AdoptionWatcher({
     client: client2,
-    statePath: join7(homedir3(), ".devpilot", "adoption-watch.json"),
+    statePath: join7(homedir2(), ".devpilot", "adoption-watch.json"),
     onLog: (line) => console.log(chalk10.blue(`   ${line}`))
   });
   const resumedAdoptions = adoptionWatcher.restore();
@@ -2600,6 +2921,10 @@ var connectCommand = new Command6("connect").description("Connect this machine t
     client: client2,
     machineName: options.name ?? stableMachineName(),
     repos,
+    // A session placed on a board is already followed by the adoption
+    // watcher; everything else gets its instruments from the observer.
+    isWatched: (key) => adoptionWatcher.isTracking(key),
+    readingsStatePath: join7(homedir2(), ".devpilot", "observed-readings.json"),
     onLog: (line) => console.log(chalk10.gray(`   ${line}`))
   }) : null;
   if (observer) {
@@ -2735,40 +3060,25 @@ var connectCommand = new Command6("connect").description("Connect this machine t
 // src/commands/bridge/disconnect.ts
 import { Command as Command7 } from "commander";
 import chalk11 from "chalk";
-var disconnectCommand = new Command7("disconnect").description("Disconnect from DevPilot cloud bridge").option("-u, --bridge-url <url>", "Bridge service URL", process.env.DEVPILOT_BRIDGE_URL).option("-k, --api-key <key>", "API key", process.env.DEVPILOT_BRIDGE_API_KEY).option("-i, --orchestrator-id <id>", "Orchestrator ID to disconnect").action(async (options) => {
-  if (!options.bridgeUrl || !options.orchestratorId) {
-    console.error(chalk11.red("\u2717 Error: Bridge URL and orchestrator ID required"));
-    console.error(chalk11.gray("   Use: devpilot bridge disconnect -u <url> -i <orchestrator-id>"));
-    process.exit(1);
+import {
+  bridgeCredentialsPath as bridgeCredentialsPath2,
+  clearBridgeCredentials,
+  loadBridgeCredentials as loadBridgeCredentials2
+} from "@devpilot.sh/bridge-client";
+var disconnectCommand = new Command7("disconnect").description("Forget the bridge URL and token saved on this machine").action(async () => {
+  const saved = loadBridgeCredentials2();
+  clearBridgeCredentials();
+  if (saved) {
+    console.log(chalk11.green("\u2713 Forgot the saved token for ") + chalk11.gray(saved.url));
+  } else {
+    console.log(chalk11.gray(`Nothing was saved at ${bridgeCredentialsPath2()}.`));
   }
-  console.log(chalk11.cyan("\u{1F309} Disconnecting from DevPilot Bridge"));
   console.log("");
-  console.log(chalk11.gray(`   Bridge URL: ${options.bridgeUrl}`));
-  console.log(chalk11.gray(`   Orchestrator ID: ${options.orchestratorId}`));
+  console.log(chalk11.gray("  The token still works for anyone who has a copy of it. To end that,"));
+  console.log(chalk11.gray("  revoke it in the dashboard under Settings \u2192 Tokens \u2014 it stops being"));
+  console.log(chalk11.gray("  accepted on the very next request."));
+  console.log(chalk11.gray("  A bridge that is running now keeps running until you stop it (Ctrl+C)."));
   console.log("");
-  try {
-    const response = await fetch(
-      `${options.bridgeUrl}/api/orchestrators/${options.orchestratorId}`,
-      {
-        method: "DELETE",
-        headers: {
-          "Authorization": `Bearer ${options.apiKey}`
-        }
-      }
-    );
-    if (response.ok) {
-      console.log(chalk11.green("\u2713 Successfully disconnected from bridge"));
-    } else {
-      const errorText = await response.text();
-      console.error(chalk11.red("\u2717 Failed to disconnect:"));
-      console.error(chalk11.red(`   ${errorText}`));
-      process.exit(1);
-    }
-  } catch (error) {
-    console.error(chalk11.red("\u2717 Error disconnecting:"));
-    console.error(chalk11.red(`   ${error instanceof Error ? error.message : error}`));
-    process.exit(1);
-  }
 });
 
 // src/commands/bridge/status.ts
@@ -2833,63 +3143,91 @@ var bridgeCommand = new Command9("bridge").description("Manage connection to Dev
 import { Command as Command13 } from "commander";
 
 // src/commands/session/new.ts
+import os2 from "os";
 import { Command as Command10 } from "commander";
 import chalk13 from "chalk";
-import { sessionCrypto, buildJoinLink, formatApiError } from "@devpilot.sh/bridge-protocol";
-var newCommand = new Command10("new").description("Create a shared session and print its join link").argument("<title>", "What this session is about (stored in plaintext \u2014 no secrets)").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-o, --org <orgId>", "Organization id that will own the session").option("--issue <identifier>", "Linear issue identifier to attach, e.g. ENG-394").action(async (title, options) => {
-  if (!options.url || !options.token) {
-    console.error(chalk13.red("\u2717 Bridge URL and token required"));
-    console.error(chalk13.gray("  --url / DEVPILOT_BRIDGE_URL, --token / DEVPILOT_BRIDGE_TOKEN"));
+import { buildSessionHandoff, SESSION_LIMITS } from "@devpilot.sh/bridge-protocol";
+import {
+  DEFAULT_BRIDGE_URL as DEFAULT_BRIDGE_URL2,
+  SharedSessionClient,
+  resolveBridgeCredentials as resolveBridgeCredentials2
+} from "@devpilot.sh/bridge-client";
+var MODES = ["observe", "relay", "auto"];
+var newCommand = new Command10("new").description("Create a shared session and print the message to send your teammate").argument("<title>", "What this session is about (stored in plaintext \u2014 no secrets)").option("-u, --url <url>", "Bridge URL (defaults to the one this machine is connected to)").option("-t, --token <token>", "Machine token (defaults to the one this machine is connected with)").option("--issue <identifier>", "Linear issue identifier to attach, e.g. ENG-394").option(
+  "--mode <mode>",
+  "observe (agents post only when asked) | relay | auto (agents may reply, bounded)",
+  "observe"
+).option("--budget <n>", `Agent messages allowed in auto mode (default ${SESSION_LIMITS.autoDefaultBudget})`).option("--minutes <n>", `Minutes auto mode lasts (default ${SESSION_LIMITS.autoDefaultTtlMinutes})`).option("-n, --name <name>", "Your display name in the transcript", os2.hostname()).option("-m, --message <text>", "Post this as the first message (encrypted)").option("--link-only", "Print just the join link, for scripts").action(async (title, options) => {
+  const credentials = resolveBridgeCredentials2({ url: options.url, token: options.token });
+  if (!credentials.token) {
+    console.error(chalk13.red("\u2717 No machine token"));
+    console.error(
+      chalk13.gray("  Connect this machine once with `devpilot bridge connect --token <token>` and it")
+    );
+    console.error(chalk13.gray("  is remembered, or pass --token / set DEVPILOT_BRIDGE_TOKEN."));
     process.exit(1);
   }
-  if (!options.org) {
-    console.error(chalk13.red("\u2717 --org <orgId> is required"));
-    console.error(chalk13.gray("  The token is bound to one org; this must be that org."));
+  if (!MODES.includes(options.mode)) {
+    console.error(chalk13.red(`\u2717 Unknown mode "${options.mode}" \u2014 use observe, relay or auto`));
     process.exit(1);
   }
-  const key = sessionCrypto.generateKey();
-  const { joinKeyHash } = await sessionCrypto.deriveJoinCredentials(key);
-  const base = options.url.replace(/\/+$/, "");
-  const res = await fetch(`${base}/api/sessions/shared`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${options.token}` },
-    body: JSON.stringify({
-      orgId: options.org,
+  const mode = options.mode;
+  const autoBudget = options.budget ? parseInt(options.budget, 10) : SESSION_LIMITS.autoDefaultBudget;
+  const autoTtlMinutes = options.minutes ? parseInt(options.minutes, 10) : SESSION_LIMITS.autoDefaultTtlMinutes;
+  if (mode === "auto" && !(autoBudget > 0 && autoTtlMinutes > 0)) {
+    console.error(chalk13.red("\u2717 auto mode needs a positive --budget and --minutes"));
+    process.exit(1);
+  }
+  let created;
+  try {
+    created = await SharedSessionClient.create({
+      baseUrl: credentials.url ?? DEFAULT_BRIDGE_URL2,
+      token: credentials.token,
       title,
-      joinKeyHash,
-      ...options.issue ? { linearIdentifier: options.issue } : {}
-    })
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => null);
-    console.error(chalk13.red(`\u2717 Could not create session (${res.status})`));
-    console.error(chalk13.gray(`  ${formatApiError(body, res.statusText)}`));
+      displayName: options.name,
+      kind: "human",
+      linearIdentifier: options.issue,
+      mode,
+      autoBudget,
+      autoTtlMinutes
+    });
+  } catch (err) {
+    console.error(chalk13.red("\u2717 Could not create the session"));
+    console.error(chalk13.gray(`  ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
   }
-  const { session } = await res.json();
-  const link = buildJoinLink(base, session.id, key);
+  const { client: client2, link } = created;
+  if (options.message) await client2.post(options.message);
+  if (options.linkOnly) {
+    console.log(link);
+    return;
+  }
   console.log("");
-  console.log(chalk13.cyan(`  ${session.title}`));
-  console.log(chalk13.bold(`  ${link}`));
+  console.log(chalk13.cyan(`  ${title}`) + chalk13.gray(`  \xB7  ${mode}`));
   console.log("");
-  console.log(chalk13.yellow("  Anyone with this link can read the whole transcript."));
-  console.log(chalk13.gray("  It carries the encryption key after the #, which never reaches"));
-  console.log(chalk13.gray("  devpilot.sh. Send it the way you would send a password \u2014 not to"));
-  console.log(chalk13.gray("  a public channel. To revoke it, re-key the session; that ends"));
-  console.log(chalk13.gray("  access for this link but cannot un-send what was already read."));
+  console.log(chalk13.gray("  Send this to your teammate:"));
   console.log("");
-  console.log(chalk13.gray(`  Others join with:  devpilot session join "${chalk13.italic("<link>")}"`));
+  for (const line of buildSessionHandoff({ title, link, mode, autoBudget, autoTtlMinutes }).split("\n")) {
+    console.log(`  ${line}`);
+  }
+  console.log("");
+  console.log(chalk13.yellow("  Anyone with that link can read the whole transcript."));
+  console.log(chalk13.gray("  The key is after the #, and never reaches the bridge. To revoke the"));
+  console.log(chalk13.gray("  link, re-key the session from the dashboard; that ends access for it"));
+  console.log(chalk13.gray("  but cannot un-send what was already read."));
+  console.log("");
+  console.log(chalk13.gray(`  Follow it here with:  devpilot session tail "${chalk13.italic("<link>")}"`));
   console.log("");
 });
 
 // src/commands/session/join.ts
-import os2 from "os";
+import os3 from "os";
 import { Command as Command11 } from "commander";
 import chalk14 from "chalk";
-import { SharedSessionClient } from "@devpilot.sh/bridge-client";
-var joinCommand = new Command11("join").description("Join a shared session by link and post a message").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", os2.hostname()).option("-m, --message <text>", "Post this message after joining").action(async (url, options) => {
+import { SharedSessionClient as SharedSessionClient2 } from "@devpilot.sh/bridge-client";
+var joinCommand = new Command11("join").description("Join a shared session by link and post a message").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", os3.hostname()).option("-m, --message <text>", "Post this message after joining").action(async (url, options) => {
   try {
-    const client2 = await SharedSessionClient.join({ link: url, displayName: options.name });
+    const client2 = await SharedSessionClient2.join({ link: url, displayName: options.name });
     const s = client2.session;
     console.log(chalk14.cyan(`
   ${s.title}`));
@@ -2913,15 +3251,15 @@ var joinCommand = new Command11("join").description("Join a shared session by li
 });
 
 // src/commands/session/tail.ts
-import os3 from "os";
+import os4 from "os";
 import { Command as Command12 } from "commander";
 import chalk15 from "chalk";
-import { SharedSessionClient as SharedSessionClient2 } from "@devpilot.sh/bridge-client";
-var tailCommand = new Command12("tail").description("Follow a shared session transcript in the terminal").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", os3.hostname()).option("-i, --interval <seconds>", "Poll interval", "3").action(async (url, options) => {
+import { SharedSessionClient as SharedSessionClient3 } from "@devpilot.sh/bridge-client";
+var tailCommand = new Command12("tail").description("Follow a shared session transcript in the terminal").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", os4.hostname()).option("-i, --interval <seconds>", "Poll interval", "3").action(async (url, options) => {
   const intervalMs = Math.max(1, parseInt(options.interval, 10) || 3) * 1e3;
   let client2;
   try {
-    client2 = await SharedSessionClient2.join({ link: url, displayName: options.name });
+    client2 = await SharedSessionClient3.join({ link: url, displayName: options.name });
   } catch (err) {
     console.error(chalk15.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
@@ -2973,27 +3311,27 @@ function format(e, names) {
 var sessionCommand = new Command13("session").description("Shared, end-to-end encrypted sessions across machines").addCommand(newCommand).addCommand(joinCommand).addCommand(tailCommand);
 
 // src/commands/sessions/index.ts
-import os4 from "os";
-import { homedir as homedir4 } from "os";
-import { join as join8, dirname as dirname4 } from "path";
-import { existsSync as existsSync9, readFileSync as readFileSync7, writeFileSync as writeFileSync8, mkdirSync as mkdirSync6 } from "fs";
+import os5 from "os";
+import { homedir as homedir3 } from "os";
+import { join as join8, dirname as dirname5 } from "path";
+import { existsSync as existsSync10, readFileSync as readFileSync8, writeFileSync as writeFileSync9, mkdirSync as mkdirSync7 } from "fs";
 import { Command as Command14 } from "commander";
 import chalk16 from "chalk";
 import inquirer from "inquirer";
 import { BridgeClient as BridgeClient2 } from "@devpilot.sh/bridge-client";
 function stableMachineName2() {
-  const path = join8(homedir4(), ".devpilot", "machine.json");
+  const path = join8(homedir3(), ".devpilot", "machine.json");
   try {
-    if (existsSync9(path)) {
-      const saved = JSON.parse(readFileSync7(path, "utf8"));
+    if (existsSync10(path)) {
+      const saved = JSON.parse(readFileSync8(path, "utf8"));
       if (saved.name) return saved.name;
     }
   } catch {
   }
-  const name = os4.hostname();
+  const name = os5.hostname();
   try {
-    mkdirSync6(dirname4(path), { recursive: true });
-    writeFileSync8(path, JSON.stringify({ name }, null, 2), "utf8");
+    mkdirSync7(dirname5(path), { recursive: true });
+    writeFileSync9(path, JSON.stringify({ name }, null, 2), "utf8");
   } catch {
   }
   return name;
@@ -3207,29 +3545,19 @@ import { resolve as resolve3 } from "path";
 // src/commands/session-runner/server.ts
 import { createServer } from "http";
 import { randomUUID } from "crypto";
-import { existsSync as existsSync11 } from "fs";
-import { basename as basename2, isAbsolute, resolve as resolve2 } from "path";
+import { existsSync as existsSync13 } from "fs";
+import { basename as basename3, isAbsolute, resolve as resolve2 } from "path";
 
 // src/commands/session-runner/claude-runner.ts
 import { spawn as spawn2, execFile } from "child_process";
 import { promisify } from "util";
-import { mkdtempSync, rmSync, writeFileSync as writeFileSync9, existsSync as existsSync10, readFileSync as readFileSync8, mkdirSync as mkdirSync7 } from "fs";
-import { tmpdir, homedir as homedir5 } from "os";
+import { mkdtempSync, rmSync, writeFileSync as writeFileSync10, existsSync as existsSync11, readFileSync as readFileSync9, mkdirSync as mkdirSync8 } from "fs";
+import { tmpdir, homedir as homedir4 } from "os";
 import { join as join9 } from "path";
 
 // src/commands/session-runner/stream-events.ts
-var PRICE_PER_MTOK = {
-  input: 5,
-  output: 25,
-  cacheWrite: 6.25,
-  cacheRead: 0.5
-};
-function priceUsage(usage) {
-  const m = 1e6;
-  return (usage.input_tokens ?? 0) * PRICE_PER_MTOK.input / m + (usage.output_tokens ?? 0) * PRICE_PER_MTOK.output / m + (usage.cache_creation_input_tokens ?? 0) * PRICE_PER_MTOK.cacheWrite / m + (usage.cache_read_input_tokens ?? 0) * PRICE_PER_MTOK.cacheRead / m;
-}
 var MAX_ACTIONS = 200;
-var WRITE_TOOLS = /* @__PURE__ */ new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+var WRITE_TOOLS2 = /* @__PURE__ */ new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 var READ_TOOLS = /* @__PURE__ */ new Set(["Read", "Glob", "Grep"]);
 function relativize(path, workdir) {
   if (!workdir) return path;
@@ -3246,10 +3574,15 @@ var TelemetryCollector = class {
     this.commands = [];
     this.actions = [];
     this.toolCalls = 0;
+    this.writeCalls = 0;
     this.costUsd = 0;
     this.costIsEstimate = true;
-    this.tokensIn = 0;
-    this.tokensOut = 0;
+    /**
+     * Counted once per response. The stream repeats a response's usage on every
+     * content block it emits, exactly as the transcript does, so adding each
+     * event's usage inflated the running estimate by the number of blocks.
+     */
+    this.meter = initialUsageMeter();
     this.turns = 0;
     this.now = now;
     this.workdir = workdir;
@@ -3276,9 +3609,9 @@ var TelemetryCollector = class {
     if (event.type === "assistant") {
       const usage = event.message?.usage;
       if (usage && this.costIsEstimate) {
-        this.costUsd += priceUsage(usage);
-        this.tokensIn += usage.input_tokens ?? 0;
-        this.tokensOut += usage.output_tokens ?? 0;
+        countUsage(this.meter, event.message?.id, usage, event.message?.model);
+        this.costUsd = priceMeter(this.meter);
+        this.turns = this.meter.turns;
       }
       for (const block of event.message?.content ?? []) {
         if (block.type === "tool_use" && block.name) {
@@ -3292,16 +3625,108 @@ var TelemetryCollector = class {
       if (typeof event.total_cost_usd === "number") this.costIsEstimate = false;
       this.costUsd = event.total_cost_usd ?? this.costUsd;
       this.turns = event.num_turns ?? this.turns;
-      this.tokensIn = event.usage?.input_tokens ?? this.tokensIn;
-      this.tokensOut = event.usage?.output_tokens ?? this.tokensOut;
+      if (event.usage) {
+        const t = this.meter.totals;
+        t.input = event.usage.input_tokens ?? t.input;
+        t.output = event.usage.output_tokens ?? t.output;
+        t.cacheRead = event.usage.cache_read_input_tokens ?? t.cacheRead;
+        t.cacheWrite = event.usage.cache_creation_input_tokens ?? t.cacheWrite;
+        const hour = event.usage.cache_creation?.ephemeral_1h_input_tokens;
+        if (typeof hour === "number") t.cacheWrite1h = Math.min(hour, t.cacheWrite);
+      }
+      this.reconcileModels(event.modelUsage);
     }
+  }
+  /**
+   * Replace the per-model split with the one in the final result.
+   *
+   * WHY IT CANNOT BE LEFT AS COUNTED. While a run is in flight the stream
+   * reports each response's usage as it BEGINS: the input side is right, and
+   * the output count is a placeholder of a few tokens. The real output arrives
+   * only in the final result. Measured on a live run: 11 output tokens counted
+   * from the stream against 567 in the result.
+   *
+   * The totals above are corrected from the result, but the per-model buckets
+   * were not, so a finished session's tokens no longer added up to its total —
+   * and the difference, which is nearly all of the output, was priced as
+   * "tokens no model was named for", at the default rate. A Haiku run's output
+   * was being priced as Opus: $0.033 reported against Claude's own $0.018.
+   *
+   * The result names every model and what it used, so the buckets are rebuilt
+   * from it, and the totals with them when more than one model ran — the
+   * top-level usage can omit a model that only did background work.
+   *
+   * The one thing the per-model figures do not carry is how a cache write
+   * splits by lifetime. That is known for the run as a whole, so it is shared
+   * out in proportion to each model's cache writes.
+   */
+  reconcileModels(modelUsage) {
+    const entries = Object.entries(modelUsage ?? {});
+    if (entries.length === 0) {
+      this.attributeRemainder();
+      return;
+    }
+    const n = (v) => typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
+    const byModel = {};
+    const sum = emptyUsage();
+    for (const [model, usage] of entries) {
+      const bucket = {
+        input: n(usage.inputTokens),
+        output: n(usage.outputTokens),
+        cacheRead: n(usage.cacheReadInputTokens),
+        cacheWrite: n(usage.cacheCreationInputTokens),
+        cacheWrite1h: 0
+      };
+      byModel[model.slice(0, 80)] = bucket;
+      sum.input += bucket.input;
+      sum.output += bucket.output;
+      sum.cacheRead += bucket.cacheRead;
+      sum.cacheWrite += bucket.cacheWrite;
+    }
+    const hourShare = sum.cacheWrite > 0 ? Math.min(1, (this.meter.totals.cacheWrite1h ?? 0) / Math.max(1, this.meter.totals.cacheWrite)) : 0;
+    for (const bucket of Object.values(byModel)) bucket.cacheWrite1h = bucket.cacheWrite * hourShare;
+    sum.cacheWrite1h = sum.cacheWrite * hourShare;
+    this.meter.byModel = byModel;
+    this.meter.totals = sum;
+  }
+  /**
+   * The same repair for a result that names no models — an older Claude Code.
+   *
+   * There is no authoritative split to rebuild from, so whatever the corrected
+   * totals hold beyond what was counted per model is given to the model that
+   * did most of the work, rather than left unattributed and priced at the
+   * default. For a run on one model, which is nearly all of them, that is
+   * exact.
+   */
+  attributeRemainder() {
+    const model = dominantModel(this.meter);
+    const buckets = this.meter.byModel;
+    if (!model || !buckets) return;
+    const key = Object.keys(buckets).find((k) => k === model || k.replace(/\[[^\]]*\]$/, "") === model);
+    if (!key) return;
+    const counted = emptyUsage();
+    for (const b of Object.values(buckets)) {
+      counted.input += b.input;
+      counted.output += b.output;
+      counted.cacheRead += b.cacheRead;
+      counted.cacheWrite += b.cacheWrite;
+      counted.cacheWrite1h = (counted.cacheWrite1h ?? 0) + (b.cacheWrite1h ?? 0);
+    }
+    const t = this.meter.totals;
+    const bucket = buckets[key];
+    bucket.input += Math.max(0, t.input - counted.input);
+    bucket.output += Math.max(0, t.output - counted.output);
+    bucket.cacheRead += Math.max(0, t.cacheRead - counted.cacheRead);
+    bucket.cacheWrite += Math.max(0, t.cacheWrite - counted.cacheWrite);
+    bucket.cacheWrite1h = (bucket.cacheWrite1h ?? 0) + Math.max(0, (t.cacheWrite1h ?? 0) - (counted.cacheWrite1h ?? 0));
   }
   recordTool(tool, input) {
     this.toolCalls++;
+    if (WRITE_TOOLS2.has(tool)) this.writeCalls++;
     const raw = typeof input.file_path === "string" ? input.file_path : typeof input.path === "string" ? input.path : void 0;
     const path = raw ? relativize(raw, this.workdir) : void 0;
     if (path) {
-      const list = WRITE_TOOLS.has(tool) ? this.touched : READ_TOOLS.has(tool) ? this.read : null;
+      const list = WRITE_TOOLS2.has(tool) ? this.touched : READ_TOOLS.has(tool) ? this.read : null;
       if (list && !list.includes(path)) list.push(path);
     }
     if (tool === "Bash" && typeof input.command === "string") {
@@ -3312,10 +3737,20 @@ var TelemetryCollector = class {
     this.actions.push(action);
     if (this.actions.length > MAX_ACTIONS) this.actions.shift();
   }
+  referencePricing() {
+    const reference = priceAtReference(this.meter.totals);
+    if (!reference) return {};
+    return {
+      listCostUsd: priceMeter(this.meter),
+      referenceCostUsd: reference.costUsd,
+      referenceModel: reference.model
+    };
+  }
   snapshot() {
     const now = this.now();
     return {
       toolCalls: this.toolCalls,
+      writeCalls: this.writeCalls,
       filesTouched: [...this.touched],
       filesRead: [...this.read],
       commands: [...this.commands],
@@ -3324,9 +3759,13 @@ var TelemetryCollector = class {
       actions: [...this.actions],
       costUsd: this.costUsd,
       costIsEstimate: this.costIsEstimate,
-      tokensIn: this.tokensIn,
-      tokensOut: this.tokensOut,
+      ...this.referencePricing(),
+      tokensIn: this.meter.totals.input,
+      tokensOut: this.meter.totals.output,
+      tokensCacheRead: this.meter.totals.cacheRead,
+      tokensCacheWrite: this.meter.totals.cacheWrite,
       turns: this.turns,
+      model: dominantModel(this.meter) ?? void 0,
       elapsedMs: now - this.startedAt,
       idleMs: now - this.lastEventAt
     };
@@ -3374,11 +3813,11 @@ var execFileAsync = promisify(execFile);
 var OWNED_SESSION_LIMIT = 5e3;
 function recordOwnedSession(sessionId) {
   try {
-    const dir = join9(homedir5(), ".devpilot");
+    const dir = join9(homedir4(), ".devpilot");
     const path = join9(dir, "owned-sessions.json");
     let ids = [];
-    if (existsSync10(path)) {
-      const parsed = JSON.parse(readFileSync8(path, "utf8"));
+    if (existsSync11(path)) {
+      const parsed = JSON.parse(readFileSync9(path, "utf8"));
       if (Array.isArray(parsed.sessionIds)) {
         ids = parsed.sessionIds.filter((v) => typeof v === "string");
       }
@@ -3386,8 +3825,8 @@ function recordOwnedSession(sessionId) {
     if (ids.includes(sessionId)) return;
     ids.push(sessionId);
     if (ids.length > OWNED_SESSION_LIMIT) ids = ids.slice(-OWNED_SESSION_LIMIT);
-    mkdirSync7(dir, { recursive: true });
-    writeFileSync9(path, JSON.stringify({ version: 1, sessionIds: ids }, null, 2), "utf8");
+    mkdirSync8(dir, { recursive: true });
+    writeFileSync10(path, JSON.stringify({ version: 1, sessionIds: ids }, null, 2), "utf8");
   } catch {
   }
 }
@@ -3449,7 +3888,7 @@ function parseEnvelope(stdout) {
 function writeSessionMcpConfig(sessionLink2) {
   const dir = mkdtempSync(join9(tmpdir(), "devpilot-mcp-"));
   const file = join9(dir, "mcp.json");
-  writeFileSync9(
+  writeFileSync10(
     file,
     JSON.stringify(
       {
@@ -3487,7 +3926,7 @@ function sessionPreamble() {
   ].join("\n");
 }
 async function runClaudeSession(options) {
-  const { workdir, prompt: prompt2, sessionLink: sessionLink2, model, claudePath, permissionMode, timeoutMs, resumeSessionId, onLog, onSpawn } = options;
+  const { workdir, prompt: prompt2, sessionLink: sessionLink2, model, claudePath, permissionMode, timeoutMs, resumeSessionId, harness, onLog, onSpawn } = options;
   const before = await snapshot(workdir);
   const startedAt = Date.now();
   const args = [
@@ -3508,6 +3947,8 @@ async function runClaudeSession(options) {
     args.push("--mcp-config", cfg.file, "--strict-mcp-config");
     effectivePrompt = sessionPreamble() + prompt2;
   }
+  const harnessBuild = harness?.build({ hasMcpConfig: Boolean(sessionLink2) });
+  if (harnessBuild) args.push(...harnessBuild.args);
   const outcome = await new Promise((resolve4) => {
     const child = spawn2(claudePath, args, {
       cwd: workdir,
@@ -3538,7 +3979,9 @@ async function runClaudeSession(options) {
       const lines = pending.split("\n");
       pending = lines.pop() ?? "";
       for (const line of lines) collector.ingestLine(line);
-      if (lines.length > 0) options.onTelemetry?.(collector.snapshot());
+      if (lines.length > 0) {
+        options.onTelemetry?.({ ...collector.snapshot(), harness: harness?.stamp });
+      }
     });
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString();
@@ -3558,6 +4001,7 @@ ${error2.message}`, timedOut, killed });
     child.stdin.end();
   }).finally(() => {
     if (mcpDir) rmSync(mcpDir, { recursive: true, force: true });
+    if (harnessBuild?.cleanupDir) rmSync(harnessBuild.cleanupDir, { recursive: true, force: true });
   });
   const after = await snapshot(workdir);
   const files = classify(before, after);
@@ -3625,8 +4069,366 @@ function sendCompletion(callbackUrl, report, token, log) {
   return post(`${callbackUrl.replace(/\/$/, "")}/complete`, report, token, log);
 }
 
+// src/commands/session-runner/isolation.ts
+import { execFile as execFile2 } from "child_process";
+import { createHash } from "crypto";
+import { existsSync as existsSync12, mkdirSync as mkdirSync9, realpathSync, rmSync as rmSync2 } from "fs";
+import { homedir as homedir5 } from "os";
+import { basename as basename2, dirname as dirname6, join as join10 } from "path";
+import { promisify as promisify2 } from "util";
+var execFileAsync2 = promisify2(execFile2);
+var IsolationError = class extends Error {
+  constructor(message, code) {
+    super(message);
+    this.code = code;
+    this.name = "IsolationError";
+  }
+};
+var GIT_TIMEOUT_MS = 12e4;
+var DEFAULT_SETUP_TIMEOUT_MS = 10 * 6e4;
+var FALLBACK_IDENTITY = ["-c", "user.name=DevPilot", "-c", "user.email=devpilot@localhost"];
+async function git2(cwd, args) {
+  const { stdout } = await execFileAsync2("git", args, {
+    cwd,
+    maxBuffer: 32 * 1024 * 1024,
+    timeout: GIT_TIMEOUT_MS,
+    // A hook or credential helper that prompts would hang a process with no
+    // terminal. Nothing here should ever need to ask.
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
+  });
+  return stdout;
+}
+async function gitOk(cwd, args) {
+  try {
+    await git2(cwd, args);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function gitMessage(error) {
+  const e = error;
+  return (e.stderr || e.message || String(error)).trim().slice(-1500);
+}
+function refSafe(value) {
+  const cleaned = String(value).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-{2,}/g, "-").replace(/\.{2,}/g, ".").replace(/^[-.]+|[-.]+$/g, "").slice(0, 80).replace(/[-.]+$/g, "");
+  if (!cleaned || cleaned.toLowerCase().endsWith(".lock")) {
+    throw new IsolationError(`'${value}' cannot be used in a branch name`, "INVALID_NAME");
+  }
+  return cleaned;
+}
+function runBranchName(runId) {
+  return `devpilot/${refSafe(runId)}/run`;
+}
+function taskBranchName(runId, taskCode) {
+  return `devpilot/${refSafe(runId)}/task-${refSafe(taskCode)}`;
+}
+function worktreeRoot(config) {
+  return config.worktreeRoot ?? join10(homedir5(), ".devpilot", "worktrees");
+}
+function repoKey(repoDir) {
+  let real = repoDir;
+  try {
+    real = realpathSync(repoDir);
+  } catch {
+  }
+  const hash = createHash("sha1").update(real).digest("hex").slice(0, 8);
+  return `${refSafe(basename2(real) || "repo")}-${hash}`;
+}
+var repoLocks = /* @__PURE__ */ new Map();
+function withRepoLock(repoDir, fn) {
+  const previous = repoLocks.get(repoDir) ?? Promise.resolve();
+  const next = previous.then(fn, fn);
+  repoLocks.set(
+    repoDir,
+    next.catch(() => void 0)
+  );
+  return next;
+}
+async function revParse(cwd, ref) {
+  try {
+    return (await git2(cwd, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])).trim() || null;
+  } catch {
+    return null;
+  }
+}
+async function identityArgs(cwd) {
+  const hasName = await gitOk(cwd, ["config", "user.name"]);
+  const hasEmail = await gitOk(cwd, ["config", "user.email"]);
+  return hasName && hasEmail ? [] : FALLBACK_IDENTITY;
+}
+async function removeWorktree(repoDir, dir) {
+  await git2(repoDir, ["worktree", "remove", "--force", dir]).catch(() => void 0);
+  rmSync2(dir, { recursive: true, force: true });
+  await git2(repoDir, ["worktree", "prune"]).catch(() => void 0);
+}
+async function checkIsolatable(repoDir) {
+  if (!await gitOk(repoDir, ["rev-parse", "--git-dir"])) {
+    throw new IsolationError(
+      `${repoDir} is not a git repository, so a task cannot be given its own branch there.`,
+      "NOT_A_REPOSITORY"
+    );
+  }
+  if (!await revParse(repoDir, "HEAD")) {
+    throw new IsolationError(
+      `${repoDir} has no commits yet. A task branch needs a commit to start from.`,
+      "NO_COMMITS"
+    );
+  }
+}
+async function prepareTaskWorkspace(repoDir, request, config = {}) {
+  const runBranch = runBranchName(request.runId);
+  const branch = taskBranchName(request.runId, request.taskCode);
+  const dir = join10(
+    worktreeRoot(config),
+    repoKey(repoDir),
+    refSafe(request.runId),
+    `task-${refSafe(request.taskCode)}`
+  );
+  const workspace = await withRepoLock(repoDir, async () => {
+    await checkIsolatable(repoDir);
+    try {
+      if (!await revParse(repoDir, `refs/heads/${runBranch}`)) {
+        await git2(repoDir, ["branch", runBranch, "HEAD"]);
+      }
+      const baseSha = await revParse(repoDir, `refs/heads/${runBranch}`);
+      if (existsSync12(dir)) await removeWorktree(repoDir, dir);
+      const previous = await revParse(repoDir, `refs/heads/${branch}`);
+      if (previous) {
+        let kept = `${branch}-attempt-${previous.slice(0, 8)}`;
+        for (let n = 2; await revParse(repoDir, `refs/heads/${kept}`); n++) {
+          kept = `${branch}-attempt-${previous.slice(0, 8)}-${n}`;
+        }
+        await git2(repoDir, ["branch", "-m", branch, kept]);
+      }
+      mkdirSync9(dirname6(dir), { recursive: true });
+      await git2(repoDir, ["worktree", "add", "-b", branch, dir, runBranch]);
+      return { repoDir, dir, branch, runBranch, baseSha, taskCode: request.taskCode };
+    } catch (error) {
+      if (error instanceof IsolationError) throw error;
+      throw new IsolationError(
+        `Could not create a working tree for task ${request.taskCode}: ${gitMessage(error)}`,
+        "GIT_FAILED"
+      );
+    }
+  });
+  if (config.setupCommand) {
+    try {
+      await execFileAsync2("/bin/sh", ["-c", config.setupCommand], {
+        cwd: workspace.dir,
+        timeout: config.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS,
+        maxBuffer: 32 * 1024 * 1024
+      });
+    } catch (error) {
+      await withRepoLock(repoDir, async () => {
+        await removeWorktree(repoDir, workspace.dir);
+        await git2(repoDir, ["branch", "-D", workspace.branch]).catch(() => void 0);
+      });
+      throw new IsolationError(
+        `The worktree setup command failed for task ${request.taskCode}: ${gitMessage(error)}`,
+        "SETUP_FAILED"
+      );
+    }
+  }
+  return workspace;
+}
+async function finishTaskWorkspace(workspace, options) {
+  const { repoDir, dir, branch, baseSha } = workspace;
+  return withRepoLock(repoDir, async () => {
+    let commitSha;
+    try {
+      await git2(dir, ["add", "-A"]);
+      if ((await git2(dir, ["status", "--porcelain"])).trim()) {
+        await git2(dir, [
+          ...await identityArgs(dir),
+          "commit",
+          "--no-verify",
+          "--no-gpg-sign",
+          "-m",
+          options.message
+        ]);
+      }
+      commitSha = await revParse(dir, "HEAD");
+      if (await revParse(repoDir, `refs/heads/${branch}`) !== commitSha) {
+        await git2(repoDir, ["update-ref", `refs/heads/${branch}`, commitSha]);
+      }
+    } catch (error) {
+      throw new IsolationError(
+        `Could not commit task ${workspace.taskCode}'s work. It is still in ${dir}: ${gitMessage(error)}`,
+        "GIT_FAILED"
+      );
+    }
+    try {
+      const filesModified = [];
+      const filesCreated = [];
+      const filesDeleted = [];
+      const diff = await git2(repoDir, [
+        "diff",
+        "--name-status",
+        "--no-renames",
+        "-z",
+        baseSha,
+        commitSha
+      ]);
+      const fields = diff.split("\0");
+      for (let i = 0; i + 1 < fields.length; i += 2) {
+        const status = fields[i];
+        const path = fields[i + 1];
+        if (!path) continue;
+        if (status.startsWith("A")) filesCreated.push(path);
+        else if (status.startsWith("D")) filesDeleted.push(path);
+        else filesModified.push(path);
+      }
+      return {
+        commitSha,
+        changed: commitSha !== baseSha,
+        filesModified,
+        filesCreated,
+        filesDeleted
+      };
+    } catch (error) {
+      throw new IsolationError(
+        `Task ${workspace.taskCode}'s work is committed on ${branch}, but its changes could not be read back: ${gitMessage(error)}`,
+        "GIT_FAILED"
+      );
+    } finally {
+      if (await gitOk(repoDir, ["worktree", "remove", dir])) {
+        rmSync2(dir, { recursive: true, force: true });
+      }
+    }
+  });
+}
+async function checkedOutAt(repoDir, branch) {
+  const out = await git2(repoDir, ["worktree", "list", "--porcelain"]);
+  let current = null;
+  for (const line of out.split("\n")) {
+    if (line.startsWith("worktree ")) current = line.slice("worktree ".length);
+    else if (line === `branch refs/heads/${branch}`) return current;
+  }
+  return null;
+}
+async function integrateRun(repoDir, request, config = {}) {
+  const runBranch = runBranchName(request.runId);
+  const dir = join10(worktreeRoot(config), repoKey(repoDir), refSafe(request.runId), "_integrate");
+  return withRepoLock(repoDir, async () => {
+    await checkIsolatable(repoDir);
+    const startSha = await revParse(repoDir, `refs/heads/${runBranch}`);
+    if (!startSha) {
+      throw new IsolationError(
+        `There is no run branch ${runBranch} in ${repoDir}. No task of this run was isolated here.`,
+        "RUN_BRANCH_MISSING"
+      );
+    }
+    const heldAt = await checkedOutAt(repoDir, runBranch);
+    if (heldAt) {
+      throw new IsolationError(
+        `${runBranch} is checked out in ${heldAt}. Switch that checkout to another branch so the wave's work can be merged into it.`,
+        "RUN_BRANCH_CHECKED_OUT"
+      );
+    }
+    const result = {
+      runBranch,
+      headSha: startSha,
+      merged: [],
+      conflicts: [],
+      missing: []
+    };
+    if (existsSync12(dir)) await removeWorktree(repoDir, dir);
+    mkdirSync9(dirname6(dir), { recursive: true });
+    try {
+      await git2(repoDir, ["worktree", "add", "--detach", dir, runBranch]);
+      const identity = await identityArgs(dir);
+      for (const taskCode of request.taskCodes) {
+        const branch = taskBranchName(request.runId, taskCode);
+        const commitSha = await revParse(repoDir, `refs/heads/${branch}`);
+        if (!commitSha) {
+          result.missing.push(taskCode);
+          continue;
+        }
+        if (await gitOk(dir, ["merge-base", "--is-ancestor", commitSha, "HEAD"])) {
+          result.merged.push({ taskCode, branch, commitSha, alreadyMerged: true });
+          continue;
+        }
+        try {
+          await git2(dir, [
+            ...identity,
+            "merge",
+            "--no-ff",
+            "--no-verify",
+            "--no-gpg-sign",
+            "-m",
+            `devpilot: merge task ${taskCode}`,
+            commitSha
+          ]);
+          result.merged.push({ taskCode, branch, commitSha, alreadyMerged: false });
+        } catch (error) {
+          const unmerged = await git2(dir, ["diff", "--name-only", "--diff-filter=U", "-z"]).catch(
+            () => ""
+          );
+          const files = unmerged.split("\0").filter(Boolean);
+          await git2(dir, ["merge", "--abort"]).catch(() => void 0);
+          await git2(dir, ["reset", "--hard", "--quiet"]).catch(() => void 0);
+          if (files.length === 0) {
+            throw new IsolationError(
+              `Merging task ${taskCode} into ${runBranch} failed: ${gitMessage(error)}`,
+              "GIT_FAILED"
+            );
+          }
+          result.conflicts.push({ taskCode, branch, files });
+        }
+      }
+      const headSha2 = await revParse(dir, "HEAD");
+      if (headSha2 !== startSha) {
+        try {
+          await git2(repoDir, ["update-ref", `refs/heads/${runBranch}`, headSha2, startSha]);
+        } catch (error) {
+          throw new IsolationError(
+            `${runBranch} changed while the wave was being merged; nothing was written. ${gitMessage(error)}`,
+            "RUN_BRANCH_MOVED"
+          );
+        }
+      }
+      result.headSha = headSha2;
+      return result;
+    } catch (error) {
+      if (error instanceof IsolationError) throw error;
+      throw new IsolationError(
+        `Could not merge into ${runBranch}: ${gitMessage(error)}`,
+        "GIT_FAILED"
+      );
+    } finally {
+      await removeWorktree(repoDir, dir);
+    }
+  });
+}
+function workspacePreamble(workspace, config = {}) {
+  return [
+    "# Your workspace",
+    "",
+    `You are in a git worktree made for this task, on the branch \`${workspace.branch}\`.`,
+    "Other tasks in this run each have their own. Nothing you do here reaches theirs,",
+    "and nothing they do reaches you, until DevPilot merges the wave.",
+    "",
+    "- Stay on this branch. Do not switch branches, rebase, push, or open a pull request.",
+    "- You do not need to commit. Whatever is in this directory when you finish is",
+    "  committed to the branch for you.",
+    config.setupCommand ? "- This is a fresh checkout that the operator's setup step has prepared. If something" : "- This is a fresh checkout: it has the tracked files only. Installed dependencies,",
+    config.setupCommand ? "  a command needs is still missing, say so in your final message rather than" : "  local env files and build output from the main checkout are not here. If a command",
+    config.setupCommand ? "  working around it." : "  fails because of that, say so in your final message rather than working around it.",
+    "",
+    "---",
+    ""
+  ].join("\n");
+}
+
 // src/commands/session-runner/server.ts
-var VERSION2 = "1.0.0";
+var VERSION2 = "1.1.0";
+var CAPABILITIES = ["isolation"];
+function commitSubject(taskCode, title) {
+  const line = (title ?? "").replace(/\s+/g, " ").trim();
+  const subject = line ? `devpilot(${taskCode}): ${line}` : `devpilot: task ${taskCode}`;
+  return subject.length > 72 ? `${subject.slice(0, 71)}\u2026` : subject;
+}
 function json(res, status, body) {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
@@ -3674,10 +4476,10 @@ var SessionRunner = class {
   resolveWorkdir(repo) {
     const mapped = this.config.repoMap.get(repo);
     if (mapped) {
-      return existsSync11(mapped) ? { workdir: mapped } : { error: `Mapped path for '${repo}' does not exist: ${mapped}` };
+      return existsSync13(mapped) ? { workdir: mapped } : { error: `Mapped path for '${repo}' does not exist: ${mapped}` };
     }
-    const candidate = isAbsolute(repo) ? repo : resolve2(this.config.workspace, basename2(repo));
-    if (!existsSync11(candidate)) {
+    const candidate = isAbsolute(repo) ? repo : resolve2(this.config.workspace, basename3(repo));
+    if (!existsSync13(candidate)) {
       return {
         error: `No checkout for '${repo}'. Tried ${candidate}. Pass --repo ${repo}=/path/to/checkout, or set --workspace.`
       };
@@ -3710,11 +4512,20 @@ var SessionRunner = class {
     const { callbackUrl, callbackToken } = request;
     try {
       session.status = "running";
+      let workspace;
+      if (request.isolation) {
+        workspace = await prepareTaskWorkspace(session.workdir, request.isolation, this.config.isolation);
+        session.branch = workspace.branch;
+        this.config.log(
+          `[${session.externalSessionId}] task ${request.isolation.taskCode} on ${workspace.branch} (from ${workspace.baseSha.slice(0, 8)})`
+        );
+      }
+      const rundir = workspace?.dir ?? session.workdir;
       session.progressPercent = 5;
       session.currentStep = "session started";
       this.reportStatus(session, callbackUrl, callbackToken, {
         currentStep: "session started",
-        message: `Claude Code session running in ${session.workdir}`
+        message: workspace ? `Claude Code session running on ${workspace.branch}` : `Claude Code session running in ${session.workdir}`
       });
       const heartbeat = setInterval(() => {
         if (session.terminal) return;
@@ -3727,8 +4538,8 @@ var SessionRunner = class {
       let lastReportAt = 0;
       const REPORT_INTERVAL_MS = 3e3;
       const outcome = await runClaudeSession({
-        workdir: session.workdir,
-        prompt: request.prompt,
+        workdir: rundir,
+        prompt: workspace ? workspacePreamble(workspace, this.config.isolation) + request.prompt : request.prompt,
         sessionLink: request.sessionLink,
         model: request.model,
         claudePath: this.config.claudePath,
@@ -3742,6 +4553,7 @@ var SessionRunner = class {
         permissionMode: this.config.permissionMode,
         resumeSessionId: request.resumeSessionId,
         timeoutMs: this.config.timeoutMs,
+        harness: this.config.harness,
         onLog: (line) => this.config.log(`[${session.externalSessionId}] ${line}`),
         onSpawn: (kill) => {
           session.kill = kill;
@@ -3763,6 +4575,30 @@ var SessionRunner = class {
         }
       });
       clearInterval(heartbeat);
+      if (workspace && request.isolation) {
+        try {
+          const result = await finishTaskWorkspace(workspace, {
+            message: `${commitSubject(request.isolation.taskCode, request.isolation.title)}
+
+Run: ${request.isolation.runId}
+Session: ${session.devpilotSessionId}
+` + (outcome.success ? "" : "The agent did not finish this task; this is what it left.\n")
+          });
+          outcome.filesModified = result.filesModified;
+          outcome.filesCreated = result.filesCreated;
+          outcome.filesDeleted = result.filesDeleted;
+          outcome.commitSha = result.commitSha;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          outcome.success = false;
+          outcome.error = outcome.error ? `${outcome.error}
+${message}` : message;
+          outcome.filesModified = [];
+          outcome.filesCreated = [];
+          outcome.filesDeleted = [];
+          outcome.commitSha = void 0;
+        }
+      }
       session.terminal = true;
       session.status = outcome.success ? "complete" : "error";
       session.progressPercent = outcome.success ? 100 : session.progressPercent;
@@ -3779,6 +4615,8 @@ var SessionRunner = class {
           sessionId: session.devpilotSessionId,
           success: outcome.success,
           commitSha: outcome.commitSha,
+          branch: workspace?.branch,
+          baseSha: workspace?.baseSha,
           filesModified: outcome.filesModified,
           filesCreated: outcome.filesCreated,
           filesDeleted: outcome.filesDeleted,
@@ -3787,6 +4625,7 @@ var SessionRunner = class {
           costUsd: outcome.costUsd,
           durationMinutes: outcome.durationMinutes,
           error: outcome.error,
+          telemetry: session.telemetry,
           metadata: request.metadata
         },
         callbackToken,
@@ -3849,6 +4688,13 @@ var SessionRunner = class {
       this.config.log(`create rejected: ${error}`);
       return json(res, 400, { error: "REPO_NOT_FOUND", message: error });
     }
+    if (body.isolation !== void 0) {
+      const refusal = await this.isolationRefusal(body, workdir);
+      if (refusal) {
+        this.config.log(`create rejected: ${refusal}`);
+        return json(res, 400, { error: "ISOLATION_UNAVAILABLE", message: refusal });
+      }
+    }
     const externalSessionId = `run_${randomUUID()}`;
     const session = {
       externalSessionId,
@@ -3871,6 +4717,65 @@ var SessionRunner = class {
     json(res, 201, { externalSessionId, status: "queued", createdAt: session.createdAt });
     void this.execute(session, body);
   }
+  /** Why an isolation request cannot be honoured, or null if it can. */
+  async isolationRefusal(body, workdir) {
+    const isolation = body.isolation;
+    if (!isolation || typeof isolation.runId !== "string" || typeof isolation.taskCode !== "string" || !isolation.runId || !isolation.taskCode) {
+      return "isolation needs a runId and a taskCode";
+    }
+    if (body.resumeSessionId) {
+      return "a resumed session runs where its conversation lives and cannot be isolated";
+    }
+    try {
+      refSafe(isolation.runId);
+      refSafe(isolation.taskCode);
+      await checkIsolatable(workdir);
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+    return null;
+  }
+  /**
+   * `POST /v1/integrate` — merge a wave's task branches into the run branch.
+   *
+   * Answers when the merge is done rather than calling back: it is a few ref
+   * updates, and the dispatcher needs the result (the new head, and which
+   * tasks conflicted) before it can decide what the next wave starts from.
+   */
+  async handleIntegrate(req, res) {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (error2) {
+      const message = error2 instanceof Error ? error2.message : "invalid JSON";
+      return json(res, 400, { error: "INVALID_PAYLOAD", message });
+    }
+    if (!body?.repo || typeof body.runId !== "string" || !body.runId || !Array.isArray(body.taskCodes) || body.taskCodes.some((code) => typeof code !== "string" || !code)) {
+      return json(res, 400, {
+        error: "INVALID_PAYLOAD",
+        message: "repo, runId and taskCodes are required"
+      });
+    }
+    const { workdir, error } = this.resolveWorkdir(body.repo);
+    if (!workdir) return json(res, 400, { error: "REPO_NOT_FOUND", message: error });
+    try {
+      const result = await integrateRun(
+        workdir,
+        { runId: body.runId, taskCodes: body.taskCodes },
+        this.config.isolation
+      );
+      this.config.log(
+        `integrate ${result.runBranch}: ${result.merged.length} merged, ${result.conflicts.length} conflicted, ${result.missing.length} missing -> ${result.headSha.slice(0, 8)}`
+      );
+      return json(res, 200, result);
+    } catch (error2) {
+      const message = error2 instanceof Error ? error2.message : String(error2);
+      this.config.log(`integrate failed: ${message}`);
+      if (!(error2 instanceof IsolationError)) return json(res, 500, { error: "INTERNAL", message });
+      const status = error2.code === "RUN_BRANCH_MISSING" ? 404 : error2.code === "RUN_BRANCH_CHECKED_OUT" || error2.code === "RUN_BRANCH_MOVED" ? 409 : error2.code === "GIT_FAILED" ? 500 : 400;
+      return json(res, status, { error: error2.code, message });
+    }
+  }
   handleGet(res, externalSessionId) {
     const session = this.sessions.get(externalSessionId);
     if (!session) return json(res, 404, { error: "NOT_FOUND" });
@@ -3880,7 +4785,8 @@ var SessionRunner = class {
       currentStep: session.currentStep,
       message: session.message,
       filesModified: session.filesModified,
-      tokensUsed: session.tokensUsed
+      tokensUsed: session.tokensUsed,
+      branch: session.branch
     });
   }
   async handleMessages(req, res, externalSessionId) {
@@ -3908,12 +4814,20 @@ var SessionRunner = class {
       return json(res, 200, {
         status: "healthy",
         version: VERSION2,
-        activeSessions: this.activeCount
+        activeSessions: this.activeCount,
+        // How many agents this runner will run at once. It is the fleet's
+        // capacity as a fact rather than a setting somebody typed into the
+        // cockpit, and the score's utilization dimension is a ratio against it.
+        maxConcurrent: this.config.maxConcurrent,
+        capabilities: CAPABILITIES
       });
     }
     if (!this.authorized(req)) return json(res, 401, { error: "UNAUTHORIZED" });
     if (path === "/v1/sessions" && req.method === "POST") {
       return this.handleCreate(req, res);
+    }
+    if (path === "/v1/integrate" && req.method === "POST") {
+      return this.handleIntegrate(req, res);
     }
     const match = path.match(/^\/v1\/sessions\/([^/]+)(\/messages|\/stop)?$/);
     if (match) {
@@ -3949,6 +4863,96 @@ var SessionRunner = class {
   }
 };
 
+// src/commands/session-runner/harness.ts
+import { mkdtempSync as mkdtempSync2, writeFileSync as writeFileSync11 } from "fs";
+import { tmpdir as tmpdir2 } from "os";
+import { join as join11 } from "path";
+var HARNESS_VERSION = 1;
+var TECHNIQUES = [
+  {
+    id: "strict-mcp",
+    summary: "Give the agent no MCP servers except the ones the dispatch supplies",
+    bucket: "fixed-overhead",
+    watch: "tool-not-found errors, or a task that needed a project MCP server failing",
+    args: (ctx) => {
+      if (ctx.hasMcpConfig) return [];
+      const file = join11(ctx.scratchDir(), "mcp-none.json");
+      writeFileSync11(file, JSON.stringify({ mcpServers: {} }), { mode: 384 });
+      return ["--mcp-config", file, "--strict-mcp-config"];
+    }
+  },
+  {
+    id: "no-skills",
+    summary: "Do not load skills into a worker \u2014 it has one scoped task",
+    bucket: "fixed-overhead",
+    watch: "a task failing because it relied on a project skill",
+    args: () => ["--disable-slash-commands"]
+  },
+  {
+    id: "stable-prefix",
+    summary: "Keep per-directory details out of the system prompt so worktrees share one cache entry",
+    bucket: "cache-writes",
+    watch: "no fall in first-turn cache writes across parallel tasks, or changed behaviour",
+    args: () => ["--exclude-dynamic-system-prompt-sections"]
+  },
+  {
+    id: "compact-200k",
+    summary: "Summarise history once the context passes 200k tokens, instead of near the window limit",
+    bucket: "context-size",
+    watch: "files being read again after a compaction, more turns, lower task success",
+    args: () => ["--autocompact", "200000"]
+  },
+  {
+    id: "budget-cap",
+    summary: "Stop a run that has spent more than DEVPILOT_HARNESS_MAX_BUDGET_USD at API rates",
+    bucket: "tail-cost",
+    watch: "legitimate long tasks being cut off before they finish",
+    args: () => {
+      const cap = Number(process.env.DEVPILOT_HARNESS_MAX_BUDGET_USD);
+      return Number.isFinite(cap) && cap > 0 ? ["--max-budget-usd", String(cap)] : [];
+    }
+  }
+];
+var PROFILES = {
+  baseline: [],
+  lean: ["strict-mcp", "no-skills", "stable-prefix"]
+};
+function resolveHarness(spec) {
+  const parts = (spec?.trim() || "baseline").split("+").map((p) => p.trim()).filter(Boolean);
+  const [profile, ...extras] = parts;
+  const base = PROFILES[profile];
+  if (!base) {
+    throw new Error(
+      `Unknown harness profile "${profile}". Profiles: ${Object.keys(PROFILES).join(", ")}. Techniques: ${TECHNIQUES.map((t) => t.id).join(", ")}.`
+    );
+  }
+  const ids = [.../* @__PURE__ */ new Set([...base, ...extras])];
+  const techniques = ids.map((id) => {
+    const technique = TECHNIQUES.find((t) => t.id === id);
+    if (!technique) {
+      throw new Error(
+        `Unknown harness technique "${id}". Techniques: ${TECHNIQUES.map((t) => t.id).join(", ")}.`
+      );
+    }
+    return technique;
+  });
+  const added = extras.filter((id) => !base.includes(id)).sort();
+  const stamp = `${[profile, ...new Set(added)].join("+")}@${HARNESS_VERSION}`;
+  return {
+    stamp,
+    techniques,
+    build({ hasMcpConfig }) {
+      let dir;
+      const ctx = {
+        hasMcpConfig,
+        scratchDir: () => dir ?? (dir = mkdtempSync2(join11(tmpdir2(), "devpilot-harness-")))
+      };
+      const args = techniques.flatMap((t) => t.args(ctx));
+      return { args, cleanupDir: dir };
+    }
+  };
+}
+
 // src/commands/session-runner/index.ts
 function parseRepoMap(values) {
   const map = /* @__PURE__ */ new Map();
@@ -3970,10 +4974,30 @@ var sessionRunnerCommand = new Command15("session-runner").description("Run Clau
   "--permission-mode <mode>",
   "claude --permission-mode (acceptEdits | bypassPermissions | plan)",
   "acceptEdits"
-).option("--max-concurrent <n>", "Max simultaneous sessions before answering 429", "3").option("--timeout <minutes>", "Wall-clock cap per session", "30").action(async (options) => {
+).option("--max-concurrent <n>", "Max simultaneous sessions before answering 429", "3").option("--timeout <minutes>", "Wall-clock cap per session", "30").option(
+  "--harness <spec>",
+  "How agents are configured: baseline | lean, optionally +technique (e.g. baseline+compact-200k)",
+  process.env.DEVPILOT_HARNESS || "baseline"
+).option(
+  "--worktree-root <dir>",
+  "Where per-task git worktrees are created (default ~/.devpilot/worktrees)",
+  process.env.DEVPILOT_WORKTREE_ROOT
+).option(
+  "--worktree-setup <command>",
+  'Shell command run in each new task worktree before its agent starts (e.g. "pnpm install --offline")',
+  process.env.DEVPILOT_WORKTREE_SETUP
+).action(async (options) => {
   let repoMap;
   try {
     repoMap = parseRepoMap(options.repo ?? []);
+  } catch (error) {
+    console.error(chalk17.red(error instanceof Error ? error.message : String(error)));
+    process.exitCode = 1;
+    return;
+  }
+  let harness;
+  try {
+    harness = resolveHarness(options.harness);
   } catch (error) {
     console.error(chalk17.red(error instanceof Error ? error.message : String(error)));
     process.exitCode = 1;
@@ -3989,6 +5013,11 @@ var sessionRunnerCommand = new Command15("session-runner").description("Run Clau
     permissionMode: options.permissionMode,
     maxConcurrent: parseInt(options.maxConcurrent, 10),
     timeoutMs: parseInt(options.timeout, 10) * 6e4,
+    harness,
+    isolation: {
+      worktreeRoot: options.worktreeRoot ? resolve3(options.worktreeRoot) : void 0,
+      setupCommand: options.worktreeSetup || void 0
+    },
     log: (line) => console.log(chalk17.dim(`[runner] ${line}`))
   };
   const runner = new SessionRunner(config);
@@ -4006,6 +5035,14 @@ var sessionRunnerCommand = new Command15("session-runner").description("Run Clau
   console.log(`  ${chalk17.dim("workspace")}   ${config.workspace}`);
   console.log(`  ${chalk17.dim("claude")}      ${config.claudePath} (${config.permissionMode})`);
   console.log(`  ${chalk17.dim("concurrency")} ${config.maxConcurrent}`);
+  console.log(`  ${chalk17.dim("harness")}     ${harness.stamp}`);
+  for (const t of harness.techniques) {
+    console.log(`  ${chalk17.dim("           ")} ${t.id}: ${t.summary}`);
+    console.log(chalk17.dim(`               watch for ${t.watch}`));
+  }
+  console.log(
+    `  ${chalk17.dim("worktrees")}   ${config.isolation?.worktreeRoot ?? "~/.devpilot/worktrees"}` + (config.isolation?.setupCommand ? chalk17.dim(` (setup: ${config.isolation.setupCommand})`) : chalk17.dim(" (no --worktree-setup: tracked files only)"))
+  );
   if (repoMap.size > 0) {
     for (const [repo, path] of repoMap) console.log(`  ${chalk17.dim("repo")}        ${repo} \u2192 ${path}`);
   }
@@ -4152,26 +5189,26 @@ var updateCommand = new Command16("update").description("Update DevPilot CLI to 
 
 // src/commands/wiki.ts
 import { Command as Command17 } from "commander";
-import { existsSync as existsSync12, mkdirSync as mkdirSync8, readFileSync as readFileSync9, writeFileSync as writeFileSync10 } from "fs";
-import { join as join10 } from "path";
+import { existsSync as existsSync14, mkdirSync as mkdirSync10, readFileSync as readFileSync10, writeFileSync as writeFileSync12 } from "fs";
+import { join as join12 } from "path";
 import chalk19 from "chalk";
 import { resolveWikiModel } from "@devpilot.sh/core/wave-planner";
 var wikiCommand = new Command17("wiki").description("LLM-compiled knowledge base \u2014 institutional memory for your codebase");
 wikiCommand.command("init").description("Initialize the wiki system in the current repository").option("--wiki-dir <path>", "Wiki output directory", ".devpilot/wiki").action(async (options) => {
   const cwd = process.cwd();
-  const devpilotDir = join10(cwd, ".devpilot");
-  const wikiDir = join10(cwd, options.wikiDir);
-  if (!existsSync12(devpilotDir)) {
+  const devpilotDir = join12(cwd, ".devpilot");
+  const wikiDir = join12(cwd, options.wikiDir);
+  if (!existsSync14(devpilotDir)) {
     console.log(
       chalk19.yellow("\u26A0\uFE0F  DevPilot not initialized. Run `devpilot init` first.")
     );
     return;
   }
-  if (!existsSync12(wikiDir)) {
-    mkdirSync8(wikiDir, { recursive: true });
+  if (!existsSync14(wikiDir)) {
+    mkdirSync10(wikiDir, { recursive: true });
   }
-  const indexPath = join10(wikiDir, "index.md");
-  if (!existsSync12(indexPath)) {
+  const indexPath = join12(wikiDir, "index.md");
+  if (!existsSync14(indexPath)) {
     const initialIndex = `# Wiki Index
 
 > Auto-generated wiki \u2014 compiled from session logs, commits, specs, and decisions.
@@ -4186,11 +5223,11 @@ This wiki will grow automatically as you work with DevPilot:
 
 Run \`devpilot wiki ingest\` to manually add sources, or let the session hook capture knowledge automatically.
 `;
-    writeFileSync10(indexPath, initialIndex);
+    writeFileSync12(indexPath, initialIndex);
   }
-  const logPath = join10(wikiDir, "log.md");
-  if (!existsSync12(logPath)) {
-    writeFileSync10(
+  const logPath = join12(wikiDir, "log.md");
+  if (!existsSync14(logPath)) {
+    writeFileSync12(
       logPath,
       `# Wiki Activity Log
 
@@ -4200,9 +5237,9 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
 `
     );
   }
-  const gitignorePath = join10(cwd, ".gitignore");
-  if (existsSync12(gitignorePath)) {
-    const gitignore = readFileSync9(gitignorePath, "utf-8");
+  const gitignorePath = join12(cwd, ".gitignore");
+  if (existsSync14(gitignorePath)) {
+    const gitignore = readFileSync10(gitignorePath, "utf-8");
     if (!gitignore.includes(".devpilot/wiki")) {
     }
   }
@@ -4230,13 +5267,13 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
 wikiCommand.command("ingest").description("Ingest a source document into the wiki").requiredOption("--type <type>", "Source type: session_log, commit, spec, decision, manual").requiredOption("--title <title>", "Human-readable title for the source").option("--file <path>", "Path to source file").option("--stdin", "Read source from stdin").option("--origin <origin>", "Origin identifier (e.g. session ID, commit SHA)").action(async (options) => {
   let content;
   if (options.file) {
-    if (!existsSync12(options.file)) {
+    if (!existsSync14(options.file)) {
       console.log(chalk19.red(`\u274C File not found: ${options.file}`));
       return;
     }
-    content = readFileSync9(options.file, "utf-8");
+    content = readFileSync10(options.file, "utf-8");
   } else if (options.stdin) {
-    content = readFileSync9(0, "utf-8");
+    content = readFileSync10(0, "utf-8");
   } else {
     console.log(
       chalk19.red("\u274C Provide either --file <path> or --stdin")
@@ -4503,7 +5540,7 @@ function getWikiConfig() {
     model: resolveWikiModel(),
     maxTokens: parseInt(process.env.WIKI_MAX_TOKENS || "8192", 10),
     repo: getRepoName(cwd),
-    wikiDir: join10(cwd, ".devpilot", "wiki")
+    wikiDir: join12(cwd, ".devpilot", "wiki")
   };
 }
 function getRepoName(cwd) {

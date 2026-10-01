@@ -15,9 +15,19 @@ export { HeartbeatService, type HeartbeatConfig } from './heartbeat';
 export {
   SharedSessionClient,
   type SharedSessionJoinOptions,
+  type SharedSessionCreateOptions,
   type TranscriptEntry,
   type EntryStatus,
 } from './shared-session';
+export {
+  DEFAULT_BRIDGE_URL,
+  bridgeCredentialsPath,
+  loadBridgeCredentials,
+  saveBridgeCredentials,
+  clearBridgeCredentials,
+  resolveBridgeCredentials,
+  type BridgeCredentials,
+} from './credentials';
 
 /** @deprecated Removed in 0.2.0 — throws with upgrade instructions. */
 export { PubSubSubscriber } from './pubsub';

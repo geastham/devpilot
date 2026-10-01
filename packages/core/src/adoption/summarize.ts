@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { ADOPTION_LIMITS } from '@devpilot.sh/bridge-protocol';
 import { resolveWikiModel } from '../wave-planner/models';
-import { condenseTitle, heuristicTitle } from './scanner';
+import { condenseTitle, heuristicTitle, isContinuationPreamble } from './scanner';
 import type { SessionObservation } from './transcript';
 
 /**
@@ -74,9 +74,13 @@ export function heuristicSummary(observation: SessionObservation): SessionSummar
   const title = heuristicTitle(observation);
   const prompt = observation.firstHumanPrompt?.trim();
 
-  // Only worth including when it says more than the title already did.
+  // Only worth including when it says more than the title already did — and
+  // never when the "prompt" is Claude Code's note that a compacted session is
+  // carrying on. What follows that note is a digest of the earlier
+  // conversation: not the person's request, and a good deal more of the
+  // session than a summary line should be sending anywhere.
   const summary =
-    prompt && prompt.length > title.length
+    prompt && prompt.length > title.length && !isContinuationPreamble(prompt)
       ? condenseTitle(`Session opened with: ${prompt}`, ADOPTION_LIMITS.MAX_SUMMARY_CHARS)
       : undefined;
 

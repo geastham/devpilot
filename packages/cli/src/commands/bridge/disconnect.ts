@@ -1,46 +1,42 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
+import {
+  bridgeCredentialsPath,
+  clearBridgeCredentials,
+  loadBridgeCredentials,
+} from '@devpilot.sh/bridge-client';
 
+/**
+ * `devpilot bridge disconnect` — forget this machine's bridge credentials.
+ *
+ * This used to send `DELETE /api/orchestrators/:id` with an "API key". The
+ * bridge has no such route and no such credential, so the command could only
+ * ever fail, after asking for an orchestrator id nobody had to hand.
+ *
+ * What a person running it wants is for this machine to stop being able to
+ * connect. Two things make that true, and only one of them is local:
+ *
+ *   - the token saved on this machine is removed — done here
+ *   - the token itself is revoked — done in the dashboard, because revoking is
+ *     an admin's decision and a machine token cannot revoke itself
+ *
+ * A running `bridge connect` is a separate process; stopping it is Ctrl+C.
+ */
 export const disconnectCommand = new Command('disconnect')
-  .description('Disconnect from DevPilot cloud bridge')
-  .option('-u, --bridge-url <url>', 'Bridge service URL', process.env.DEVPILOT_BRIDGE_URL)
-  .option('-k, --api-key <key>', 'API key', process.env.DEVPILOT_BRIDGE_API_KEY)
-  .option('-i, --orchestrator-id <id>', 'Orchestrator ID to disconnect')
-  .action(async (options) => {
-    if (!options.bridgeUrl || !options.orchestratorId) {
-      console.error(chalk.red('✗ Error: Bridge URL and orchestrator ID required'));
-      console.error(chalk.gray('   Use: devpilot bridge disconnect -u <url> -i <orchestrator-id>'));
-      process.exit(1);
+  .description('Forget the bridge URL and token saved on this machine')
+  .action(async () => {
+    const saved = loadBridgeCredentials();
+    clearBridgeCredentials();
+
+    if (saved) {
+      console.log(chalk.green('✓ Forgot the saved token for ') + chalk.gray(saved.url));
+    } else {
+      console.log(chalk.gray(`Nothing was saved at ${bridgeCredentialsPath()}.`));
     }
-
-    console.log(chalk.cyan('🌉 Disconnecting from DevPilot Bridge'));
     console.log('');
-    console.log(chalk.gray(`   Bridge URL: ${options.bridgeUrl}`));
-    console.log(chalk.gray(`   Orchestrator ID: ${options.orchestratorId}`));
+    console.log(chalk.gray('  The token still works for anyone who has a copy of it. To end that,'));
+    console.log(chalk.gray('  revoke it in the dashboard under Settings → Tokens — it stops being'));
+    console.log(chalk.gray('  accepted on the very next request.'));
+    console.log(chalk.gray('  A bridge that is running now keeps running until you stop it (Ctrl+C).'));
     console.log('');
-
-    try {
-      const response = await fetch(
-        `${options.bridgeUrl}/api/orchestrators/${options.orchestratorId}`,
-        {
-          method: 'DELETE',
-          headers: {
-            'Authorization': `Bearer ${options.apiKey}`,
-          },
-        }
-      );
-
-      if (response.ok) {
-        console.log(chalk.green('✓ Successfully disconnected from bridge'));
-      } else {
-        const errorText = await response.text();
-        console.error(chalk.red('✗ Failed to disconnect:'));
-        console.error(chalk.red(`   ${errorText}`));
-        process.exit(1);
-      }
-    } catch (error) {
-      console.error(chalk.red('✗ Error disconnecting:'));
-      console.error(chalk.red(`   ${error instanceof Error ? error.message : error}`));
-      process.exit(1);
-    }
   });

@@ -315,7 +315,20 @@ export interface PredecessorSummary {
   taskCode: string;
   description: string;
   filesModified: string[];
+  /**
+   * Where `filesModified` came from: `'changed'` when it is git's diff of the
+   * task's own branch (an isolated task — exact), `'touched'` when the session
+   * runner reported the files the task wrote to, `'scoped'` when all that is
+   * known is which files the plan assigned it. Absent means `'scoped'`.
+   */
+  filesSource?: 'changed' | 'touched' | 'scoped';
   completionSummary: string;
+  /**
+   * True when the task's branch has been merged into the run branch, so its
+   * work is in the checkout a later task is given. Absent otherwise — including
+   * for every task of a plan that is not isolated.
+   */
+  merged?: boolean;
 }
 
 export interface WavePlanExecutionState {

@@ -11,6 +11,7 @@ export function useFleetState() {
   const setSessions = useFleetStore((state) => state.setSessions);
   const setScore = useFleetStore((state) => state.setScore);
   const setRunway = useFleetStore((state) => state.setRunway);
+  const setFleetCapacity = useFleetStore((state) => state.setFleetCapacity);
   const setActivityEvents = useFleetStore((state) => state.setActivityEvents);
 
   const fetchFleetState = useCallback(async () => {
@@ -60,18 +61,18 @@ export function useFleetState() {
         setRunway(state.runway.hours);
       }
 
+      // Null when neither the operator nor the runner has said how many agents
+      // the fleet can run — in which case nothing is shown as a share of it.
+      setFleetCapacity(
+        typeof state.fleet?.maxSessions === 'number' ? state.fleet.maxSessions : null
+      );
+
       // Set conductor score
+      // Passed through as computed. An unmeasured dimension arrives as null
+      // and must stay null: this used to `|| 0` every dimension, which is how
+      // "no data" became "zero points" on its way to the screen.
       if (state.conductorScore) {
-        const score: ConductorScore = {
-          total: state.conductorScore.total,
-          fleetUtilization: state.conductorScore.breakdown?.fleetUtilization || 0,
-          runwayHealth: state.conductorScore.breakdown?.runwayHealth || 0,
-          planAccuracy: state.conductorScore.breakdown?.planAccuracy || 0,
-          costEfficiency: state.conductorScore.breakdown?.costEfficiency || 0,
-          velocityTrend: state.conductorScore.breakdown?.velocityTrend || 0,
-          leaderboardRank: state.conductorScore.leaderboardRank,
-        };
-        setScore(score);
+        setScore(state.conductorScore as ConductorScore);
       }
 
       // Set activity events
@@ -92,7 +93,7 @@ export function useFleetState() {
     } catch (error) {
       console.error('Failed to fetch fleet state:', error);
     }
-  }, [setSessions, setScore, setRunway, setActivityEvents]);
+  }, [setSessions, setScore, setRunway, setFleetCapacity, setActivityEvents]);
 
   // Fetch on mount
   useEffect(() => {

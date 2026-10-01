@@ -3,39 +3,50 @@
 import { cn } from '@/lib/utils';
 import { Dropdown } from '@/components/ui/dropdown';
 import type { ConductorScore } from '@/types';
-// Subpath import, NOT the barrel. This is a client component, and
-// `@devpilot.sh/core` pulls better-sqlite3 and node:fs into the browser bundle.
-import * as scoreModel from '@devpilot.sh/core/score';
 
 interface ConductorScorePillProps {
   score: ConductorScore;
 }
 
+const METHOD_URL =
+  'https://github.com/devpilot-sh/devpilot-core/blob/main/docs/CONDUCTOR-SCORE.md';
+
+function windowLabel(hours: number): string {
+  if (hours <= 0) return '';
+  if (hours % 24 === 0) {
+    const days = hours / 24;
+    return days === 1 ? 'the last 24 hours' : `the last ${days} days`;
+  }
+  return `the last ${hours} hours`;
+}
+
 /**
- * The score breakdown — DESIGN.md §8.2's "expanded card", minus the sparklines.
+ * The score, and its working.
  *
- * The pill showed a bare `742` and its tooltip promised a breakdown that no
- * click could open, because the button had no handler.
+ * WHAT THIS USED TO SHOW. A bare `742 / 1000` and five bars, read from a row of
+ * counters that started every install on 500 points and added fifteen for each
+ * completed task. No dimension was computed by its method, and a dimension
+ * with no data behind it was drawn as a bar like any other.
  *
- * Dimensions and maxima now come from `SCORE_MODEL` (TRD 16) rather than the
- * local table that used to live here. That table was one of four independent
- * copies of the maxima, and rendering it is what exposed the divergence: a
- * seeded `velocityTrend` of 138 drawn against a specified cap of 100.
+ * WHAT IT SHOWS NOW. The six dimensions as `/api/fleet/state` computed them
+ * from recorded events, and for each one either its points or the sentence
+ * saying why it could not be measured. Two rules it must not break:
  *
- * No sparklines: no score history is plumbed into the fleet store, and a
- * fabricated trend line is worse than none.
+ * - The total is out of `measuredMax`, never out of 1000 unless every
+ *   dimension was measured. "140 / 1000" would present four unmeasured
+ *   dimensions as four zeros.
+ * - An unmeasured dimension has no bar. An empty bar is a drawing of zero.
+ *
+ * No tier colours either. The pill used to glow at 800 and turn amber below
+ * 500; a threshold on a partial total would colour the amount of data, and the
+ * footer's "800+ means your planning is comfortably ahead" was not something
+ * anybody had measured.
  */
 export function ConductorScorePill({ score }: ConductorScorePillProps) {
-  const { total } = score;
-
-  // Determine score tier for styling
-  const tier = total >= 800 ? 'high' : total >= 500 ? 'medium' : 'low';
-
-  const tierStyles = {
-    high: 'bg-gradient-to-r from-purple-600 to-purple-500 shadow-glow-purple',
-    medium: 'bg-purple-700',
-    low: 'bg-purple-900 text-accent-amber',
-  };
+  const { total, measuredMax, max, complete, dimensions } = score;
+  const measured = dimensions.filter((d) => d.value !== null).length;
+  const hasScore = measuredMax > 0;
+  const period = windowLabel(score.windowHours);
 
   return (
     <Dropdown
@@ -45,63 +56,96 @@ export function ConductorScorePill({ score }: ConductorScorePillProps) {
           className={cn(
             'flex items-center gap-2 rounded-full px-3 py-1.5 transition-all',
             'hover:scale-105',
-            tierStyles[tier]
+            hasScore ? 'bg-purple-700' : 'bg-white/5'
           )}
-          aria-label={`Conductor score ${total} of ${scoreModel.SCORE_TOTAL}. Open breakdown.`}
+          aria-label={
+            hasScore
+              ? `Conductor score ${total} of ${measuredMax}${complete ? '' : ' measured'}. Open breakdown.`
+              : 'Conductor score: nothing measured yet. Open breakdown.'
+          }
         >
           <span className="text-xs text-white/80">Score:</span>
-          <span className="text-sm font-bold text-white">{total}</span>
+          {hasScore ? (
+            <span className="text-sm font-bold tabular-nums text-white">
+              {total}
+              <span className="font-normal text-white/60"> / {measuredMax}</span>
+            </span>
+          ) : (
+            <span className="text-sm font-bold text-white/60">—</span>
+          )}
         </button>
       }
     >
-      <div className="w-[300px] p-4">
-        <p className="text-sm font-semibold text-text-primary">
-          Conductor Score
-        </p>
+      <div className="w-[320px] p-4">
+        <p className="text-sm font-semibold text-text-primary">Conductor Score</p>
         <p className="mt-0.5 text-xs text-text-secondary">
-          Planning throughput — whether you are staying ahead of your own fleet.
+          How the fleet was run{period ? ` over ${period}` : ''}, from what this
+          cockpit recorded.
         </p>
 
         <div className="mt-3 flex items-baseline gap-1.5">
           <span className="text-2xl font-bold tabular-nums text-text-primary">
-            {total}
+            {hasScore ? total : '—'}
           </span>
-          <span className="text-xs text-text-muted">/ {scoreModel.SCORE_TOTAL}</span>
+          {hasScore && (
+            <span className="text-xs text-text-muted">
+              of {measuredMax}
+              {complete ? '' : ' measured'}
+            </span>
+          )}
         </div>
+        <p className="mt-1 text-xs leading-snug text-text-muted">
+          {dimensions.length === 0
+            ? 'Not computed yet.'
+            : complete
+              ? `All ${dimensions.length} dimensions measured.`
+              : `${measured} of ${dimensions.length} dimensions measured. The rest have no data yet and count for nothing — not for zero.`}
+        </p>
 
         <div className="mt-3 space-y-2.5">
-          {scoreModel.SCORE_MODEL.map(({ key, label, max, meaning }) => {
-            const value =
-              (score as unknown as Record<string, number | undefined>)[key] ?? 0;
-            const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0;
-
-            return (
-              <div key={key}>
-                <div className="flex items-baseline justify-between gap-2">
-                  <span className="text-xs text-text-primary">{label}</span>
-                  <span className="shrink-0 text-xs tabular-nums text-text-secondary">
-                    {Math.round(value)}
-                    <span className="text-text-muted"> / {max}</span>
-                  </span>
-                </div>
+          {dimensions.map(({ key, label, max: dimensionMax, meaning, value, unmeasured }) => (
+            <div key={key}>
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="text-xs text-text-primary">{label}</span>
+                <span className="shrink-0 text-xs tabular-nums text-text-secondary">
+                  {value === null ? (
+                    <span className="text-text-muted">not measured</span>
+                  ) : (
+                    <>
+                      {value}
+                      <span className="text-text-muted"> / {dimensionMax}</span>
+                    </>
+                  )}
+                </span>
+              </div>
+              {value !== null && (
                 <div className="mt-1 h-1 overflow-hidden rounded-full bg-white/5">
                   <div
                     className="h-full rounded-full bg-accent-purple"
-                    style={{ width: `${pct}%` }}
+                    style={{ width: `${dimensionMax > 0 ? Math.min(100, (value / dimensionMax) * 100) : 0}%` }}
                   />
                 </div>
-                <p className="mt-1 text-xs leading-snug text-text-muted">
-                  {meaning}
-                </p>
-              </div>
-            );
-          })}
+              )}
+              <p className="mt-1 text-xs leading-snug text-text-muted">
+                {value === null ? (unmeasured ?? meaning) : meaning}
+              </p>
+            </div>
+          ))}
         </div>
 
         <p className="mt-3 border-t border-border-default pt-2 text-xs leading-snug text-text-muted">
-          800+ means your planning is comfortably ahead of the fleet.
-          {score.leaderboardRank !== null &&
-            ` Ranked #${score.leaderboardRank}.`}
+          {complete
+            ? `Out of ${max}. `
+            : 'A partial score is a personal reading; only one with every dimension measured can be compared with another. '}
+          <a
+            href={METHOD_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="underline hover:text-text-secondary"
+          >
+            How each dimension is computed
+          </a>
+          .
         </p>
       </div>
     </Dropdown>

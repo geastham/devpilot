@@ -1,35 +1,34 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { TranscriptEntry } from '@devpilot.sh/bridge-client';
+import { SharedSessionClient, TranscriptEntry } from '@devpilot.sh/bridge-client';
 
-/**
- * @devpilot.sh/mcp-session — TRD 06 §6.2, T6-AC-10.
- *
- * An MCP server that lets a local coding agent take part in a shared session.
- * Claude Code loads it the way it loads any other MCP server; nothing about
- * Claude Code changes, which is the point of T6-AC-10.
- *
- * ─── THE AGENT CHOOSES WHEN TO LOOK ─────────────────────────────────────────
- *
- * DevPilot does not drive the agent. These tools are available the way a file
- * read is available — the model calls them when the conversation warrants it.
- * There is no push, no polling loop, and no wake-up.
- *
- * That is DECISION A (§3.3) expressed in the shape of the integration rather
- * than in a config flag: an agent that is never woken cannot hold an unbounded
- * conversation with another agent at 3am. `read` reports the session `mode` so
- * the model can tell whether replying on its own is expected at all, and the
- * tool descriptions say so in the words the model actually reads.
- *
- * ─── THE KEY NEVER LEAVES THIS PROCESS ──────────────────────────────────────
- *
- * It arrives in the link fragment, lives in a private field of
- * SharedSessionClient, and is used only to encrypt and decrypt locally. It is
- * never written to disk, never sent to devpilot.sh, and never rendered into a
- * tool result — including error messages, which is why join failures report a
- * status rather than echoing the link back.
- */
+interface Clipboard {
+    /** True when the text is now on the clipboard. */
+    write(text: string): boolean;
+    /** The clipboard's text, or null when it cannot be read. */
+    read(): string | null;
+}
 
 declare const SERVER_NAME = "devpilot-session";
+declare const SERVER_VERSION = "0.3.0";
+/** Everything the tools reach outside this process for. Injected in tests. */
+interface ToolDeps {
+    env: NodeJS.ProcessEnv;
+    clipboard: Clipboard;
+    /** Where handoff files go; owner-only. */
+    handoffDir: string;
+    /** Saved bridge credentials file. Undefined means the default location. */
+    credentialsPath?: string;
+    hostname: string;
+    fetchImpl?: typeof fetch;
+    /** Poll interval for `wait`. Overridden in tests so they do not sleep. */
+    waitIntervalMs?: number;
+}
+/** The one joined session, and how far this agent has read. Nothing persisted. */
+interface State {
+    client: SharedSessionClient | null;
+    /** Highest seq this agent has been shown. `wait` resumes from here. */
+    cursor: number;
+}
 /**
  * Renders a transcript for a model to read.
  *
@@ -39,9 +38,73 @@ declare const SERVER_NAME = "devpilot-session";
  * §1.1 says copy-pasting into Slack already causes.
  */
 declare function renderTranscript(entries: TranscriptEntry[], names: Map<string, string>): string;
-declare function createServer(): McpServer;
+/**
+ * The tool handlers, apart from their registration.
+ *
+ * Separate so they can be exercised directly against a fake bridge. The MCP
+ * wiring below is then only schemas and descriptions — and the descriptions
+ * are the part worth reading closely, because they are the whole of what a
+ * model knows about when to use each tool.
+ */
+declare function createTools(overrides?: Partial<ToolDeps>): {
+    state: State;
+    join(input: {
+        url?: string;
+        displayName?: string;
+    }): Promise<{
+        content: {
+            type: "text";
+            text: string;
+        }[];
+    }>;
+    share(input: {
+        title: string;
+        context: string;
+        mode?: "observe" | "relay" | "auto";
+        autoBudget?: number;
+        autoTtlMinutes?: number;
+        displayName?: string;
+        deliver?: "clipboard" | "file" | "inline";
+    }): Promise<{
+        content: {
+            type: "text";
+            text: string;
+        }[];
+    }>;
+    read(input: {
+        since?: number;
+    }): Promise<{
+        content: {
+            type: "text";
+            text: string;
+        }[];
+    }>;
+    wait(input: {
+        since?: number;
+        timeoutSeconds?: number;
+    }): Promise<{
+        content: {
+            type: "text";
+            text: string;
+        }[];
+    }>;
+    post(input: {
+        message: string;
+        kind?: "chat" | "agent_output";
+    }): Promise<{
+        content: {
+            type: "text";
+            text: string;
+        }[];
+    }>;
+    who(): Promise<{
+        content: {
+            type: "text";
+            text: string;
+        }[];
+    }>;
+};
+declare function createServer(overrides?: Partial<ToolDeps>): McpServer;
 declare function main(): Promise<void>;
-/** Exposed for tests; resets the in-memory session. */
-declare function __resetForTests(): void;
 
-export { SERVER_NAME, __resetForTests, createServer, main, renderTranscript };
+export { SERVER_NAME, SERVER_VERSION, type ToolDeps, createServer, createTools, main, renderTranscript };

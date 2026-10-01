@@ -9,10 +9,16 @@
  * `WaveExecutionController`, which loads the wave's tasks, checks fleet
  * capacity and drives `WaveDispatchCoordinator` — the path verified end to end
  * with two real Claude Code sessions. What the graph supersedes is the
- * controller's *orchestration*: `approve`, `onTaskComplete`,
- * `handleWaveComplete` and `onTaskFailed` decided sequencing from inside
- * callbacks, and those decisions are now edges in the graph. The controller
- * remains as the effects library underneath.
+ * controller's *orchestration*: `approve`, `onTaskComplete` and
+ * `handleWaveComplete` decided sequencing from inside callbacks, and those
+ * decisions are now edges in the graph. The controller remains as the effects
+ * library underneath.
+ *
+ * For a plan this graph runs, the graph is the ONLY thing that decides a wave
+ * is over, starts the next one, backfills a wave when a slot frees, or ends the
+ * run. `src/lib/orchestrator.ts` tells the execution bridge so (it registers
+ * the graph as the plan's `WaveDriver`); the bridge then records task state and
+ * notifies, and every dispatch for the plan goes through `dispatchWave` below.
  *
  * The langchain dependency stops here, in the Next app. It is deliberately NOT
  * in `@devpilot.sh/core`, which every CLI install pulls down.
@@ -39,7 +45,7 @@ import { getWaveExecutionConfig, getServerOrchestrator } from './orchestrator';
 import { mempalace } from '@devpilot.sh/core';
 import { memoryConfigFromEnv, wingSlugForRepo } from './conductor-memory';
 import { db, wavePlans } from '@/lib/db';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 
 export interface DevPilotPortsOptions {
   apiKey: string;
@@ -173,25 +179,70 @@ export function createDevPilotPorts(options: DevPilotPortsOptions): ConductorPor
       // reports success, changes no task status, and starts no agent.
       getServerOrchestrator();
 
-      const result = await controller.dispatchWave(wavePlanId, waveIndex);
-
-      // Move the plan out of `approved` the moment work actually goes out, and
-      // keep the wave pointer in the row rather than only in graph state — the
-      // cockpit and the hosted plane both read this table, not the checkpoint.
+      // Adopting a plan that was generated outside the conductor: handing it to
+      // the graph is the approval. Only from `draft` — this used to write
+      // `executing` unconditionally after every dispatch, which is how a plan
+      // that had just been FAILED was put back to `executing` by the wave retry
+      // that followed, and the run then waited forever on a wave with nothing
+      // left to dispatch.
       await db
         .update(wavePlans)
-        .set({ status: 'executing', currentWaveIndex: waveIndex })
-        .where(eq(wavePlans.id, wavePlanId));
+        .set({ status: 'approved' })
+        .where(and(eq(wavePlans.id, wavePlanId), eq(wavePlans.status, 'draft')));
+
+      // `driveWave` moves the plan to `executing` on its first dispatch, keeps
+      // the wave pointer in the row rather than only in graph state — the
+      // cockpit and the hosted plane both read this table, not the checkpoint —
+      // and reports `settled` when the wave is already over, so the graph does
+      // not suspend on a wave nothing will ever report on.
+      //
+      // "Already over" is asked through the controller's wave gate. For a plan
+      // whose tasks each have their own branch, a wave found finished here —
+      // a run re-entered after a restart — is merged into the run branch
+      // before `settled` says so, and so before the graph moves to the next.
+      const result = await controller.driveWave(wavePlanId, waveIndex);
       return {
         dispatched: result.dispatched,
         queued: result.queued,
         errors: result.errors ?? [],
+        ...(result.settled ? { settled: result.settled } : {}),
       };
+    },
+
+    /**
+     * Write the run's ending where everything else reads it.
+     *
+     * The execution bridge used to mark a plan `completed` when its last wave
+     * finished. It no longer does for a plan the graph runs — that was the
+     * second driver — so this is now the only thing that will.
+     *
+     * A failed run has normally been failed already, by the task that ended it
+     * (`failPlan` keeps that first, more specific reason and returns false
+     * here). This covers the cases where the graph decided: a wave reported
+     * failed under a configuration the controller did not halt on.
+     */
+    async endRun(wavePlanId, result) {
+      if (result.status === 'failed') {
+        await controller.failPlan(wavePlanId, result.reason);
+        return;
+      }
+
+      if (!(await controller.completePlan(wavePlanId))) {
+        // The graph says complete and the row would not move — it was failed,
+        // or completed already. Say so; do not overwrite it.
+        const plan = await db.query.wavePlans.findFirst({ where: eq(wavePlans.id, wavePlanId) });
+        if (plan?.status !== 'completed') {
+          console.error(
+            `Conductor run finished, but wave plan ${wavePlanId} is '${plan?.status ?? 'missing'}' and was left as it is.`
+          );
+        }
+      }
     },
 
     // `waitForWave` is intentionally absent. A wave is a fleet of coding agents
     // running for minutes to hours; the graph interrupts instead, and the
-    // orchestrator completion callbacks resume it. See docs/CONDUCTOR-AGENT.md.
+    // execution bridge resumes it (`conductor-resume.ts`) as tasks report. See
+    // docs/CONDUCTOR-AGENT.md.
 
     onEvent: options.onEvent,
   };

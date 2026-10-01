@@ -66,6 +66,25 @@ describe('summarizeSession', () => {
     expect(result.summary).toBeUndefined();
   });
 
+  /**
+   * A compacted session's first "prompt" is Claude Code's own note, followed
+   * by a digest of the conversation so far. Neither is the person's request.
+   */
+  it('does not send a compaction digest as the summary', async () => {
+    const result = await summarizeSession(
+      observation({
+        customTitle: null,
+        firstHumanPrompt:
+          'This session is being continued from a previous conversation that ran out of context. ' +
+          'The summary below covers the earlier portion: the user asked to rotate the signing key and …',
+      }),
+      [],
+      { apiKey: undefined },
+    );
+    expect(result.title).toBe('Agent session deadbeef');
+    expect(result.summary).toBeUndefined();
+  });
+
   it('keeps the heuristic body inside the wire limit', async () => {
     const result = await summarizeSession(
       observation({ customTitle: 'x', firstHumanPrompt: 'y'.repeat(5000) }),

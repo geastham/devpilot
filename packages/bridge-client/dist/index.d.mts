@@ -87,14 +87,30 @@ interface SessionCommandMessage {
  */
 interface MirroredTelemetry {
     toolCalls: number;
-    /** Repo-relative paths. */
+    /** Of those, how many changed a file. */
+    writeCalls?: number;
+    /** Repo-relative paths the session has written or edited. */
     filesTouched: string[];
     currentAction?: string;
     costUsd?: number;
     costEstimated?: boolean;
+    /** Input tokens processed fresh — not served from the prompt cache. */
     tokensIn?: number;
     tokensOut?: number;
+    /** Input tokens served from the prompt cache. */
+    tokensCacheRead?: number;
+    /** Input tokens written to the prompt cache. */
+    tokensCacheWrite?: number;
+    /** Model responses, one per message id. */
     turns?: number;
+    /** The model that processed most of the session's tokens. */
+    model?: string;
+    /**
+     * Which DevPilot harness profile launched the agent, e.g. `lean@1`. Absent
+     * for a session DevPilot did not start — it ran under whatever its owner
+     * configured, and DevPilot does not know what that was.
+     */
+    harness?: string;
     elapsedMs?: number;
     idleMs?: number;
 }
@@ -358,6 +374,23 @@ declare class HeartbeatService {
  *                 complete when it is not, which is worse than a visible gap.
  */
 
+type ParticipantOptions = Pick<SharedSessionJoinOptions, 'displayName' | 'kind' | 'agentKind' | 'orchestratorId' | 'fetchImpl'>;
+interface SharedSessionCreateOptions extends ParticipantOptions {
+    /** Bridge base URL, e.g. `https://devpilot.sh`. */
+    baseUrl: string;
+    /** Machine token (`dp_orch_…`). The session is created in that token's org. */
+    token: string;
+    /** Stored in plaintext — it is the list label. No secrets. */
+    title: string;
+    linearIdentifier?: string;
+    /**
+     * `observe` unless asked otherwise (TRD 06 §3.3, DECISION A). `auto` is
+     * always bounded: omitted bounds take the protocol defaults, never infinity.
+     */
+    mode?: 'observe' | 'relay' | 'auto';
+    autoBudget?: number;
+    autoTtlMinutes?: number;
+}
 interface SharedSessionJoinOptions {
     /** `https://devpilot.sh/s/<id>#k=<key>` — the fragment carries the key. */
     link: string;
@@ -391,6 +424,20 @@ declare class SharedSessionClient {
     private constructor();
     /** Joins by link. The key is taken from the fragment and kept in memory. */
     static join(options: SharedSessionJoinOptions): Promise<SharedSessionClient>;
+    /**
+     * Creates a session, joins it, and returns the link — the path that lets an
+     * agent START a shared session instead of only being handed one.
+     *
+     * The key is generated here. What reaches the bridge is sha256(verifier), a
+     * separate HKDF branch that can neither join nor decrypt, exactly as
+     * `devpilot session new` does it. The returned `link` is the only place the
+     * key appears outside this instance, and the caller is responsible for where
+     * it goes next: it is a credential, not a status string.
+     */
+    static create(options: SharedSessionCreateOptions): Promise<{
+        client: SharedSessionClient;
+        link: string;
+    }>;
     get participantId(): string;
     get session(): SharedSession;
     /** Encrypts locally, then posts. The bridge sees only ciphertext. */
@@ -403,6 +450,26 @@ declare class SharedSessionClient {
         entries: TranscriptEntry[];
         latestSeq: number;
         hasMore: boolean;
+    }>;
+    /**
+     * Blocks until something new arrives, or the timeout passes.
+     *
+     * An agent waiting for a reply has two bad options without this: ask its
+     * model to call `read` in a loop, which spends a turn — and the whole
+     * context that rides along with it — on every empty poll, or stop and wait
+     * for a person to nudge it. Waiting here costs HTTP requests and no tokens.
+     *
+     * Resolves with an empty page on timeout; that is an answer, not an error.
+     */
+    wait(since: number, opts?: {
+        timeoutMs?: number;
+        intervalMs?: number;
+        signal?: AbortSignal;
+    }): Promise<{
+        entries: TranscriptEntry[];
+        latestSeq: number;
+        hasMore: boolean;
+        timedOut: boolean;
     }>;
     who(): Promise<SessionParticipant[]>;
     /**
@@ -417,9 +484,46 @@ declare class SharedSessionClient {
     };
 }
 
+interface BridgeCredentials {
+    /** Bridge base URL, no trailing slash. */
+    url: string;
+    /** Machine token (`dp_orch_…`). Revocable from the dashboard. */
+    token: string;
+}
+declare const DEFAULT_BRIDGE_URL = "https://devpilot.sh";
+declare function bridgeCredentialsPath(home?: string): string;
+/** The saved pair, or null. A corrupt or partial file reads as "nothing saved". */
+declare function loadBridgeCredentials(path?: string): BridgeCredentials | null;
+/**
+ * Owner-only, and re-asserted on every write: `writeFileSync`'s `mode` applies
+ * only when the file is created, so a file that already existed with looser
+ * permissions would otherwise keep them.
+ *
+ * Returns false rather than throwing. An unwritable home directory must not
+ * stop a bridge from connecting; the credential is simply not remembered.
+ */
+declare function saveBridgeCredentials(credentials: BridgeCredentials, path?: string): boolean;
+declare function clearBridgeCredentials(path?: string): void;
+/**
+ * Flag, then environment, then the saved file.
+ *
+ * The URL and the token resolve independently so `--url` alone can point a
+ * saved token at a different deployment — but a saved TOKEN is only offered to
+ * the URL it was saved for. Sending a production token to whatever host a flag
+ * names would hand a credential to the wrong server.
+ */
+declare function resolveBridgeCredentials(explicit?: {
+    url?: string;
+    token?: string;
+}, env?: NodeJS.ProcessEnv, path?: string): {
+    url?: string;
+    token?: string;
+    source: 'explicit' | 'env' | 'saved' | 'none';
+};
+
 /** @deprecated Removed in 0.2.0. Use RealtimeSubscriber. */
 declare class PubSubSubscriber {
     constructor();
 }
 
-export { BridgeClient, type BridgeClientConfig, BridgeError, type DispatchHandler, DispatchLoop, type DispatchLoopConfig, type EntryStatus, type HeartbeatConfig, HeartbeatService, type MirroredPlan, type MirroredTelemetry, PubSubSubscriber, RealtimeSubscriber, type RealtimeSubscriberConfig, type SessionCommandMessage, SharedSessionClient, type SharedSessionJoinOptions, type TranscriptEntry };
+export { BridgeClient, type BridgeClientConfig, type BridgeCredentials, BridgeError, DEFAULT_BRIDGE_URL, type DispatchHandler, DispatchLoop, type DispatchLoopConfig, type EntryStatus, type HeartbeatConfig, HeartbeatService, type MirroredPlan, type MirroredTelemetry, PubSubSubscriber, RealtimeSubscriber, type RealtimeSubscriberConfig, type SessionCommandMessage, SharedSessionClient, type SharedSessionCreateOptions, type SharedSessionJoinOptions, type TranscriptEntry, bridgeCredentialsPath, clearBridgeCredentials, loadBridgeCredentials, resolveBridgeCredentials, saveBridgeCredentials };

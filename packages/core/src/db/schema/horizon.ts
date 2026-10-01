@@ -23,6 +23,19 @@ export const horizonItems = sqliteTable('horizon_items', {
   archivedAt: integer('archived_at', { mode: 'timestamp' }),
   id: text('id').primaryKey().$defaultFn(() => createId()),
   title: text('title').notNull(),
+  /**
+   * The body of the ticket this item came from.
+   *
+   * The bridge always forwarded it and nothing kept it, so the planner worked
+   * from the title alone — "Fix checkout", with the actual specification
+   * discarded one hop earlier.
+   *
+   * Null for items created without one, which is every item made on the board
+   * itself and every row older than this column. Capped on the way in (see
+   * `MAX_ITEM_DESCRIPTION_CHARS`), and untrusted: it is whatever someone typed
+   * into the tracker, so it reaches a prompt only as a labelled block.
+   */
+  description: text('description'),
   zone: text('zone', { enum: zoneValues }).notNull().default('DIRECTIONAL'),
   repo: text('repo').notNull(),
   complexity: text('complexity', { enum: complexityValues }),

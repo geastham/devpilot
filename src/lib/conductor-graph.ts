@@ -26,6 +26,7 @@ import { db, activityEvents, plans, wavePlans } from '@/lib/db';
 import { eq } from 'drizzle-orm';
 import type { EventType } from '@devpilot.sh/core/db';
 import { createDevPilotPorts } from './conductor';
+import { getWaveExecutionConfig } from './orchestrator';
 
 const globalForConductor = globalThis as unknown as {
   devpilotConductor?: ConductorGraph;
@@ -155,14 +156,25 @@ async function persistPlan(
  * fails the insert at runtime, which an activity row must never do.
  */
 function recordEvent(event: ConductorEvent): void {
+  // A backfill pass that started nothing is not news. The graph re-enters
+  // `dispatch` every time a slot frees or the reconciler checks in, and most of
+  // those passes find the cap still full; a feed row for each would bury the
+  // ones that say an agent actually started.
+  if (event.type === 'wave:dispatched' && event.backfill && event.dispatched === 0) return;
+
+  // The score is a ratio in [0,1]. `Math.round` on it gave "score 0" or
+  // "score 1" for every plan ever generated; a percentage is what the bridge's
+  // Linear message already shows for the same number.
+  const percent = (score: number) => `${Math.round(score * 100)}%`;
+
   const [type, message] = ((): [EventType, string] => {
     switch (event.type) {
       case 'plan:generated':
-        return ['PLAN_GENERATED', `Plan generated (score ${Math.round(event.score)})`];
+        return ['PLAN_GENERATED', `Plan generated (score ${percent(event.score)})`];
       case 'plan:refined':
         return [
           'PLAN_GENERATED',
-          `Plan refined, pass ${event.iterations} (score ${Math.round(event.score)}${event.improved ? '' : ', discarded'})`,
+          `Plan refined, pass ${event.iterations} (score ${percent(event.score)}${event.improved ? '' : ', discarded'})`,
         ];
       case 'plan:approved':
         return ['PLAN_APPROVED', 'Plan approved — staging waves'];
@@ -171,7 +183,7 @@ function recordEvent(event: ConductorEvent): void {
       case 'wave:dispatched':
         return [
           'WAVE_DISPATCHING',
-          `Wave ${event.waveIndex + 1} dispatched (${event.dispatched} tasks${event.queued ? `, ${event.queued} queued` : ''})`,
+          `Wave ${event.waveIndex + 1} ${event.backfill ? 'backfilled' : 'dispatched'} (${event.dispatched} tasks${event.queued ? `, ${event.queued} queued` : ''})`,
         ];
       case 'wave:complete':
         return ['WAVE_COMPLETE', `Wave ${event.waveIndex + 1} complete`];
@@ -203,6 +215,23 @@ export function getConductorGraph(): ConductorGraph {
     }),
     config: {
       requireReview: process.env.DEVPILOT_CONDUCTOR_AUTO_APPROVE === 'true' ? false : true,
+      /**
+       * No wave-level retry, and the same failure policy the controller uses.
+       *
+       * DevPilot retries a failed TASK, once (`DEVPILOT_WAVE_RETRY_LIMIT`), in
+       * `WaveExecutionController.onTaskFailed`. By the time a wave is reported
+       * failed here every task in it is terminal, so the graph's own wave retry
+       * (default 1) had nothing to re-dispatch — and that is the retry that
+       * hung every run in which a task failed twice. Zero makes the first
+       * failed wave apply the policy directly.
+       *
+       * The policy is read from the one place it is configured. The graph used
+       * to take its default (`halt`) regardless, so with
+       * `DEVPILOT_WAVE_FAILURE_POLICY=continue` the controller carried on and
+       * the graph halted.
+       */
+      waveRetryLimit: 0,
+      failurePolicy: getWaveExecutionConfig().failurePolicy,
     },
     checkpointer: SqliteSaver.fromConnString(checkpointPath()),
   });

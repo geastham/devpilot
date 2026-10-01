@@ -150,6 +150,10 @@ describe('session runner — dispatcher API (§7.1)', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.status).toBe('healthy');
+    // What a dispatcher needs to know before it asks: how many agents this
+    // runner will run at once, and what it can do beyond the base contract.
+    expect(body.maxConcurrent).toBe(3);
+    expect(body.capabilities).toContain('isolation');
   });
 
   it('rejects an unauthenticated create', async () => {

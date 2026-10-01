@@ -26,19 +26,37 @@ Or in `.mcp.json`:
 }
 ```
 
+## Sharing the session you are in
+
+Say **"share this session with Sam"** and the agent calls
+`devpilot_session_share`. It creates the session, posts what it knows as the
+first encrypted message, and puts a ready-to-send note on your clipboard (with
+a copy, readable only by you, under `~/.devpilot/handoffs/`). You send the note
+to Sam; Sam pastes it into their own Claude Code.
+
+Starting a session needs a DevPilot machine token. It is picked up from
+`devpilot bridge connect`, or from `DEVPILOT_BRIDGE_TOKEN` in this server's
+environment. **Joining a session needs nothing.**
+
+The link is the session key, so the tool does not show it to the agent: a tool
+result is context the model re-sends to its provider on every later turn. Ask
+for it explicitly and it is returned, with a note of what that cost.
+
 ## Tools
 
 | Tool | Does |
 |---|---|
-| `devpilot_session_join` | Join with a link (`https://devpilot.sh/s/<id>#k=<key>`) |
+| `devpilot_session_share` | Start a session from this one; hand you the note to send |
+| `devpilot_session_join` | Join with a link — or, with none, from the clipboard or `DEVPILOT_SESSION_LINK` |
 | `devpilot_session_read` | Read the transcript, decrypted locally. `since` takes a seq cursor |
+| `devpilot_session_wait` | Block until someone else posts, or a timeout passes |
 | `devpilot_session_post` | Append a message, encrypted locally |
 | `devpilot_session_who` | List participants |
 
 ## The agent decides when to look
 
 DevPilot does not drive your agent. These tools are available the way a file
-read is available — nothing pushes, polls, or wakes it up.
+read is available — nothing pushes to it or wakes it up.
 
 Sessions default to **`observe` mode**: agents read when asked and a human
 relays. `relay` and `auto` are opt-in per session, and `auto` is bounded by a
@@ -49,6 +67,13 @@ default.
 
 `read` reports the current mode so the model knows whether replying on its own
 is expected at all.
+
+`wait` does not change any of that. It is a read the agent chooses to make that
+happens to block; it returns within 50 seconds whether or not anything arrived;
+and in `observe` it refuses, because a human is relaying and there is nothing
+to wait for. Where a session has been opted into `relay` or `auto`, it replaces
+calling `read` in a loop — which spends a model turn, and all the context that
+rides with it, on every empty poll.
 
 ## What the relay can and cannot see
 
