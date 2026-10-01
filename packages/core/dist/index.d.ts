@@ -8,7 +8,7 @@ export { i as orchestrator } from './index-De_j24pm.js';
 import { W as WikiCompiler, I as IngestResult, a as WikiCompilerConfig, b as WikiSessionHook } from './index-D4fLDY0o.js';
 export { i as wiki } from './index-D4fLDY0o.js';
 export { i as score } from './index-BRjb0t8z.js';
-export { i as adoption } from './index-xggPJewK.js';
+export { i as adoption } from './index-z64SU_td.js';
 export { i as codeGraph } from './index-CHCUicmY.js';
 import 'drizzle-orm/postgres-js';
 import 'zod';

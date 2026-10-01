@@ -361,7 +361,7 @@ var import_commander22 = require("commander");
 var import_update_notifier = __toESM(require("update-notifier"));
 
 // src/version.ts
-var VERSION = "0.7.1";
+var VERSION = "0.8.0";
 
 // src/commands/init.ts
 var import_commander = require("commander");
@@ -1925,6 +1925,17 @@ function createBridgeDispatchHandler(opts) {
       }
       throw new Error(reason);
     }
+  };
+}
+function createWatchOnlyDispatchHandler(opts) {
+  return async function decline(message) {
+    const reason = `${opts.machineName} is connected to watch sessions only and does not run dispatched work. On that machine, start \`devpilot serve\` and reconnect its bridge with \`--plan --repos ${message.repo}\`, or route ${message.repo} to a machine that does.`;
+    opts.onLog?.(`${message.linearIdentifier} declined: this bridge is watching only`);
+    try {
+      await opts.client.reportSessionStatus(message.sessionId, { status: "error", progressPercent: 0, message: reason });
+    } catch {
+    }
+    throw new Error(reason);
   };
 }
 
@@ -3872,7 +3883,37 @@ function stableMachineName() {
   }
   return name;
 }
-var connectCommand = new import_commander8.Command("connect").description("Connect this machine to a DevPilot bridge and run dispatched work locally").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-n, --name <name>", "Name for this machine (defaults to a stable name for this machine)").option("-r, --repos <repos>", "Comma-separated repos this machine handles").option("-m, --mode <mode>", "Local orchestrator mode (http|claude-session)", "http").option(
+function resolveLocalMode(options) {
+  if (options.plan) return { kind: "conductor" };
+  const mode = options.mode ?? (options.httpUrl ? "http" : options.sessionApiUrl ? "claude-session" : void 0);
+  if (!mode) return { kind: "watch-only" };
+  if (mode === "ao-cli") {
+    return {
+      kind: "error",
+      message: "--mode ao-cli is deprecated and non-functional.",
+      hints: [
+        "`ao` is now a daemon on 127.0.0.1:3001; point http mode at it:",
+        "  devpilot bridge connect --mode http --http-url http://127.0.0.1:3001"
+      ]
+    };
+  }
+  if (mode === "http") {
+    return options.httpUrl ? { kind: "orchestrator", mode } : { kind: "error", message: "--mode http requires --http-url", hints: ["For the ao daemon: --http-url http://127.0.0.1:3001"] };
+  }
+  if (mode === "claude-session") {
+    return options.sessionApiUrl ? { kind: "orchestrator", mode } : {
+      kind: "error",
+      message: "--mode claude-session requires --session-api-url",
+      hints: [
+        "Start the runner, then point at it:",
+        "  devpilot session-runner --port 3900 --token <t>",
+        "  \u2026 --session-api-url http://127.0.0.1:3900 --session-api-key <t>"
+      ]
+    };
+  }
+  return { kind: "error", message: `Unknown --mode "${mode}".`, hints: ["Modes: http, claude-session. Leave it out to watch sessions only."] };
+}
+var connectCommand = new import_commander8.Command("connect").description("Connect this machine to a DevPilot bridge and run dispatched work locally").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-n, --name <name>", "Name for this machine (defaults to a stable name for this machine)").option("-r, --repos <repos>", "Comma-separated repos this machine handles").option("-m, --mode <mode>", "How dispatched work is run here (http|claude-session). Omit to watch sessions only").option(
   "--transport <transport>",
   "realtime | poll \u2014 polling is fully correct, just higher latency",
   process.env.DEVPILOT_BRIDGE_TRANSPORT || "realtime"
@@ -3918,33 +3959,20 @@ var connectCommand = new import_commander8.Command("connect").description("Conne
   }
   const repos = options.repos?.split(",").map((r) => r.trim()).filter(Boolean) ?? [];
   const maxConcurrentJobs = Math.max(1, parseInt(options.maxJobs, 10) || 4);
+  const machineName = options.name ?? stableMachineName();
   console.log(import_chalk12.default.cyan("\u{1F309} DevPilot bridge"));
   console.log(import_chalk12.default.gray(`   ${options.url}`));
-  console.log(import_chalk12.default.gray(`   machine: ${options.name}`));
+  console.log(import_chalk12.default.gray(`   machine: ${machineName}`));
   console.log("");
-  const usesLocalOrchestrator = !options.plan;
-  if (usesLocalOrchestrator && options.mode === "ao-cli") {
-    console.error(import_chalk12.default.red("\u2717 --mode ao-cli is deprecated and non-functional."));
-    console.error(import_chalk12.default.gray("  `ao` is now a daemon on 127.0.0.1:3001; point http mode at it:"));
-    console.error(import_chalk12.default.gray("    devpilot bridge connect --mode http --http-url http://127.0.0.1:3001"));
-    process.exit(1);
-  }
-  if (usesLocalOrchestrator && options.mode === "http" && !options.httpUrl) {
-    console.error(import_chalk12.default.red("\u2717 --mode http requires --http-url"));
-    console.error(import_chalk12.default.gray("  For the ao daemon: --http-url http://127.0.0.1:3001"));
-    process.exit(1);
-  }
-  if (usesLocalOrchestrator && options.mode === "claude-session" && !options.sessionApiUrl) {
-    console.error(import_chalk12.default.red("\u2717 --mode claude-session requires --session-api-url"));
-    console.error(import_chalk12.default.gray("  Start the runner, then point at it:"));
-    console.error(import_chalk12.default.gray("    devpilot session-runner --port 3900 --token <t>"));
-    console.error(import_chalk12.default.gray("    \u2026 --session-api-url http://127.0.0.1:3900 --session-api-key <t>"));
+  const local = resolveLocalMode(options);
+  if (local.kind === "error") {
+    console.error(import_chalk12.default.red(`\u2717 ${local.message}`));
+    for (const hint of local.hints) console.error(import_chalk12.default.gray(`  ${hint}`));
     process.exit(1);
   }
   const client2 = new import_bridge_client3.BridgeClient({ bridgeUrl: options.url, token: options.token });
   let registration;
   try {
-    const machineName = options.name ?? stableMachineName();
     registration = await client2.register({ name: machineName, repos, maxConcurrentJobs });
   } catch (err) {
     console.error(import_chalk12.default.red("\u2717 Registration failed"));
@@ -3959,10 +3987,16 @@ var connectCommand = new import_commander8.Command("connect").description("Conne
       console.log(import_chalk12.default.gray(`   remembered in ${(0, import_bridge_client3.bridgeCredentialsPath)()} \u2014 reconnect with no flags`));
     }
   }
-  console.log(import_chalk12.default.gray(`   repos: ${repos.join(", ") || "(none)"}`));
-  if (repos.length === 0) {
-    console.log(import_chalk12.default.yellow("   \u26A0 No repos specified \u2014 nothing can route to this machine."));
-    console.log(import_chalk12.default.gray("     Re-run with --repos owner/name to receive dispatches."));
+  if (local.kind === "watch-only") {
+    console.log(import_chalk12.default.gray("   mode: watching \u2014 the agent sessions on this machine are reported to your cockpit."));
+    console.log(import_chalk12.default.gray("         It does not run dispatched tickets. To accept them, start `devpilot serve`"));
+    console.log(import_chalk12.default.gray("         and add --plan --repos owner/name."));
+  } else {
+    console.log(import_chalk12.default.gray(`   repos: ${repos.join(", ") || "(none)"}`));
+    if (repos.length === 0) {
+      console.log(import_chalk12.default.yellow("   \u26A0 No repos specified \u2014 nothing can route to this machine."));
+      console.log(import_chalk12.default.gray("     Re-run with --repos owner/name to receive dispatches."));
+    }
   }
   console.log("");
   const useRealtime = options.transport !== "poll" && registration.realtime !== null;
@@ -4012,7 +4046,7 @@ var connectCommand = new import_commander8.Command("connect").description("Conne
   }
   const observer = options.observe !== false ? new SessionObserver({
     client: client2,
-    machineName: options.name ?? stableMachineName(),
+    machineName,
     repos,
     // A session placed on a board is already followed by the adoption
     // watcher; everything else gets its instruments from the observer.
@@ -4088,7 +4122,7 @@ var connectCommand = new import_commander8.Command("connect").description("Conne
   if (options.discover !== false) {
     await runIntrospection({
       client: client2,
-      machineName: options.name ?? stableMachineName(),
+      machineName,
       repos,
       adopt: Boolean(options.adopt),
       allRepos: Boolean(options.adoptAllRepos),
@@ -4104,14 +4138,18 @@ var connectCommand = new import_commander8.Command("connect").description("Conne
       jwt: registration.realtime.jwt
     } : null,
     maxConcurrent: maxConcurrentJobs,
-    handler: options.plan ? createConductorDispatchHandler({
+    handler: local.kind === "conductor" ? createConductorDispatchHandler({
       client: client2,
       cockpitUrl: options.cockpitUrl,
       watcher: conductorWatcher,
       onLog: (line) => console.log(import_chalk12.default.blue(`   ${line}`))
+    }) : local.kind === "watch-only" ? createWatchOnlyDispatchHandler({
+      client: client2,
+      machineName,
+      onLog: (line) => console.log(import_chalk12.default.blue(`   ${line}`))
     }) : createBridgeDispatchHandler({
       client: client2,
-      orchestratorMode: options.mode,
+      orchestratorMode: local.mode,
       httpUrl: options.httpUrl,
       sessionApiUrl: options.sessionApiUrl,
       sessionApiKey: options.sessionApiKey,
@@ -4129,8 +4167,12 @@ var connectCommand = new import_commander8.Command("connect").description("Conne
   });
   await loop.start();
   heartbeat.start();
-  console.log(import_chalk12.default.green(`\u2713 Listening (${useRealtime ? "realtime" : "poll"})`));
-  console.log(import_chalk12.default.gray("   Agents run on THIS machine. Ctrl+C to disconnect."));
+  console.log(import_chalk12.default.green(local.kind === "watch-only" ? "\u2713 Watching" : `\u2713 Listening (${useRealtime ? "realtime" : "poll"})`));
+  console.log(
+    import_chalk12.default.gray(
+      local.kind === "watch-only" ? "   Nothing leaves this machine but counts, tool names and file paths. Ctrl+C to disconnect." : "   Agents run on THIS machine. Ctrl+C to disconnect."
+    )
+  );
   console.log("");
   let shuttingDown = false;
   const shutdown = async () => {

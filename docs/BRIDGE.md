@@ -9,6 +9,26 @@ machine says so.
 `connect` runs in the foreground. This page is about the two ways to run it
 without a terminal, and how to see what is running.
 
+## What a bridge does with no options
+
+```
+devpilot bridge connect --url https://devpilot.sh --token <token>
+```
+
+It **watches**. The machine registers, and the agent sessions on it are
+reported as they run — tool names, repo-relative paths, token counts. It runs
+no dispatched work, and needs no Linear workspace, no local cockpit and no
+orchestrator. This is what a first connect is for, and it is complete in
+itself.
+
+To have the machine also accept tickets, start the local cockpit
+(`devpilot serve`) and connect with `--plan --repos owner/name`. A ticket
+routed to a machine that is only watching is declined with a message naming
+the machine, the repository and what to change, rather than left waiting.
+
+A mode named without what it needs (`--mode http` and no `--http-url`) is still
+an error: someone who typed it meant to run work.
+
 ## Three ways to run it
 
 | | Closing the terminal | Restarting the machine | The bridge exits |

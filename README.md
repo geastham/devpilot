@@ -171,6 +171,30 @@ devpilot serve         # the cockpit, on port 3847
 </details>
 
 <details>
+<summary><b>Watching the agents you already run</b></summary>
+
+<br>
+
+The smallest useful setup: no Linear, no planner, nothing dispatched. Create a workspace
+at [devpilot.sh](https://devpilot.sh), take the command its setup page gives you, and
+the Claude Code sessions on that machine show up in the hosted cockpit with what each one
+spent — tokens by kind, written changes, cost at API rates.
+
+```bash
+npm install -g @devpilot.sh/cli
+
+devpilot bridge connect --url https://devpilot.sh --token <from the setup page>
+devpilot bridge install        # keep it running across restarts (macOS, Linux)
+devpilot statusline install    # optional: subscription windows and cache misses
+```
+
+What leaves the machine is tool names, repo-relative file paths and counts — never a
+prompt, a response or a file's contents. See **[docs/BRIDGE.md](docs/BRIDGE.md)** and
+**[docs/STATUSLINE.md](docs/STATUSLINE.md)**.
+
+</details>
+
+<details>
 <summary><b>Connecting real agents and Linear</b></summary>
 
 <br>

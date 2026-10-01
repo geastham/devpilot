@@ -146,7 +146,7 @@ interface RepoIdentity {
     /** `github.com`, `gitlab.com`, … Never a path. */
     host: string;
 }
-/** Test seam and long-lived-process hygiene. */
+/** Forget what git said. Called at the start of every scan — see `scanSessions`. */
 declare function clearRepoCache(): void;
 /**
  * Normalize a git remote URL to `host` + `owner/name`.
