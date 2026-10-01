@@ -4,6 +4,11 @@ import type { WaveTask, DependencyEdge } from '@/lib/db';
 import { computeCriticalPath } from '@devpilot.sh/core/wave-planner';
 import type { ParsedTask, ParsedEdge } from '@devpilot.sh/core/wave-planner';
 
+// Never prerendered. A GET handler that touches no request API is treated by
+// `next build` as static, and its build-time answer is then served for ever —
+// see tests/e2e/cockpit-routes.test.ts in packages/cli.
+export const dynamic = 'force-dynamic';
+
 interface RouteParams {
   params: Promise<{ id: string }>;
 }

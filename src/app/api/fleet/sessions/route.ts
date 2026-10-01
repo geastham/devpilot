@@ -11,6 +11,11 @@ import {
 } from '@/lib/db';
 import type { SessionStatus } from '@/lib/db';
 
+// Never prerendered. A GET handler that touches no request API is treated by
+// `next build` as static, and its build-time answer is then served for ever —
+// see tests/e2e/cockpit-routes.test.ts in packages/cli.
+export const dynamic = 'force-dynamic';
+
 // GET /api/fleet/sessions - List all fleet sessions
 export async function GET(request: NextRequest) {
   try {
