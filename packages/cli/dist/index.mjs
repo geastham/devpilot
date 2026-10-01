@@ -137,6 +137,14 @@ function recordStatus(input, dir, now) {
     return null;
   }
 }
+function recordWindowReading(reading, dir) {
+  if (!SESSION_ID.test(reading.s)) return;
+  try {
+    mkdirSync3(dir, { recursive: true });
+    appendFileSync(dayFile(dir, reading.t), JSON.stringify(reading) + "\n");
+  } catch {
+  }
+}
 function loadWindowReadings(dir, sinceMs) {
   const out = [];
   let names = [];
@@ -267,10 +275,10 @@ import { execFileSync } from "child_process";
 import { readFileSync as readFileSync2 } from "fs";
 import { join as join4 } from "path";
 function readStdin(timeoutMs) {
-  return new Promise((resolve5) => {
-    if (process.stdin.isTTY) return resolve5("");
+  return new Promise((resolve7) => {
+    if (process.stdin.isTTY) return resolve7("");
     let data = "";
-    const done = () => resolve5(data);
+    const done = () => resolve7(data);
     const timer = setTimeout(done, timeoutMs);
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => data += chunk);
@@ -326,7 +334,7 @@ var init_statusline_fast = __esm({
 });
 
 // src/cli.ts
-import { Command as Command19 } from "commander";
+import { Command as Command20 } from "commander";
 import updateNotifier from "update-notifier";
 
 // src/version.ts
@@ -743,68 +751,549 @@ statuslineCommand.command("uninstall").description("Remove the status line and r
   }
 });
 
-// src/commands/config.ts
+// src/commands/graph.ts
 import { Command as Command5 } from "commander";
-import { existsSync as existsSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync4 } from "fs";
-import { join as join6 } from "path";
 import chalk5 from "chalk";
-import YAML from "yaml";
-import { linear } from "@devpilot.sh/core";
-var linearCommand = new Command5("linear").description("Configure Linear integration").option("--api-key <key>", "Linear API key").option("--team-id <id>", "Linear team ID").option("--test", "Test the connection").action(async (options) => {
-  const configPath = join6(process.cwd(), ".devpilot", "config.yaml");
-  if (!existsSync4(configPath)) {
-    console.log(chalk5.red('DevPilot not initialized. Run "devpilot init" first.'));
+import { execFileSync as execFileSync2 } from "child_process";
+import { existsSync as existsSync5, mkdirSync as mkdirSync6, readFileSync as readFileSync5, realpathSync, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "fs";
+import { homedir as homedir3 } from "os";
+import { dirname as dirname3, join as join7, resolve as resolve4 } from "path";
+import { BridgeClient, DEFAULT_BRIDGE_URL, resolveBridgeCredentials } from "@devpilot.sh/bridge-client";
+import { adoption, codeGraph as codeGraph2 } from "@devpilot.sh/core";
+
+// src/utils/codegraph.ts
+import { execFile } from "child_process";
+import { appendFileSync as appendFileSync2, cpSync, existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync4, rmSync } from "fs";
+import { dirname as dirname2, isAbsolute, join as join6, resolve as resolve3 } from "path";
+import { promisify } from "util";
+var execFileAsync = promisify(execFile);
+var INDEXER_VERSION = "1.6.1";
+var INDEXER_PACKAGE = "@colbymchenry/codegraph";
+var GRAPH_DIR = ".codegraph";
+function indexerEnv(base = process.env) {
+  return {
+    ...base,
+    DO_NOT_TRACK: "1",
+    CODEGRAPH_TELEMETRY: "0",
+    // The MCP server otherwise checks GitHub for a newer release once a day.
+    CODEGRAPH_NO_UPDATE_CHECK: "1"
+  };
+}
+async function findIndexer(env = process.env) {
+  const bin = env.DEVPILOT_CODEGRAPH_BIN?.trim() || "codegraph";
+  try {
+    const { stdout } = await execFileAsync(bin, ["--version"], { env: indexerEnv(env), timeout: 1e4 });
+    const version = stdout.trim().match(/\d+\.\d+\.\d+\S*/)?.[0] ?? null;
+    return { bin, version };
+  } catch {
+    return null;
+  }
+}
+function installHint() {
+  return `npm install -g ${INDEXER_PACKAGE}@${INDEXER_VERSION}`;
+}
+function hasIndex(dir) {
+  return existsSync4(join6(dir, GRAPH_DIR, "codegraph.db"));
+}
+async function buildIndex(indexer, dir) {
+  await execFileAsync(indexer.bin, ["init", "--yes", dir], {
+    cwd: dir,
+    env: indexerEnv(),
+    timeout: 30 * 6e4,
+    maxBuffer: 32 * 1024 * 1024
+  });
+}
+async function syncIndex(indexer, dir, timeoutMs = 12e4) {
+  await execFileAsync(indexer.bin, ["sync", dir], {
+    cwd: dir,
+    env: indexerEnv(),
+    timeout: timeoutMs,
+    maxBuffer: 32 * 1024 * 1024
+  });
+}
+function seedIndex(fromDir, toDir) {
+  const source = join6(fromDir, GRAPH_DIR);
+  if (!existsSync4(join6(source, "codegraph.db"))) return false;
+  const target = join6(toDir, GRAPH_DIR);
+  rmSync(target, { recursive: true, force: true });
+  mkdirSync5(target, { recursive: true });
+  for (const name of ["codegraph.db", ".gitignore"]) {
+    if (existsSync4(join6(source, name))) cpSync(join6(source, name), join6(target, name));
+  }
+  return true;
+}
+async function excludeIndexFromGit(repoDir) {
+  try {
+    const { stdout } = await execFileAsync("git", ["rev-parse", "--git-path", "info/exclude"], { cwd: repoDir });
+    const raw = stdout.trim();
+    if (!raw) return false;
+    const path = isAbsolute(raw) ? raw : resolve3(repoDir, raw);
+    const current = existsSync4(path) ? readFileSync4(path, "utf8") : "";
+    if (current.split("\n").some((line) => line.trim() === `${GRAPH_DIR}/` || line.trim() === GRAPH_DIR)) return true;
+    mkdirSync5(dirname2(path), { recursive: true });
+    appendFileSync2(path, `${current.endsWith("\n") || current === "" ? "" : "\n"}${GRAPH_DIR}/
+`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function stopIndexDaemon(dir) {
+  try {
+    const raw = readFileSync4(join6(dir, GRAPH_DIR, "daemon.pid"), "utf8");
+    const pid = Number(JSON.parse(raw).pid);
+    if (!Number.isInteger(pid) || pid <= 1) return false;
+    const { stdout } = await execFileAsync("ps", ["-o", "command=", "-p", String(pid)]);
+    if (!/codegraph/i.test(stdout)) return false;
+    process.kill(pid, "SIGTERM");
+    return true;
+  } catch {
+    return false;
+  }
+}
+function mcpServerFor(indexer, dir) {
+  return {
+    command: indexer.bin,
+    // The watcher stays on: the index must follow the agent's own edits, or
+    // it would describe the tree as it was when the task began.
+    args: ["serve", "--mcp", "--path", dir],
+    env: { DO_NOT_TRACK: "1", CODEGRAPH_TELEMETRY: "0", CODEGRAPH_NO_UPDATE_CHECK: "1" }
+  };
+}
+
+// src/utils/graph-push.ts
+import { randomUUID } from "crypto";
+import { codeGraph } from "@devpilot.sh/core";
+var BATCH_LIMITS = { files: 400, nodes: 4e3, edges: 8e3, removePaths: 2e3 };
+function diffAgainstManifest(local, remote) {
+  const here = new Map(local.files.map((f) => [f.path, f.contentHash]));
+  const changed = local.files.filter((f) => remote[f.path] !== f.contentHash).map((f) => f.path);
+  const removed = Object.keys(remote).filter((path) => !here.has(path));
+  return { changed: changed.sort(), removed: removed.sort() };
+}
+function batchesFor(local, plan, identity, syncId = randomUUID()) {
+  const fileByPath = new Map(local.files.map((f) => [f.path, f]));
+  const nodesByFile = /* @__PURE__ */ new Map();
+  for (const node of local.nodes) {
+    const list = nodesByFile.get(node.filePath) ?? [];
+    list.push(node);
+    nodesByFile.set(node.filePath, list);
+  }
+  const edgesByFile = /* @__PURE__ */ new Map();
+  for (const edge of local.edges) {
+    const list = edgesByFile.get(edge.filePath) ?? [];
+    list.push(edge);
+    edgesByFile.set(edge.filePath, list);
+  }
+  const empty = () => ({
+    repo: identity.repo,
+    branch: identity.branch,
+    commitSha: identity.commitSha,
+    indexer: "codegraph",
+    indexerVersion: identity.indexerVersion,
+    syncId,
+    final: false,
+    upsertFiles: [],
+    removePaths: [],
+    nodes: [],
+    edges: []
+  });
+  const batches = [];
+  const skipped = [];
+  let current = empty();
+  const flush = () => {
+    batches.push(current);
+    current = empty();
+  };
+  for (const path of plan.removed) {
+    if (current.removePaths.length >= BATCH_LIMITS.removePaths) flush();
+    current.removePaths.push(path);
+  }
+  for (const path of plan.changed) {
+    const file = fileByPath.get(path);
+    if (!file) continue;
+    const nodes = nodesByFile.get(path) ?? [];
+    const edges = edgesByFile.get(path) ?? [];
+    if (nodes.length > BATCH_LIMITS.nodes || edges.length > BATCH_LIMITS.edges) {
+      skipped.push({ path, nodes: nodes.length, edges: edges.length });
+      continue;
+    }
+    if (current.upsertFiles.length >= BATCH_LIMITS.files || current.nodes.length + nodes.length > BATCH_LIMITS.nodes || current.edges.length + edges.length > BATCH_LIMITS.edges) {
+      flush();
+    }
+    current.upsertFiles.push({ path: file.path, contentHash: file.contentHash, language: file.language });
+    current.nodes.push(...nodes);
+    current.edges.push(...edges);
+  }
+  current.final = true;
+  batches.push(current);
+  return { batches, skipped };
+}
+async function pushGraph(client2, dir, identity) {
+  const local = codeGraph.exportStructure(dir);
+  if (!local.available) return { status: "no-index", reason: local.reason ?? "no code graph index" };
+  const manifest = await client2.graphManifest(identity.repo, identity.branch);
+  if (manifest.status === "disabled") return { status: "disabled", message: manifest.message };
+  if (manifest.status === "error") return { status: "failed", message: manifest.message, sent: 0 };
+  const plan = diffAgainstManifest(local, manifest.files);
+  const { batches, skipped } = batchesFor(local, plan, identity);
+  let counts;
+  for (let i = 0; i < batches.length; i++) {
+    const result = await client2.graphSync(batches[i]);
+    if (!result.ok) {
+      if (result.status === 403) return { status: "disabled", message: result.message };
+      return { status: "failed", message: result.message, sent: i };
+    }
+    counts = result.counts ?? counts;
+  }
+  return {
+    status: "pushed",
+    changed: plan.changed.length - skipped.length,
+    removed: plan.removed.length,
+    batches: batches.length,
+    skipped,
+    counts
+  };
+}
+
+// src/commands/graph.ts
+function shareStorePath(home = homedir3()) {
+  return join7(home, ".devpilot", "graph-share.json");
+}
+function loadShares(path = shareStorePath()) {
+  try {
+    const parsed = JSON.parse(readFileSync5(path, "utf8"));
+    if (parsed && parsed.version === 1 && parsed.repos && typeof parsed.repos === "object") return parsed;
+  } catch {
+  }
+  return { version: 1, repos: {} };
+}
+function saveShares(store, path = shareStorePath()) {
+  mkdirSync6(dirname3(path), { recursive: true });
+  writeFileSync4(path, JSON.stringify(store, null, 2) + "\n", { mode: 384 });
+}
+function keyFor(dir) {
+  try {
+    return realpathSync(dir);
+  } catch {
+    return resolve4(dir);
+  }
+}
+function git(dir, args) {
+  try {
+    return execFileSync2("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5e3 }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+function defaultBranch(dir) {
+  const ref = git(dir, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+  return ref ? ref.replace(/^origin\//, "") : null;
+}
+function identify(dir, indexerVersion, opts = {}) {
+  const repo = adoption.resolveRepo(dir)?.repo;
+  if (!repo) return { error: "This directory has no `origin` remote, so there is no repository name to file the graph under." };
+  const branch = adoption.resolveBranch(dir);
+  const commitSha = git(dir, ["rev-parse", "HEAD"]);
+  if (!branch || !commitSha) return { error: "Could not read the current branch and commit." };
+  const identity = { repo, branch, commitSha, indexerVersion };
+  const main2 = defaultBranch(dir);
+  if (!opts.anyBranch && main2 && branch !== main2) {
+    identity.skip = `the hosted graph follows ${main2}, and this checkout is on ${branch}`;
+  }
+  return identity;
+}
+var WHAT_CROSSES = [
+  "What the hosted plane receives for this repository:",
+  "  \xB7 file paths, languages, and a hash of each file (to tell what changed)",
+  "  \xB7 the NAMES of functions, classes, methods and other symbols, with their",
+  "    kind and line range",
+  "  \xB7 which symbol calls, imports or refers to which",
+  "",
+  "What it never receives:",
+  "  \xB7 signatures, parameter lists or return types",
+  "  \xB7 comments and docstrings",
+  "  \xB7 the contents of any file",
+  "",
+  "The hosted code graph is a premium feature, free during early access. Your",
+  "workspace must have it turned on (Settings \u2192 Early access)."
+];
+function describePush(outcome, identity) {
+  switch (outcome.status) {
+    case "pushed": {
+      const lines = [
+        chalk5.green(`Graph for ${identity.repo}@${identity.branch} is up to date on the hosted plane.`),
+        chalk5.gray(
+          `  ${outcome.changed} file${outcome.changed === 1 ? "" : "s"} sent, ${outcome.removed} removed` + (outcome.counts ? ` \xB7 now ${outcome.counts.files} files, ${outcome.counts.nodes} symbols, ${outcome.counts.edges} references` : "")
+        )
+      ];
+      for (const s of outcome.skipped) {
+        lines.push(chalk5.yellow(`  left out: ${s.path} (${s.nodes} symbols \u2014 too large to send as one file)`));
+      }
+      return lines;
+    }
+    case "no-index":
+      return [chalk5.red(`No index to send: ${outcome.reason}`), chalk5.gray("  Run `devpilot graph enable` first.")];
+    case "disabled":
+      return [
+        chalk5.yellow("The hosted code graph is not turned on for this workspace."),
+        chalk5.gray("  It is a premium feature, free during early access: turn it on under"),
+        chalk5.gray("  Settings \u2192 Early access in the dashboard, then run this again.")
+      ];
+    case "failed":
+      return [chalk5.red(`Could not send the graph: ${outcome.message}`), chalk5.gray(`  ${outcome.sent} batch(es) landed before it stopped. Running this again picks up from what is there.`)];
+  }
+}
+function clientFor(options) {
+  const credentials = resolveBridgeCredentials({ url: options.url, token: options.token });
+  if (!credentials.token) return null;
+  return new BridgeClient({ bridgeUrl: credentials.url ?? DEFAULT_BRIDGE_URL, token: credentials.token });
+}
+var graphCommand = new Command5("graph").description(
+  "The code graph for a repository: an index the planner and agents can ask what depends on what"
+);
+graphCommand.command("enable [path]").description("Build the code graph index for a repository (local; nothing leaves the machine)").action(async (path) => {
+  const dir = resolve4(path ?? process.cwd());
+  const indexer = await findIndexer();
+  if (!indexer) {
+    console.log(chalk5.yellow("The code graph indexer is not installed."));
+    console.log("");
+    console.log("  DevPilot uses `codegraph` (MIT, github.com/colbymchenry/codegraph) to build the");
+    console.log("  index. It is not bundled \u2014 it is about 295 MB \u2014 and DevPilot does not install");
+    console.log("  it for you. To install the version this was verified against:");
+    console.log("");
+    console.log(`    ${installHint()}`);
+    console.log("");
+    console.log(chalk5.gray("  Its own installer asks about anonymous usage statistics; that answer is"));
+    console.log(chalk5.gray("  yours. Every run DevPilot makes of it sets DO_NOT_TRACK=1."));
+    process.exitCode = 1;
     return;
   }
-  const configContent = readFileSync4(configPath, "utf-8");
+  console.log(chalk5.gray(`Indexing ${dir} with codegraph ${indexer.version ?? ""}\u2026`));
+  try {
+    if (hasIndex(dir)) await syncIndex(indexer, dir);
+    else await buildIndex(indexer, dir);
+  } catch (error) {
+    console.error(chalk5.red(`Indexing failed: ${error instanceof Error ? error.message.slice(0, 600) : error}`));
+    process.exitCode = 1;
+    return;
+  }
+  const excluded = await excludeIndexFromGit(dir);
+  const status = codeGraph2.readGraphStatus(dir);
+  console.log(chalk5.green("Code graph ready."));
+  console.log(chalk5.gray(`  ${status.files} files \xB7 ${status.nodes} symbols \xB7 ${status.edges} references`));
+  console.log(chalk5.gray(`  ${join7(dir, GRAPH_DIR)}`) + (excluded ? chalk5.gray("  (kept out of git via .git/info/exclude)") : ""));
+  console.log("");
+  console.log("  With this in place:");
+  console.log("  \xB7 the planner separates tasks whose files depend on each other, not only");
+  console.log("    tasks that name the same file;");
+  console.log("  \xB7 each task's worktree gets a copy of the index, kept current as it edits;");
+  console.log("  \xB7 agents are given the graph only if the runner is started with");
+  console.log("    `--harness <profile>+code-graph`. Whether that saves tokens has not been");
+  console.log("    measured; run with and without it and compare the two rows on Efficiency.");
+  console.log("");
+  console.log(chalk5.gray("  Nothing has left this machine. `devpilot graph share` is the separate step that"));
+  console.log(chalk5.gray("  sends the graph's structure to the hosted plane."));
+});
+graphCommand.command("status [path]").description("Show the index for a repository and whether it is shared").action(async (path) => {
+  const dir = resolve4(path ?? process.cwd());
+  const indexer = await findIndexer();
+  const status = codeGraph2.readGraphStatus(dir);
+  const shared = loadShares().repos[keyFor(dir)];
+  console.log(chalk5.white("Code graph"));
+  console.log(chalk5.gray("  Indexer: ") + (indexer ? `codegraph ${indexer.version ?? ""}`.trim() : `not installed (${installHint()})`));
+  if (!status.initialized) {
+    console.log(chalk5.gray("  Index:   ") + "none for this directory. `devpilot graph enable` builds one.");
+  } else {
+    console.log(chalk5.gray("  Index:   ") + `${status.files} files \xB7 ${status.nodes} symbols \xB7 ${status.edges} references`);
+    if (status.indexedAt) {
+      console.log(chalk5.gray("  As of:   ") + new Date(status.indexedAt).toISOString());
+    }
+  }
+  console.log(
+    chalk5.gray("  Shared:  ") + (shared ? `yes, as ${shared.repo} (since ${shared.sharedAt.slice(0, 10)})` : "no \u2014 structure stays on this machine")
+  );
+});
+graphCommand.command("sync [path]").description("Bring the index up to date with the files on disk").action(async (path) => {
+  const dir = resolve4(path ?? process.cwd());
+  const indexer = await findIndexer();
+  if (!indexer || !hasIndex(dir)) {
+    console.log(chalk5.yellow("Nothing to sync: run `devpilot graph enable` first."));
+    process.exitCode = 1;
+    return;
+  }
+  await syncIndex(indexer, dir);
+  const status = codeGraph2.readGraphStatus(dir);
+  console.log(chalk5.green(`Synced: ${status.files} files \xB7 ${status.nodes} symbols \xB7 ${status.edges} references`));
+});
+graphCommand.command("disable [path]").description("Delete the local index for a repository").action((path) => {
+  const dir = resolve4(path ?? process.cwd());
+  const target = join7(dir, GRAPH_DIR);
+  if (!existsSync5(join7(target, "codegraph.db"))) {
+    console.log(chalk5.gray("There is no index here."));
+    return;
+  }
+  rmSync2(target, { recursive: true, force: true });
+  console.log(chalk5.green("Local index deleted."));
+  if (loadShares().repos[keyFor(dir)]) {
+    console.log(chalk5.gray("  This repository is still marked as shared; the hosted copy is unchanged."));
+    console.log(chalk5.gray("  `devpilot graph unshare` removes it."));
+  }
+});
+graphCommand.command("share [path]").description("Send this repository's graph structure to the hosted plane, and keep it current").option("--yes", "Skip the confirmation (the list of what crosses is still printed)").option("--url <url>", "Hosted plane URL").option("--token <token>", "Bridge token").option("--any-branch", "Send the graph even when this checkout is not on the default branch").action(async (path, options) => {
+  const dir = resolve4(path ?? process.cwd());
+  const status = codeGraph2.readGraphStatus(dir);
+  if (!status.initialized) {
+    console.log(chalk5.yellow("There is no index here yet. Run `devpilot graph enable` first."));
+    process.exitCode = 1;
+    return;
+  }
+  const indexer = await findIndexer();
+  const identity = identify(dir, indexer?.version ?? "unknown", { anyBranch: options.anyBranch });
+  if ("error" in identity) {
+    console.error(chalk5.red(identity.error));
+    process.exitCode = 1;
+    return;
+  }
+  console.log(chalk5.white(`Share the code graph for ${identity.repo}`));
+  console.log("");
+  for (const line of WHAT_CROSSES) console.log(`  ${line}`);
+  console.log("");
+  if (!options.yes) {
+    console.log("  Nothing has been sent. To go ahead:");
+    console.log(chalk5.cyan(`    devpilot graph share ${path ?? ""} --yes`.replace(/\s+--yes/, " --yes")));
+    return;
+  }
+  const client2 = clientFor(options);
+  if (!client2) {
+    console.error(chalk5.red("No bridge credentials on this machine. Run `devpilot bridge connect --token <token>` once first."));
+    process.exitCode = 1;
+    return;
+  }
+  if (identity.skip) {
+    console.log(chalk5.yellow(`Not sent: ${identity.skip}.`));
+    console.log(chalk5.gray("  Run this from a checkout of the default branch, or pass --any-branch."));
+    process.exitCode = 1;
+    return;
+  }
+  const outcome = await pushGraph(client2, dir, identity);
+  for (const line of describePush(outcome, identity)) console.log(line);
+  if (outcome.status !== "pushed") {
+    process.exitCode = 1;
+    return;
+  }
+  const store = loadShares();
+  store.repos[keyFor(dir)] = { repo: identity.repo, sharedAt: (/* @__PURE__ */ new Date()).toISOString() };
+  saveShares(store);
+  console.log("");
+  console.log(chalk5.gray("  A connected bridge keeps it current from here. `devpilot graph unshare` stops"));
+  console.log(chalk5.gray("  that and deletes the hosted copy."));
+});
+graphCommand.command("push [path]").description("Send the latest structure now, for a repository that is already shared").option("--url <url>", "Hosted plane URL").option("--token <token>", "Bridge token").option("--any-branch", "Send even when this checkout is not on the default branch").action(async (path, options) => {
+  const dir = resolve4(path ?? process.cwd());
+  if (!loadShares().repos[keyFor(dir)]) {
+    console.log(chalk5.yellow("This repository is not shared. `devpilot graph share` explains what that sends and turns it on."));
+    process.exitCode = 1;
+    return;
+  }
+  const client2 = clientFor(options);
+  const indexer = await findIndexer();
+  const identity = identify(dir, indexer?.version ?? "unknown", { anyBranch: options.anyBranch });
+  if (!client2 || "error" in identity) {
+    console.error(chalk5.red(!client2 ? "No bridge credentials on this machine." : identity.error));
+    process.exitCode = 1;
+    return;
+  }
+  if (identity.skip) {
+    console.log(chalk5.yellow(`Not sent: ${identity.skip}.`));
+    return;
+  }
+  if (indexer) await syncIndex(indexer, dir).catch(() => void 0);
+  const outcome = await pushGraph(client2, dir, identity);
+  for (const line of describePush(outcome, identity)) console.log(line);
+  if (outcome.status !== "pushed") process.exitCode = 1;
+});
+graphCommand.command("unshare [path]").description("Stop sharing this repository's graph and delete the hosted copy").option("--url <url>", "Hosted plane URL").option("--token <token>", "Bridge token").action(async (path, options) => {
+  const dir = resolve4(path ?? process.cwd());
+  const store = loadShares();
+  const entry = store.repos[keyFor(dir)];
+  if (!entry) {
+    console.log(chalk5.gray("This repository is not shared."));
+    return;
+  }
+  delete store.repos[keyFor(dir)];
+  saveShares(store);
+  const client2 = clientFor(options);
+  const branch = defaultBranch(dir) ?? adoption.resolveBranch(dir);
+  const deleted = client2 && branch ? await client2.graphDelete(entry.repo, branch) : false;
+  console.log(chalk5.green("No longer shared from this machine."));
+  console.log(
+    deleted ? chalk5.gray(`  The hosted copy of ${entry.repo}@${branch} was deleted.`) : chalk5.yellow("  The hosted copy could not be deleted from here. Remove it under Graph in the dashboard.")
+  );
+});
+
+// src/commands/config.ts
+import { Command as Command6 } from "commander";
+import { existsSync as existsSync6, readFileSync as readFileSync6, writeFileSync as writeFileSync5 } from "fs";
+import { join as join8 } from "path";
+import chalk6 from "chalk";
+import YAML from "yaml";
+import { linear } from "@devpilot.sh/core";
+var linearCommand = new Command6("linear").description("Configure Linear integration").option("--api-key <key>", "Linear API key").option("--team-id <id>", "Linear team ID").option("--test", "Test the connection").action(async (options) => {
+  const configPath = join8(process.cwd(), ".devpilot", "config.yaml");
+  if (!existsSync6(configPath)) {
+    console.log(chalk6.red('DevPilot not initialized. Run "devpilot init" first.'));
+    return;
+  }
+  const configContent = readFileSync6(configPath, "utf-8");
   const config = YAML.parse(configContent);
   if (!config.integrations) config.integrations = {};
   if (!config.integrations.linear) config.integrations.linear = {};
   if (options.apiKey) {
     config.integrations.linear.apiKey = options.apiKey;
-    writeFileSync4(configPath, YAML.stringify(config));
-    console.log(chalk5.green("Linear API key saved."));
+    writeFileSync5(configPath, YAML.stringify(config));
+    console.log(chalk6.green("Linear API key saved."));
   }
   if (options.teamId) {
     config.integrations.linear.teamId = options.teamId;
-    writeFileSync4(configPath, YAML.stringify(config));
-    console.log(chalk5.green("Linear team ID saved."));
+    writeFileSync5(configPath, YAML.stringify(config));
+    console.log(chalk6.green("Linear team ID saved."));
   }
   if (options.test || options.apiKey && options.teamId) {
     const apiKey = config.integrations.linear.apiKey;
     const teamId = config.integrations.linear.teamId;
     if (!apiKey || !teamId) {
-      console.log(chalk5.yellow("Missing API key or team ID. Set both to test connection."));
+      console.log(chalk6.yellow("Missing API key or team ID. Set both to test connection."));
       return;
     }
-    console.log(chalk5.cyan("Testing Linear connection..."));
+    console.log(chalk6.cyan("Testing Linear connection..."));
     try {
       const client2 = linear.initLinearClient({ apiKey, teamId });
       const team = await client2.getTeam();
-      console.log(chalk5.green(`Connected to Linear team: ${team.name} (${team.key})`));
+      console.log(chalk6.green(`Connected to Linear team: ${team.name} (${team.key})`));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
-      console.log(chalk5.red(`Connection failed: ${message}`));
+      console.log(chalk6.red(`Connection failed: ${message}`));
     }
   }
   if (!options.apiKey && !options.teamId && !options.test) {
     const apiKey = config.integrations.linear.apiKey;
     const teamId = config.integrations.linear.teamId;
-    console.log(chalk5.cyan("Linear Configuration:"));
-    console.log(`  API Key: ${apiKey ? chalk5.green("configured") : chalk5.yellow("not set")}`);
-    console.log(`  Team ID: ${teamId || chalk5.yellow("not set")}`);
+    console.log(chalk6.cyan("Linear Configuration:"));
+    console.log(`  API Key: ${apiKey ? chalk6.green("configured") : chalk6.yellow("not set")}`);
+    console.log(`  Team ID: ${teamId || chalk6.yellow("not set")}`);
   }
 });
-var configCommand = new Command5("config").description("Manage DevPilot configuration").argument("[key]", "Configuration key (e.g., ui.port)").argument("[value]", "Value to set").option("-l, --list", "List all configuration").action(async (key, value, options) => {
-  const configPath = join6(process.cwd(), ".devpilot", "config.yaml");
-  if (!existsSync4(configPath)) {
-    console.log(chalk5.red('\u274C DevPilot not initialized. Run "devpilot init" first.'));
+var configCommand = new Command6("config").description("Manage DevPilot configuration").argument("[key]", "Configuration key (e.g., ui.port)").argument("[value]", "Value to set").option("-l, --list", "List all configuration").action(async (key, value, options) => {
+  const configPath = join8(process.cwd(), ".devpilot", "config.yaml");
+  if (!existsSync6(configPath)) {
+    console.log(chalk6.red('\u274C DevPilot not initialized. Run "devpilot init" first.'));
     return;
   }
-  const configContent = readFileSync4(configPath, "utf-8");
+  const configContent = readFileSync6(configPath, "utf-8");
   const config = YAML.parse(configContent);
   if (options.list || !key && !value) {
-    console.log(chalk5.cyan("DevPilot Configuration:"));
+    console.log(chalk6.cyan("DevPilot Configuration:"));
     console.log("");
     console.log(YAML.stringify(config));
     return;
@@ -816,7 +1305,7 @@ var configCommand = new Command5("config").description("Manage DevPilot configur
       if (current && typeof current === "object" && k in current) {
         current = current[k];
       } else {
-        console.log(chalk5.red(`\u274C Key "${key}" not found.`));
+        console.log(chalk6.red(`\u274C Key "${key}" not found.`));
         return;
       }
     }
@@ -842,25 +1331,25 @@ var configCommand = new Command5("config").description("Manage DevPilot configur
       else if (!isNaN(Number(value))) parsedValue = Number(value);
     }
     current[keys[keys.length - 1]] = parsedValue;
-    writeFileSync4(configPath, YAML.stringify(config));
-    console.log(chalk5.green(`\u2705 Set ${key} = ${JSON.stringify(parsedValue)}`));
+    writeFileSync5(configPath, YAML.stringify(config));
+    console.log(chalk6.green(`\u2705 Set ${key} = ${JSON.stringify(parsedValue)}`));
   }
 }).addCommand(linearCommand);
 
 // src/commands/setup.ts
-import { Command as Command6 } from "commander";
-import { existsSync as existsSync6, readFileSync as readFileSync6, writeFileSync as writeFileSync6 } from "fs";
-import { join as join8 } from "path";
-import chalk7 from "chalk";
+import { Command as Command7 } from "commander";
+import { existsSync as existsSync8, readFileSync as readFileSync8, writeFileSync as writeFileSync7 } from "fs";
+import { join as join10 } from "path";
+import chalk8 from "chalk";
 import YAML2 from "yaml";
 import * as readline from "readline";
 import { linear as linear2 } from "@devpilot.sh/core";
 
 // src/utils/orchestrator.ts
 import { execSync, spawnSync } from "child_process";
-import { existsSync as existsSync5, writeFileSync as writeFileSync5 } from "fs";
-import { join as join7, basename } from "path";
-import chalk6 from "chalk";
+import { existsSync as existsSync7, writeFileSync as writeFileSync6 } from "fs";
+import { join as join9, basename } from "path";
+import chalk7 from "chalk";
 function checkCommand(cmd, versionArg = "--version") {
   try {
     const result = spawnSync(cmd, [versionArg], { encoding: "utf-8", stdio: "pipe" });
@@ -889,8 +1378,8 @@ function versionMeetsMinimum(version, minimum) {
 function checkSystemRequirements() {
   const node = checkCommand("node");
   const nodeMeetsMin = versionMeetsMinimum(node.version, "20.0.0");
-  const git3 = checkCommand("git");
-  const gitMeetsMin = versionMeetsMinimum(git3.version, "2.25.0");
+  const git4 = checkCommand("git");
+  const gitMeetsMin = versionMeetsMinimum(git4.version, "2.25.0");
   const tmux = checkCommand("tmux", "-V");
   const gh = checkCommand("gh");
   let ghAuthenticated = false;
@@ -904,39 +1393,39 @@ function checkSystemRequirements() {
   }
   return {
     node: { ...node, meetsMinimum: nodeMeetsMin },
-    git: { ...git3, meetsMinimum: gitMeetsMin },
+    git: { ...git4, meetsMinimum: gitMeetsMin },
     tmux: { installed: tmux.installed },
     gh: { installed: gh.installed, authenticated: ghAuthenticated }
   };
 }
 function printRequirementsStatus(reqs) {
-  console.log(chalk6.cyan("\nSystem Requirements:"));
+  console.log(chalk7.cyan("\nSystem Requirements:"));
   console.log("");
   if (reqs.node.installed && reqs.node.meetsMinimum) {
-    console.log(chalk6.green(`  \u2713 Node.js ${reqs.node.version}`));
+    console.log(chalk7.green(`  \u2713 Node.js ${reqs.node.version}`));
   } else if (reqs.node.installed) {
-    console.log(chalk6.yellow(`  \u26A0 Node.js ${reqs.node.version} (requires 20.0.0+)`));
+    console.log(chalk7.yellow(`  \u26A0 Node.js ${reqs.node.version} (requires 20.0.0+)`));
   } else {
-    console.log(chalk6.red("  \u2717 Node.js not found"));
+    console.log(chalk7.red("  \u2717 Node.js not found"));
   }
   if (reqs.git.installed && reqs.git.meetsMinimum) {
-    console.log(chalk6.green(`  \u2713 Git ${reqs.git.version}`));
+    console.log(chalk7.green(`  \u2713 Git ${reqs.git.version}`));
   } else if (reqs.git.installed) {
-    console.log(chalk6.yellow(`  \u26A0 Git ${reqs.git.version} (requires 2.25.0+)`));
+    console.log(chalk7.yellow(`  \u26A0 Git ${reqs.git.version} (requires 2.25.0+)`));
   } else {
-    console.log(chalk6.red("  \u2717 Git not found"));
+    console.log(chalk7.red("  \u2717 Git not found"));
   }
   if (reqs.tmux.installed) {
-    console.log(chalk6.green("  \u2713 tmux"));
+    console.log(chalk7.green("  \u2713 tmux"));
   } else {
-    console.log(chalk6.yellow("  \u26A0 tmux not found (optional, for session management)"));
+    console.log(chalk7.yellow("  \u26A0 tmux not found (optional, for session management)"));
   }
   if (reqs.gh.installed && reqs.gh.authenticated) {
-    console.log(chalk6.green("  \u2713 GitHub CLI (authenticated)"));
+    console.log(chalk7.green("  \u2713 GitHub CLI (authenticated)"));
   } else if (reqs.gh.installed) {
-    console.log(chalk6.yellow("  \u26A0 GitHub CLI (not authenticated - run: gh auth login)"));
+    console.log(chalk7.yellow("  \u26A0 GitHub CLI (not authenticated - run: gh auth login)"));
   } else {
-    console.log(chalk6.yellow("  \u26A0 GitHub CLI not found (optional, for PR creation)"));
+    console.log(chalk7.yellow("  \u26A0 GitHub CLI not found (optional, for PR creation)"));
   }
 }
 function isOrchestratorInstalled() {
@@ -951,14 +1440,14 @@ function isOrchestratorInstalled() {
   }
 }
 function installOrchestrator() {
-  console.log(chalk6.cyan("\nInstalling @composio/ao-cli..."));
+  console.log(chalk7.cyan("\nInstalling @composio/ao-cli..."));
   try {
     execSync("npm install -g @composio/ao-cli", { stdio: "inherit" });
-    console.log(chalk6.green("\u2713 @composio/ao-cli installed successfully"));
+    console.log(chalk7.green("\u2713 @composio/ao-cli installed successfully"));
     return true;
   } catch {
-    console.log(chalk6.red("\u2717 Failed to install @composio/ao-cli"));
-    console.log(chalk6.gray("  Try manually: npm install -g @composio/ao-cli"));
+    console.log(chalk7.red("\u2717 Failed to install @composio/ao-cli"));
+    console.log(chalk7.gray("  Try manually: npm install -g @composio/ao-cli"));
     return false;
   }
 }
@@ -1025,12 +1514,12 @@ Create small, focused PRs.`;
 }
 function writeOrchestratorConfig(cwd, config) {
   const YAML3 = __require("yaml");
-  const configPath = join7(cwd, "agent-orchestrator.yaml");
+  const configPath = join9(cwd, "agent-orchestrator.yaml");
   const yamlContent = YAML3.stringify(config);
-  writeFileSync5(configPath, yamlContent);
+  writeFileSync6(configPath, yamlContent);
 }
 function orchestratorConfigExists(cwd) {
-  return existsSync5(join7(cwd, "agent-orchestrator.yaml"));
+  return existsSync7(join9(cwd, "agent-orchestrator.yaml"));
 }
 function getInstallInstructions(reqs) {
   const instructions = [];
@@ -1057,10 +1546,10 @@ function prompt(question) {
     input: process.stdin,
     output: process.stdout
   });
-  return new Promise((resolve5) => {
+  return new Promise((resolve7) => {
     rl.question(question, (answer) => {
       rl.close();
-      resolve5(answer.trim());
+      resolve7(answer.trim());
     });
   });
 }
@@ -1070,45 +1559,45 @@ async function confirm(question, defaultYes = true) {
   if (!answer) return defaultYes;
   return answer.toLowerCase().startsWith("y");
 }
-var setupCommand = new Command6("setup").description("Interactive setup wizard for DevPilot and agent-orchestrator").option("--linear-only", "Only configure Linear integration").option("--orchestrator-only", "Only configure agent-orchestrator").option("--check", "Only check system requirements").option("-y, --yes", "Accept all defaults (non-interactive mode)").action(async (options) => {
+var setupCommand = new Command7("setup").description("Interactive setup wizard for DevPilot and agent-orchestrator").option("--linear-only", "Only configure Linear integration").option("--orchestrator-only", "Only configure agent-orchestrator").option("--check", "Only check system requirements").option("-y, --yes", "Accept all defaults (non-interactive mode)").action(async (options) => {
   const nonInteractive = options.yes;
   const cwd = process.cwd();
-  const configPath = join8(cwd, ".devpilot", "config.yaml");
-  if (!existsSync6(configPath)) {
-    console.log(chalk7.red('DevPilot not initialized. Run "devpilot init" first.'));
+  const configPath = join10(cwd, ".devpilot", "config.yaml");
+  if (!existsSync8(configPath)) {
+    console.log(chalk8.red('DevPilot not initialized. Run "devpilot init" first.'));
     return;
   }
-  console.log(chalk7.bold.cyan("\n DevPilot Setup Wizard\n"));
-  console.log(chalk7.gray("This wizard will help you configure DevPilot and agent-orchestrator.\n"));
-  console.log(chalk7.bold("Step 1: Checking System Requirements"));
+  console.log(chalk8.bold.cyan("\n DevPilot Setup Wizard\n"));
+  console.log(chalk8.gray("This wizard will help you configure DevPilot and agent-orchestrator.\n"));
+  console.log(chalk8.bold("Step 1: Checking System Requirements"));
   const reqs = checkSystemRequirements();
   printRequirementsStatus(reqs);
   if (!reqs.node.meetsMinimum) {
-    console.log(chalk7.red("\nNode.js 20+ is required. Please upgrade and try again."));
+    console.log(chalk8.red("\nNode.js 20+ is required. Please upgrade and try again."));
     return;
   }
   if (!reqs.git.meetsMinimum) {
-    console.log(chalk7.red("\nGit 2.25+ is required. Please upgrade and try again."));
+    console.log(chalk8.red("\nGit 2.25+ is required. Please upgrade and try again."));
     return;
   }
   const instructions = getInstallInstructions(reqs);
   if (instructions.length > 0) {
-    console.log(chalk7.yellow("\nOptional installations:"));
-    instructions.forEach((inst) => console.log(chalk7.gray(`  - ${inst}`)));
+    console.log(chalk8.yellow("\nOptional installations:"));
+    instructions.forEach((inst) => console.log(chalk8.gray(`  - ${inst}`)));
   }
   if (options.check) {
     return;
   }
   console.log("");
   if (!options.orchestratorOnly) {
-    console.log(chalk7.bold("Step 2: Linear Integration"));
-    console.log(chalk7.gray("Linear integration enables ticket tracking and auto-status updates.\n"));
-    const configContent = readFileSync6(configPath, "utf-8");
+    console.log(chalk8.bold("Step 2: Linear Integration"));
+    console.log(chalk8.gray("Linear integration enables ticket tracking and auto-status updates.\n"));
+    const configContent = readFileSync8(configPath, "utf-8");
     const config = YAML2.parse(configContent);
     const existingApiKey = config.integrations?.linear?.apiKey;
     const existingTeamId = config.integrations?.linear?.teamId;
     if (existingApiKey && existingTeamId) {
-      console.log(chalk7.green("  Linear is already configured."));
+      console.log(chalk8.green("  Linear is already configured."));
       if (!nonInteractive) {
         const reconfigure = await confirm("  Reconfigure Linear?", false);
         if (reconfigure) {
@@ -1117,42 +1606,42 @@ var setupCommand = new Command6("setup").description("Interactive setup wizard f
       }
       console.log("");
     } else if (nonInteractive) {
-      console.log(chalk7.gray("  Skipping Linear setup (non-interactive mode).\n"));
+      console.log(chalk8.gray("  Skipping Linear setup (non-interactive mode).\n"));
     } else {
       const setupLinear = await confirm("  Would you like to set up Linear integration?");
       if (setupLinear) {
         await configureLinear(configPath, config);
       } else {
-        console.log(chalk7.gray("  Skipping Linear setup.\n"));
+        console.log(chalk8.gray("  Skipping Linear setup.\n"));
       }
     }
   }
   if (!options.linearOnly) {
-    console.log(chalk7.bold("Step 3: Agent Orchestrator"));
-    console.log(chalk7.gray("Agent orchestrator manages parallel AI coding agents.\n"));
+    console.log(chalk8.bold("Step 3: Agent Orchestrator"));
+    console.log(chalk8.gray("Agent orchestrator manages parallel AI coding agents.\n"));
     const installed = isOrchestratorInstalled();
     if (!installed) {
-      console.log(chalk7.yellow("  @composio/ao-cli is not installed."));
+      console.log(chalk8.yellow("  @composio/ao-cli is not installed."));
       if (nonInteractive) {
-        console.log(chalk7.gray("  Skipping installation (non-interactive mode)."));
-        console.log(chalk7.gray("  Install later with: npm install -g @composio/ao-cli\n"));
+        console.log(chalk8.gray("  Skipping installation (non-interactive mode)."));
+        console.log(chalk8.gray("  Install later with: npm install -g @composio/ao-cli\n"));
       } else {
         const install = await confirm("  Install @composio/ao-cli globally?");
         if (install) {
           const success = installOrchestrator();
           if (!success) {
-            console.log(chalk7.yellow("  Continuing without agent-orchestrator CLI...\n"));
+            console.log(chalk8.yellow("  Continuing without agent-orchestrator CLI...\n"));
           }
         } else {
-          console.log(chalk7.gray("  Skipping installation. You can install later with:"));
-          console.log(chalk7.cyan("    npm install -g @composio/ao-cli\n"));
+          console.log(chalk8.gray("  Skipping installation. You can install later with:"));
+          console.log(chalk8.cyan("    npm install -g @composio/ao-cli\n"));
         }
       }
     } else {
-      console.log(chalk7.green("  @composio/ao-cli is installed."));
+      console.log(chalk8.green("  @composio/ao-cli is installed."));
     }
     if (orchestratorConfigExists(cwd)) {
-      console.log(chalk7.green("  agent-orchestrator.yaml already exists."));
+      console.log(chalk8.green("  agent-orchestrator.yaml already exists."));
       if (!nonInteractive) {
         const regenerate = await confirm("  Regenerate configuration?", false);
         if (regenerate) {
@@ -1167,45 +1656,45 @@ var setupCommand = new Command6("setup").description("Interactive setup wizard f
         if (generate) {
           await configureOrchestrator(cwd, configPath, nonInteractive);
         } else {
-          console.log(chalk7.gray("  Skipping config generation.\n"));
+          console.log(chalk8.gray("  Skipping config generation.\n"));
         }
       }
     }
   }
-  console.log(chalk7.bold.green("\nSetup Complete!\n"));
-  console.log(chalk7.white("Next steps:"));
-  console.log(chalk7.gray("  1. Run ") + chalk7.cyan("devpilot serve") + chalk7.gray(" to start the UI"));
-  console.log(chalk7.gray("  2. Run ") + chalk7.cyan("ao start") + chalk7.gray(" to start agent orchestrator"));
-  console.log(chalk7.gray("  3. Use the UI to create items and dispatch to the fleet"));
+  console.log(chalk8.bold.green("\nSetup Complete!\n"));
+  console.log(chalk8.white("Next steps:"));
+  console.log(chalk8.gray("  1. Run ") + chalk8.cyan("devpilot serve") + chalk8.gray(" to start the UI"));
+  console.log(chalk8.gray("  2. Run ") + chalk8.cyan("ao start") + chalk8.gray(" to start agent orchestrator"));
+  console.log(chalk8.gray("  3. Use the UI to create items and dispatch to the fleet"));
   console.log(
-    chalk7.gray("  4. Connect this machine with ") + chalk7.cyan("devpilot bridge connect") + chalk7.gray(" to see what each session spends\n")
+    chalk8.gray("  4. Connect this machine with ") + chalk8.cyan("devpilot bridge connect") + chalk8.gray(" to see what each session spends\n")
   );
 });
 async function configureLinear(configPath, config) {
   console.log("");
-  console.log(chalk7.gray("  Get your API key from: https://linear.app/settings/api\n"));
+  console.log(chalk8.gray("  Get your API key from: https://linear.app/settings/api\n"));
   const apiKey = await prompt("  Linear API key: ");
   if (!apiKey) {
-    console.log(chalk7.yellow("  No API key provided. Skipping Linear setup.\n"));
+    console.log(chalk8.yellow("  No API key provided. Skipping Linear setup.\n"));
     return;
   }
-  console.log(chalk7.cyan("\n  Connecting to Linear..."));
+  console.log(chalk8.cyan("\n  Connecting to Linear..."));
   try {
     const tempClient = linear2.initLinearClient({ apiKey, teamId: "" });
     const teams = await tempClient.getTeams();
     if (teams.length === 0) {
-      console.log(chalk7.yellow("  No teams found. Make sure you have access to at least one team."));
+      console.log(chalk8.yellow("  No teams found. Make sure you have access to at least one team."));
       return;
     }
-    console.log(chalk7.green(`  Found ${teams.length} team(s):
+    console.log(chalk8.green(`  Found ${teams.length} team(s):
 `));
     teams.forEach((team, i) => {
-      console.log(chalk7.white(`    ${i + 1}. ${team.name} (${team.key})`));
+      console.log(chalk8.white(`    ${i + 1}. ${team.name} (${team.key})`));
     });
     const teamChoice = await prompt("\n  Select team number: ");
     const teamIndex = parseInt(teamChoice, 10) - 1;
     if (isNaN(teamIndex) || teamIndex < 0 || teamIndex >= teams.length) {
-      console.log(chalk7.yellow("  Invalid selection. Skipping Linear setup."));
+      console.log(chalk8.yellow("  Invalid selection. Skipping Linear setup."));
       return;
     }
     const selectedTeam = teams[teamIndex];
@@ -1216,21 +1705,21 @@ async function configureLinear(configPath, config) {
       teamName: selectedTeam.name,
       teamKey: selectedTeam.key
     };
-    writeFileSync6(configPath, YAML2.stringify(config));
-    console.log(chalk7.green(`
+    writeFileSync7(configPath, YAML2.stringify(config));
+    console.log(chalk8.green(`
   Linear configured for team: ${selectedTeam.name}
 `));
-    console.log(chalk7.gray("  For agent-orchestrator, also set the LINEAR_API_KEY environment variable:"));
-    console.log(chalk7.cyan(`    export LINEAR_API_KEY="${apiKey}"
+    console.log(chalk8.gray("  For agent-orchestrator, also set the LINEAR_API_KEY environment variable:"));
+    console.log(chalk8.cyan(`    export LINEAR_API_KEY="${apiKey}"
 `));
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    console.log(chalk7.red(`  Failed to connect: ${message}`));
-    console.log(chalk7.gray("  You can configure Linear later with: devpilot config linear\n"));
+    console.log(chalk8.red(`  Failed to connect: ${message}`));
+    console.log(chalk8.gray("  You can configure Linear later with: devpilot config linear\n"));
   }
 }
 async function configureOrchestrator(cwd, configPath, nonInteractive = false) {
-  const config = YAML2.parse(readFileSync6(configPath, "utf-8"));
+  const config = YAML2.parse(readFileSync8(configPath, "utf-8"));
   const linearTeamId = config.integrations?.linear?.teamId;
   const aoConfig = generateOrchestratorConfig({
     cwd,
@@ -1239,7 +1728,7 @@ async function configureOrchestrator(cwd, configPath, nonInteractive = false) {
   if (!nonInteractive) {
     const customRules = await confirm("\n  Would you like to customize agent rules?", false);
     if (customRules) {
-      console.log(chalk7.gray("  Enter rules (one per line, empty line to finish):"));
+      console.log(chalk8.gray("  Enter rules (one per line, empty line to finish):"));
       const rules = [];
       let line = "";
       do {
@@ -1253,28 +1742,28 @@ async function configureOrchestrator(cwd, configPath, nonInteractive = false) {
     }
   }
   writeOrchestratorConfig(cwd, aoConfig);
-  console.log(chalk7.green("\n  Created agent-orchestrator.yaml"));
-  console.log(chalk7.gray("\n  Configuration preview:"));
-  console.log(chalk7.gray("  " + "-".repeat(40)));
+  console.log(chalk8.green("\n  Created agent-orchestrator.yaml"));
+  console.log(chalk8.gray("\n  Configuration preview:"));
+  console.log(chalk8.gray("  " + "-".repeat(40)));
   const preview = YAML2.stringify(aoConfig).split("\n").slice(0, 15).join("\n");
-  preview.split("\n").forEach((line) => console.log(chalk7.gray(`  ${line}`)));
-  console.log(chalk7.gray("  ...\n"));
+  preview.split("\n").forEach((line) => console.log(chalk8.gray(`  ${line}`)));
+  console.log(chalk8.gray("  ...\n"));
 }
 
 // src/commands/bridge.ts
-import { Command as Command10 } from "commander";
+import { Command as Command11 } from "commander";
 
 // src/commands/bridge/connect.ts
 import os from "os";
-import { Command as Command7 } from "commander";
-import chalk11 from "chalk";
+import { Command as Command8 } from "commander";
+import chalk12 from "chalk";
 import {
-  BridgeClient,
-  DEFAULT_BRIDGE_URL,
+  BridgeClient as BridgeClient2,
+  DEFAULT_BRIDGE_URL as DEFAULT_BRIDGE_URL2,
   DispatchLoop,
   HeartbeatService,
   bridgeCredentialsPath,
-  resolveBridgeCredentials,
+  resolveBridgeCredentials as resolveBridgeCredentials2,
   saveBridgeCredentials
 } from "@devpilot.sh/bridge-client";
 
@@ -1367,8 +1856,8 @@ function createBridgeDispatchHandler(opts) {
         linearTicketId: linearIdentifier,
         callbackUrl: opts.callbackUrl ?? ""
       });
-      const settled = new Promise((resolve5) => {
-        inFlight.set(sessionId, resolve5);
+      const settled = new Promise((resolve7) => {
+        inFlight.set(sessionId, resolve7);
       });
       const response = await svc.dispatch(request);
       if (!response.accepted) {
@@ -1675,13 +2164,13 @@ async function say(o, progressPercent, message) {
 }
 
 // src/commands/bridge/connect.ts
-import { homedir as homedir4 } from "os";
-import { join as join10, dirname as dirname5 } from "path";
-import { readFileSync as readFileSync10, writeFileSync as writeFileSync10, mkdirSync as mkdirSync8, existsSync as existsSync10 } from "fs";
+import { homedir as homedir5 } from "os";
+import { join as join12, dirname as dirname7 } from "path";
+import { readFileSync as readFileSync12, writeFileSync as writeFileSync11, mkdirSync as mkdirSync10, existsSync as existsSync12 } from "fs";
 
 // src/commands/bridge/conductor-watcher.ts
-import { readFileSync as readFileSync7, writeFileSync as writeFileSync7, mkdirSync as mkdirSync5, unlinkSync as unlinkSync2, existsSync as existsSync7 } from "fs";
-import { dirname as dirname2 } from "path";
+import { readFileSync as readFileSync9, writeFileSync as writeFileSync8, mkdirSync as mkdirSync7, unlinkSync as unlinkSync2, existsSync as existsSync9 } from "fs";
+import { dirname as dirname4 } from "path";
 function whereTheWorkIs(state) {
   const isolation = state.outcome?.isolation;
   if (!isolation) return "";
@@ -1808,10 +2297,10 @@ var ConductorWatcher = class {
    */
   restore() {
     const path = this.opts.statePath;
-    if (!path || !existsSync7(path)) return 0;
+    if (!path || !existsSync9(path)) return 0;
     let entries = [];
     try {
-      const parsed = JSON.parse(readFileSync7(path, "utf8"));
+      const parsed = JSON.parse(readFileSync9(path, "utf8"));
       if (Array.isArray(parsed)) {
         entries = parsed.filter(
           (e) => Boolean(e) && typeof e.sessionId === "string" && typeof e.itemId === "string"
@@ -1913,11 +2402,11 @@ var ConductorWatcher = class {
     if (!path) return;
     try {
       if (this.runs.size === 0) {
-        if (existsSync7(path)) unlinkSync2(path);
+        if (existsSync9(path)) unlinkSync2(path);
         return;
       }
-      mkdirSync5(dirname2(path), { recursive: true });
-      writeFileSync7(path, JSON.stringify([...this.runs.values()], null, 2), "utf8");
+      mkdirSync7(dirname4(path), { recursive: true });
+      writeFileSync8(path, JSON.stringify([...this.runs.values()], null, 2), "utf8");
     } catch {
     }
   }
@@ -2133,8 +2622,8 @@ var CommandApplier = class {
 };
 
 // src/commands/bridge/adoption-watcher.ts
-import { statSync, existsSync as existsSync8, readFileSync as readFileSync8, writeFileSync as writeFileSync8, mkdirSync as mkdirSync6 } from "fs";
-import { dirname as dirname3 } from "path";
+import { statSync, existsSync as existsSync10, readFileSync as readFileSync10, writeFileSync as writeFileSync9, mkdirSync as mkdirSync8 } from "fs";
+import { dirname as dirname5 } from "path";
 
 // src/commands/bridge/transcript-tail.ts
 import { openSync, readSync, fstatSync, closeSync } from "fs";
@@ -2334,6 +2823,7 @@ function backfill(fd, state, cwd) {
   state.usage = initialUsageMeter();
   state.written = [];
   state.writeCalls = 0;
+  state.prompts = 0;
   if (state.byteOffset === 0) return;
   const buf = Buffer.alloc(state.byteOffset);
   readSync(fd, buf, 0, buf.length, 0);
@@ -2367,8 +2857,9 @@ function tailTranscript(transcriptPath, state, cwd) {
       state.usage = initialUsageMeter();
       state.written = [];
       state.writeCalls = 0;
+      state.prompts = 0;
     }
-    if (state.usage === void 0) backfill(fd, state, cwd);
+    if (state.usage === void 0 || state.prompts === void 0) backfill(fd, state, cwd);
     if (size === state.byteOffset) {
       return [];
     }
@@ -2385,7 +2876,9 @@ function tailTranscript(transcriptPath, state, cwd) {
   const events = [];
   for (const line of lines) {
     const o = parse(line);
-    if (!o || o.type !== "assistant") continue;
+    if (!o) continue;
+    if (isHumanPrompt(o)) state.prompts = (state.prompts ?? 0) + 1;
+    if (o.type !== "assistant") continue;
     countUsage(usage, o.message?.id, o.message?.usage, o.message?.model);
     const ms = o.timestamp ? Date.parse(o.timestamp) : NaN;
     if (!Number.isFinite(ms)) continue;
@@ -2519,13 +3012,13 @@ var AdoptionWatcher = class {
    */
   restore() {
     try {
-      if (!existsSync8(this.config.statePath)) return 0;
-      const parsed = JSON.parse(readFileSync8(this.config.statePath, "utf8"));
+      if (!existsSync10(this.config.statePath)) return 0;
+      const parsed = JSON.parse(readFileSync10(this.config.statePath, "utf8"));
       if (parsed?.version !== 1 || !parsed.entries) return 0;
       let restored = 0;
       for (const entry of Object.values(parsed.entries)) {
         if (entry.settled) continue;
-        if (!existsSync8(entry.transcriptPath)) continue;
+        if (!existsSync10(entry.transcriptPath)) continue;
         this.entries.set(entry.adoptionKey, entry);
         restored++;
       }
@@ -2626,9 +3119,9 @@ var AdoptionWatcher = class {
   }
   persist() {
     try {
-      mkdirSync6(dirname3(this.config.statePath), { recursive: true });
+      mkdirSync8(dirname5(this.config.statePath), { recursive: true });
       const ledger = { version: 1, entries: Object.fromEntries(this.entries) };
-      writeFileSync8(this.config.statePath, JSON.stringify(ledger, null, 2), "utf8");
+      writeFileSync9(this.config.statePath, JSON.stringify(ledger, null, 2), "utf8");
     } catch {
     }
   }
@@ -2644,16 +3137,73 @@ function elapsed(startedAt, endMs) {
   return rest === 0 ? `${hours} hour${hours === 1 ? "" : "s"}` : `${hours}h ${rest}m`;
 }
 
+// src/commands/bridge/graph-sharer.ts
+var GraphSharer = class {
+  constructor(opts) {
+    this.opts = opts;
+    this.timer = null;
+    this.running = false;
+    /** repo dir -> the commit and index time last sent, to skip a sweep with nothing new. */
+    this.sent = /* @__PURE__ */ new Map();
+  }
+  start() {
+    if (this.timer) return;
+    void this.sweep();
+    this.timer = setInterval(() => void this.sweep(), this.opts.intervalMs ?? 10 * 6e4);
+    this.timer.unref?.();
+  }
+  stop() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+  async sweep() {
+    if (this.running) return;
+    this.running = true;
+    try {
+      const shares = loadShares(this.opts.storePath ?? shareStorePath());
+      const dirs = Object.keys(shares.repos);
+      if (dirs.length === 0) return;
+      const indexer = await findIndexer();
+      for (const dir of dirs) {
+        if (!hasIndex(dir)) continue;
+        try {
+          if (indexer) await syncIndex(indexer, dir);
+          const identity = identify(dir, indexer?.version ?? "unknown");
+          if ("error" in identity || identity.skip) continue;
+          const outcome = await pushGraph(this.opts.client, dir, identity);
+          if (outcome.status === "pushed") {
+            const key = `${identity.commitSha}:${outcome.counts?.nodes ?? ""}`;
+            if ((outcome.changed > 0 || outcome.removed > 0) && this.sent.get(dir) !== key) {
+              this.opts.onLog?.(
+                `code graph for ${identity.repo}: ${outcome.changed} file(s) sent, ${outcome.removed} removed`
+              );
+            }
+            this.sent.set(dir, key);
+          } else if (outcome.status === "disabled") {
+            this.opts.onLog?.(`code graph for ${identity.repo} not sent: the workspace has not turned the feature on`);
+          } else if (outcome.status === "failed") {
+            this.opts.onLog?.(`code graph for ${identity.repo} did not land: ${outcome.message}`);
+          }
+        } catch (error) {
+          this.opts.onLog?.(`code graph sweep for ${dir} failed: ${error instanceof Error ? error.message : error}`);
+        }
+      }
+    } finally {
+      this.running = false;
+    }
+  }
+};
+
 // src/commands/bridge/observer.ts
-import chalk9 from "chalk";
-import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync9, statSync as statSync2, writeFileSync as writeFileSync9 } from "fs";
-import { dirname as dirname4 } from "path";
+import chalk10 from "chalk";
+import { existsSync as existsSync11, mkdirSync as mkdirSync9, readFileSync as readFileSync11, statSync as statSync2, writeFileSync as writeFileSync10 } from "fs";
+import { dirname as dirname6 } from "path";
 
 // src/commands/sessions/scan-pipeline.ts
-import { homedir as homedir3 } from "os";
-import { join as join9 } from "path";
-import chalk8 from "chalk";
-import { adoption } from "@devpilot.sh/core";
+import { homedir as homedir4 } from "os";
+import { join as join11 } from "path";
+import chalk9 from "chalk";
+import { adoption as adoption2 } from "@devpilot.sh/core";
 function parseDuration(input, fallbackMs) {
   const match = /^(\d+)\s*([smhdw])?$/i.exec(input.trim());
   if (!match) return fallbackMs;
@@ -2670,7 +3220,7 @@ function parseDuration(input, fallbackMs) {
 }
 async function runScanPipeline(options) {
   const repos = options.onlyRepo ? [options.onlyRepo] : options.repos;
-  const scan = adoption.scanSessions({
+  const scan = adoption2.scanSessions({
     machineName: options.machineName,
     repos,
     // `--repo x` is an explicit narrowing, so it must not be widened by
@@ -2678,8 +3228,8 @@ async function runScanPipeline(options) {
     allRepos: options.onlyRepo ? false : options.allRepos,
     sinceMs: options.sinceMs,
     includePaths: options.includePaths,
-    excludeSessionUuids: adoption.loadOwnedSessionIds(
-      join9(homedir3(), ".devpilot", "owned-sessions.json")
+    excludeSessionUuids: adoption2.loadOwnedSessionIds(
+      join11(homedir4(), ".devpilot", "owned-sessions.json")
     )
   });
   let modelTitles = 0;
@@ -2688,7 +3238,7 @@ async function runScanPipeline(options) {
       const observation = observationFor(candidate, scan);
       return observation ? { candidate, observation } : null;
     }).filter((j) => j !== null);
-    const summaries = await adoption.summarizeSessions(
+    const summaries = await adoption2.summarizeSessions(
       jobs.map((j) => ({
         observation: j.observation,
         touchedPaths: j.candidate.touchedPaths ?? []
@@ -2708,7 +3258,7 @@ async function runScanPipeline(options) {
     unmappedProjectCount: scan.unmappedProjectCount,
     skipped: scan.skipped,
     projectDirCount: scan.projectDirCount,
-    withheldOwners: adoption.withheldOwners(scan.skipped),
+    withheldOwners: adoption2.withheldOwners(scan.skipped),
     modelTitles,
     transcriptPaths: scan.transcriptPaths
   };
@@ -2716,7 +3266,7 @@ async function runScanPipeline(options) {
 function observationFor(candidate, scan) {
   const path = scan.transcriptPaths?.get(candidate.adoptionKey);
   if (!path) return null;
-  return adoption.probeTranscript(path.transcriptPath, path.sessionUuid);
+  return adoption2.probeTranscript(path.transcriptPath, path.sessionUuid);
 }
 function relativeAge(iso, now = Date.now()) {
   const ms = now - Date.parse(iso);
@@ -2734,18 +3284,18 @@ function pad(value, width) {
 function renderPreview(rows, result) {
   const lines = [];
   lines.push(
-    chalk8.gray(
+    chalk9.gray(
       `  Scanned ${result.projectDirCount} project director${result.projectDirCount === 1 ? "y" : "ies"} \xB7 ${result.candidates.length} session${result.candidates.length === 1 ? "" : "s"} in scope`
     )
   );
   lines.push("");
   if (rows.length > 0) {
     lines.push(
-      chalk8.gray(`  ${pad("REPO", 30)} ${pad("SESSION", 44)} ${pad("LAST", 6)} \u2192 BOARD`)
+      chalk9.gray(`  ${pad("REPO", 30)} ${pad("SESSION", 44)} ${pad("LAST", 6)} \u2192 BOARD`)
     );
     for (const row of rows) {
       lines.push(
-        `  ${chalk8.cyan(pad(row.repo, 30))} ${pad(row.title, 44)} ${row.live ? chalk8.green(pad(relativeAge(row.lastActivityAt), 5)) + "\u25CF" : chalk8.gray(pad(relativeAge(row.lastActivityAt), 6))} \u2192 ${row.destination}`
+        `  ${chalk9.cyan(pad(row.repo, 30))} ${pad(row.title, 44)} ${row.live ? chalk9.green(pad(relativeAge(row.lastActivityAt), 5)) + "\u25CF" : chalk9.gray(pad(relativeAge(row.lastActivityAt), 6))} \u2192 ${row.destination}`
       );
     }
     lines.push("");
@@ -2772,9 +3322,9 @@ function renderPreview(rows, result) {
     }
   }
   if (parts.length > 0) {
-    lines.push(chalk8.gray(`  Skipped: ${parts.join(", ")}`));
+    lines.push(chalk9.gray(`  Skipped: ${parts.join(", ")}`));
     if (reasons.has("not-routed")) {
-      lines.push(chalk8.gray("           Run with --all-repos to include the others."));
+      lines.push(chalk9.gray("           Run with --all-repos to include the others."));
     }
   }
   return lines.join("\n");
@@ -2915,7 +3465,7 @@ var SessionObserver = class {
       return null;
     } catch (err) {
       this.config.onLog?.(
-        chalk9.gray(`observation sweep failed: ${err instanceof Error ? err.message : err}`)
+        chalk10.gray(`observation sweep failed: ${err instanceof Error ? err.message : err}`)
       );
       return null;
     } finally {
@@ -2978,7 +3528,7 @@ var SessionObserver = class {
       this.persistReadings();
     } catch (err) {
       this.config.onLog?.(
-        chalk9.gray(`instrument readings failed: ${err instanceof Error ? err.message : err}`)
+        chalk10.gray(`instrument readings failed: ${err instanceof Error ? err.message : err}`)
       );
     } finally {
       this.sendingReadings = false;
@@ -2989,8 +3539,8 @@ var SessionObserver = class {
     const path = this.config.readingsStatePath;
     if (!path) return;
     try {
-      if (!existsSync9(path)) return;
-      const parsed = JSON.parse(readFileSync9(path, "utf8"));
+      if (!existsSync11(path)) return;
+      const parsed = JSON.parse(readFileSync11(path, "utf8"));
       if (parsed?.version !== 1 || !parsed.readings) return;
       for (const [key, reading] of Object.entries(parsed.readings)) this.readings.set(key, reading);
     } catch {
@@ -3000,8 +3550,8 @@ var SessionObserver = class {
     const path = this.config.readingsStatePath;
     if (!path) return;
     try {
-      mkdirSync7(dirname4(path), { recursive: true });
-      writeFileSync9(
+      mkdirSync9(dirname6(path), { recursive: true });
+      writeFileSync10(
         path,
         JSON.stringify({ version: 1, readings: Object.fromEntries(this.readings) }),
         "utf8"
@@ -3012,7 +3562,7 @@ var SessionObserver = class {
 };
 
 // src/commands/bridge/resume-applier.ts
-import { adoption as adoption2 } from "@devpilot.sh/core";
+import { adoption as adoption3 } from "@devpilot.sh/core";
 var DEFAULT_LIVE_WITHIN_MS = 5 * 6e4;
 var ResumeApplier = class {
   constructor(opts) {
@@ -3052,7 +3602,7 @@ var ResumeApplier = class {
       );
       return;
     }
-    const observation = adoption2.probeTranscript(target.transcriptPath, target.sessionUuid);
+    const observation = adoption3.probeTranscript(target.transcriptPath, target.sessionUuid);
     if (!observation) {
       await this.fail(command, "That session\u2019s transcript is no longer on this machine.");
       return;
@@ -3153,8 +3703,8 @@ var ResumeApplier = class {
 };
 
 // src/commands/bridge/introspect.ts
-import chalk10 from "chalk";
-import { adoption as adoption3 } from "@devpilot.sh/core";
+import chalk11 from "chalk";
+import { adoption as adoption4 } from "@devpilot.sh/core";
 async function runIntrospection(options) {
   let result;
   try {
@@ -3167,19 +3717,19 @@ async function runIntrospection(options) {
       maxSummaries: 25,
       // Only pay for titles when they are about to be written somewhere.
       summarize: options.adopt,
-      onWarn: (line) => console.log(chalk10.gray(`   ${line}`))
+      onWarn: (line) => console.log(chalk11.gray(`   ${line}`))
     });
   } catch (err) {
-    console.log(chalk10.gray(`   Could not look around this machine: ${describe2(err)}`));
+    console.log(chalk11.gray(`   Could not look around this machine: ${describe2(err)}`));
     return;
   }
   if (result.projectDirCount === 0) {
     return;
   }
   const live = result.discovered.reduce((n2, r) => n2 + r.liveSessionCount, 0);
-  const owners = adoption3.groupByOwner(result.discovered);
+  const owners = adoption4.groupByOwner(result.discovered);
   console.log(
-    chalk10.cyan(
+    chalk11.cyan(
       `   Looked around this machine: ${result.projectDirCount} projects, ${owners.size} owner${owners.size === 1 ? "" : "s"}, ${result.discovered.reduce((n2, r) => n2 + r.sessionCount, 0)} sessions`
     )
   );
@@ -3191,11 +3741,11 @@ async function runIntrospection(options) {
     const sessions = repos.reduce((n2, r) => n2 + r.sessionCount, 0);
     const liveHere = repos.reduce((n2, r) => n2 + r.liveSessionCount, 0);
     console.log(
-      `     ${chalk10.bold(owner.padEnd(18))} ${String(repos.length).padStart(2)} repo${repos.length === 1 ? " " : "s"}   ${String(sessions).padStart(4)} session${sessions === 1 ? " " : "s"}` + (liveHere > 0 ? chalk10.green(`   \u25CF ${liveHere} live`) : "")
+      `     ${chalk11.bold(owner.padEnd(18))} ${String(repos.length).padStart(2)} repo${repos.length === 1 ? " " : "s"}   ${String(sessions).padStart(4)} session${sessions === 1 ? " " : "s"}` + (liveHere > 0 ? chalk11.green(`   \u25CF ${liveHere} live`) : "")
     );
   }
   if (sorted.length > 8) {
-    console.log(chalk10.gray(`     \u2026 and ${sorted.length - 8} more`));
+    console.log(chalk11.gray(`     \u2026 and ${sorted.length - 8} more`));
   }
   console.log("");
   const discovery = await options.client.reportDiscovery({
@@ -3205,18 +3755,18 @@ async function runIntrospection(options) {
   });
   if (discovery && discovery.proposed > 0) {
     console.log(
-      chalk10.gray(
+      chalk11.gray(
         `     ${discovery.proposed} repo${discovery.proposed === 1 ? "" : "s"} not yet routed \u2014 review at ${options.client.hostedUrl()}/fleet/discovered`
       )
     );
     console.log("");
   } else if (!discovery) {
-    console.log(chalk10.gray("     (could not report the inventory \u2014 the bridge is still fine)"));
+    console.log(chalk11.gray("     (could not report the inventory \u2014 the bridge is still fine)"));
     console.log("");
   }
   if (live > 0 && !options.adopt) {
     console.log(
-      chalk10.gray(
+      chalk11.gray(
         `     ${live} of these are running right now. \`devpilot sessions scan\` shows what putting them on the board would do.`
       )
     );
@@ -3230,7 +3780,7 @@ async function runIntrospection(options) {
       dryRun: false
     });
     console.log(
-      chalk10.green(
+      chalk11.green(
         `   \u2713 Adopted ${response.adopted}, attached ${response.attached}, ${response.duplicates} already tracked, ${response.skipped} skipped`
       )
     );
@@ -3258,14 +3808,14 @@ async function runIntrospection(options) {
     }
     if (options.watcher.size() > 0) {
       console.log(
-        chalk10.gray(
+        chalk11.gray(
           `     Watching ${options.watcher.size()} of them. They are observed, not dispatched \u2014 no ticket will be moved.`
         )
       );
     }
     console.log("");
   } catch (err) {
-    console.log(chalk10.yellow(`   Could not adopt: ${describe2(err)}`));
+    console.log(chalk11.yellow(`   Could not adopt: ${describe2(err)}`));
     console.log("");
   }
 }
@@ -3275,23 +3825,23 @@ function describe2(err) {
 
 // src/commands/bridge/connect.ts
 function stableMachineName() {
-  const path = join10(homedir4(), ".devpilot", "machine.json");
+  const path = join12(homedir5(), ".devpilot", "machine.json");
   try {
-    if (existsSync10(path)) {
-      const saved = JSON.parse(readFileSync10(path, "utf8"));
+    if (existsSync12(path)) {
+      const saved = JSON.parse(readFileSync12(path, "utf8"));
       if (saved.name) return saved.name;
     }
   } catch {
   }
   const name = os.hostname();
   try {
-    mkdirSync8(dirname5(path), { recursive: true });
-    writeFileSync10(path, JSON.stringify({ name }, null, 2), "utf8");
+    mkdirSync10(dirname7(path), { recursive: true });
+    writeFileSync11(path, JSON.stringify({ name }, null, 2), "utf8");
   } catch {
   }
   return name;
 }
-var connectCommand = new Command7("connect").description("Connect this machine to a DevPilot bridge and run dispatched work locally").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-n, --name <name>", "Name for this machine (defaults to a stable name for this machine)").option("-r, --repos <repos>", "Comma-separated repos this machine handles").option("-m, --mode <mode>", "Local orchestrator mode (http|claude-session)", "http").option(
+var connectCommand = new Command8("connect").description("Connect this machine to a DevPilot bridge and run dispatched work locally").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-n, --name <name>", "Name for this machine (defaults to a stable name for this machine)").option("-r, --repos <repos>", "Comma-separated repos this machine handles").option("-m, --mode <mode>", "Local orchestrator mode (http|claude-session)", "http").option(
   "--transport <transport>",
   "realtime | poll \u2014 polling is fully correct, just higher latency",
   process.env.DEVPILOT_BRIDGE_TRANSPORT || "realtime"
@@ -3323,70 +3873,70 @@ var connectCommand = new Command7("connect").description("Connect this machine t
   "With --adopt, include repos this machine does not route (names them first)",
   false
 ).action(async (options) => {
-  const credentials = resolveBridgeCredentials({ url: options.url, token: options.token });
-  options.url = credentials.url ?? (credentials.token ? DEFAULT_BRIDGE_URL : void 0);
+  const credentials = resolveBridgeCredentials2({ url: options.url, token: options.token });
+  options.url = credentials.url ?? (credentials.token ? DEFAULT_BRIDGE_URL2 : void 0);
   options.token = credentials.token;
   if (!options.url) {
-    console.error(chalk11.red("\u2717 Bridge URL required (--url or DEVPILOT_BRIDGE_URL)"));
+    console.error(chalk12.red("\u2717 Bridge URL required (--url or DEVPILOT_BRIDGE_URL)"));
     process.exit(1);
   }
   if (!options.token) {
-    console.error(chalk11.red("\u2717 Token required (--token or DEVPILOT_BRIDGE_TOKEN)"));
-    console.error(chalk11.gray("  Mint one in the dashboard under Settings \u2192 Tokens."));
+    console.error(chalk12.red("\u2717 Token required (--token or DEVPILOT_BRIDGE_TOKEN)"));
+    console.error(chalk12.gray("  Mint one in the dashboard under Settings \u2192 Tokens."));
     process.exit(1);
   }
   const repos = options.repos?.split(",").map((r) => r.trim()).filter(Boolean) ?? [];
   const maxConcurrentJobs = Math.max(1, parseInt(options.maxJobs, 10) || 4);
-  console.log(chalk11.cyan("\u{1F309} DevPilot bridge"));
-  console.log(chalk11.gray(`   ${options.url}`));
-  console.log(chalk11.gray(`   machine: ${options.name}`));
+  console.log(chalk12.cyan("\u{1F309} DevPilot bridge"));
+  console.log(chalk12.gray(`   ${options.url}`));
+  console.log(chalk12.gray(`   machine: ${options.name}`));
   console.log("");
   const usesLocalOrchestrator = !options.plan;
   if (usesLocalOrchestrator && options.mode === "ao-cli") {
-    console.error(chalk11.red("\u2717 --mode ao-cli is deprecated and non-functional."));
-    console.error(chalk11.gray("  `ao` is now a daemon on 127.0.0.1:3001; point http mode at it:"));
-    console.error(chalk11.gray("    devpilot bridge connect --mode http --http-url http://127.0.0.1:3001"));
+    console.error(chalk12.red("\u2717 --mode ao-cli is deprecated and non-functional."));
+    console.error(chalk12.gray("  `ao` is now a daemon on 127.0.0.1:3001; point http mode at it:"));
+    console.error(chalk12.gray("    devpilot bridge connect --mode http --http-url http://127.0.0.1:3001"));
     process.exit(1);
   }
   if (usesLocalOrchestrator && options.mode === "http" && !options.httpUrl) {
-    console.error(chalk11.red("\u2717 --mode http requires --http-url"));
-    console.error(chalk11.gray("  For the ao daemon: --http-url http://127.0.0.1:3001"));
+    console.error(chalk12.red("\u2717 --mode http requires --http-url"));
+    console.error(chalk12.gray("  For the ao daemon: --http-url http://127.0.0.1:3001"));
     process.exit(1);
   }
   if (usesLocalOrchestrator && options.mode === "claude-session" && !options.sessionApiUrl) {
-    console.error(chalk11.red("\u2717 --mode claude-session requires --session-api-url"));
-    console.error(chalk11.gray("  Start the runner, then point at it:"));
-    console.error(chalk11.gray("    devpilot session-runner --port 3900 --token <t>"));
-    console.error(chalk11.gray("    \u2026 --session-api-url http://127.0.0.1:3900 --session-api-key <t>"));
+    console.error(chalk12.red("\u2717 --mode claude-session requires --session-api-url"));
+    console.error(chalk12.gray("  Start the runner, then point at it:"));
+    console.error(chalk12.gray("    devpilot session-runner --port 3900 --token <t>"));
+    console.error(chalk12.gray("    \u2026 --session-api-url http://127.0.0.1:3900 --session-api-key <t>"));
     process.exit(1);
   }
-  const client2 = new BridgeClient({ bridgeUrl: options.url, token: options.token });
+  const client2 = new BridgeClient2({ bridgeUrl: options.url, token: options.token });
   let registration;
   try {
     const machineName = options.name ?? stableMachineName();
     registration = await client2.register({ name: machineName, repos, maxConcurrentJobs });
   } catch (err) {
-    console.error(chalk11.red("\u2717 Registration failed"));
-    console.error(chalk11.red(`   ${err instanceof Error ? err.message : err}`));
+    console.error(chalk12.red("\u2717 Registration failed"));
+    console.error(chalk12.red(`   ${err instanceof Error ? err.message : err}`));
     process.exit(1);
   }
-  console.log(chalk11.green("\u2713 Registered"));
-  console.log(chalk11.gray(`   orchestrator: ${registration.orchestratorId}`));
+  console.log(chalk12.green("\u2713 Registered"));
+  console.log(chalk12.gray(`   orchestrator: ${registration.orchestratorId}`));
   if (options.save !== false && credentials.source !== "saved") {
     const saved = saveBridgeCredentials({ url: options.url, token: options.token });
     if (saved) {
-      console.log(chalk11.gray(`   remembered in ${bridgeCredentialsPath()} \u2014 reconnect with no flags`));
+      console.log(chalk12.gray(`   remembered in ${bridgeCredentialsPath()} \u2014 reconnect with no flags`));
     }
   }
-  console.log(chalk11.gray(`   repos: ${repos.join(", ") || "(none)"}`));
+  console.log(chalk12.gray(`   repos: ${repos.join(", ") || "(none)"}`));
   if (repos.length === 0) {
-    console.log(chalk11.yellow("   \u26A0 No repos specified \u2014 nothing can route to this machine."));
-    console.log(chalk11.gray("     Re-run with --repos owner/name to receive dispatches."));
+    console.log(chalk12.yellow("   \u26A0 No repos specified \u2014 nothing can route to this machine."));
+    console.log(chalk12.gray("     Re-run with --repos owner/name to receive dispatches."));
   }
   console.log("");
   const useRealtime = options.transport !== "poll" && registration.realtime !== null;
   if (options.transport !== "poll" && !registration.realtime) {
-    console.log(chalk11.yellow("   Realtime unavailable from this bridge \u2014 polling instead."));
+    console.log(chalk12.yellow("   Realtime unavailable from this bridge \u2014 polling instead."));
   }
   const conductorWatcher = options.plan ? new ConductorWatcher({
     client: client2,
@@ -3394,10 +3944,10 @@ var connectCommand = new Command7("connect").description("Connect this machine t
     // Survives a restart. Without this, upgrading the CLI or closing a
     // laptop lid orphaned every in-flight run: the cockpit kept working
     // and Linear was never told how any of it ended.
-    statePath: join10(homedir4(), ".devpilot", "conductor-watch.json"),
-    onLog: (line) => console.log(chalk11.blue(`   ${line}`)),
+    statePath: join12(homedir5(), ".devpilot", "conductor-watch.json"),
+    onLog: (line) => console.log(chalk12.blue(`   ${line}`)),
     onLost: (run) => console.log(
-      chalk11.yellow(
+      chalk12.yellow(
         `   ${run.linearIdentifier} still running at shutdown \u2014 it will be picked up on the next start`
       )
     )
@@ -3406,25 +3956,25 @@ var connectCommand = new Command7("connect").description("Connect this machine t
     client: client2,
     cockpitUrl: options.cockpitUrl,
     resolveItemId: (sessionId) => conductorWatcher.itemFor(sessionId),
-    onLog: (line) => console.log(chalk11.blue(`   ${line}`))
+    onLog: (line) => console.log(chalk12.blue(`   ${line}`))
   }) : null;
   const readopted = conductorWatcher?.restore() ?? 0;
   if (readopted > 0) {
     console.log(
-      chalk11.blue(
+      chalk12.blue(
         `   Resumed watching ${readopted} run${readopted === 1 ? "" : "s"} from a previous session`
       )
     );
   }
   const adoptionWatcher = new AdoptionWatcher({
     client: client2,
-    statePath: join10(homedir4(), ".devpilot", "adoption-watch.json"),
-    onLog: (line) => console.log(chalk11.blue(`   ${line}`))
+    statePath: join12(homedir5(), ".devpilot", "adoption-watch.json"),
+    onLog: (line) => console.log(chalk12.blue(`   ${line}`))
   });
   const resumedAdoptions = adoptionWatcher.restore();
   if (resumedAdoptions > 0) {
     console.log(
-      chalk11.blue(
+      chalk12.blue(
         `   Watching ${resumedAdoptions} adopted session${resumedAdoptions === 1 ? "" : "s"} from a previous run`
       )
     );
@@ -3436,22 +3986,23 @@ var connectCommand = new Command7("connect").description("Connect this machine t
     // A session placed on a board is already followed by the adoption
     // watcher; everything else gets its instruments from the observer.
     isWatched: (key) => adoptionWatcher.isTracking(key),
-    readingsStatePath: join10(homedir4(), ".devpilot", "observed-readings.json"),
-    onLog: (line) => console.log(chalk11.gray(`   ${line}`))
+    readingsStatePath: join12(homedir5(), ".devpilot", "observed-readings.json"),
+    onLog: (line) => console.log(chalk12.gray(`   ${line}`))
   }) : null;
   if (observer) {
     const first = await observer.sweep();
     if (first && first.observed > 0) {
       console.log(
-        chalk11.green(
+        chalk12.green(
           `   \u2713 Observing ${first.observed} agent session${first.observed === 1 ? "" : "s"} on this machine`
         )
       );
-      console.log(chalk11.gray(`     ${client2.hostedUrl()}/cockpit`));
+      console.log(chalk12.gray(`     ${client2.hostedUrl()}/cockpit`));
       console.log("");
     }
     observer.start();
   }
+  new GraphSharer({ client: client2, onLog: (line) => console.log(chalk12.gray(`   ${line}`)) }).start();
   const resumeApplier = observer && (options.sessionApiUrl || options.cockpitUrl) ? new ResumeApplier({
     client: client2,
     sessionApiUrl: options.sessionApiUrl,
@@ -3467,7 +4018,7 @@ var connectCommand = new Command7("connect").description("Connect this machine t
       const at = observer.targetFor(key);
       return at ? { ...at, cwd: "" } : void 0;
     },
-    onLog: (line) => console.log(chalk11.blue(`   ${line}`))
+    onLog: (line) => console.log(chalk12.blue(`   ${line}`))
   }) : null;
   if (commandApplier || resumeApplier) {
     const pump = async () => {
@@ -3526,7 +4077,7 @@ var connectCommand = new Command7("connect").description("Connect this machine t
       client: client2,
       cockpitUrl: options.cockpitUrl,
       watcher: conductorWatcher,
-      onLog: (line) => console.log(chalk11.blue(`   ${line}`))
+      onLog: (line) => console.log(chalk12.blue(`   ${line}`))
     }) : createBridgeDispatchHandler({
       client: client2,
       orchestratorMode: options.mode,
@@ -3535,32 +4086,32 @@ var connectCommand = new Command7("connect").description("Connect this machine t
       sessionApiKey: options.sessionApiKey,
       aoProjectName: options.aoProject,
       aoPath: options.aoPath,
-      onLog: (line) => console.log(chalk11.blue(`   ${line}`))
+      onLog: (line) => console.log(chalk12.blue(`   ${line}`))
     }),
-    onLog: (line) => console.log(chalk11.gray(`   ${line}`)),
-    onError: (e) => console.log(chalk11.yellow(`   ${e.message}`))
+    onLog: (line) => console.log(chalk12.gray(`   ${line}`)),
+    onError: (e) => console.log(chalk12.yellow(`   ${e.message}`))
   });
   const heartbeat = new HeartbeatService({
     client: client2,
     activeJobs: () => loop.activeJobs,
-    onError: (e) => console.log(chalk11.gray(`   heartbeat: ${e.message}`))
+    onError: (e) => console.log(chalk12.gray(`   heartbeat: ${e.message}`))
   });
   await loop.start();
   heartbeat.start();
-  console.log(chalk11.green(`\u2713 Listening (${useRealtime ? "realtime" : "poll"})`));
-  console.log(chalk11.gray("   Agents run on THIS machine. Ctrl+C to disconnect."));
+  console.log(chalk12.green(`\u2713 Listening (${useRealtime ? "realtime" : "poll"})`));
+  console.log(chalk12.gray("   Agents run on THIS machine. Ctrl+C to disconnect."));
   console.log("");
   let shuttingDown = false;
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log("");
-    console.log(chalk11.yellow("Disconnecting\u2026"));
+    console.log(chalk12.yellow("Disconnecting\u2026"));
     heartbeat.stop();
     observer?.stop();
     conductorWatcher?.stop();
     await loop.stop();
-    console.log(chalk11.green("\u2713 Disconnected"));
+    console.log(chalk12.green("\u2713 Disconnected"));
     process.exit(0);
   };
   process.on("SIGINT", () => void shutdown());
@@ -3570,48 +4121,48 @@ var connectCommand = new Command7("connect").description("Connect this machine t
 });
 
 // src/commands/bridge/disconnect.ts
-import { Command as Command8 } from "commander";
-import chalk12 from "chalk";
+import { Command as Command9 } from "commander";
+import chalk13 from "chalk";
 import {
   bridgeCredentialsPath as bridgeCredentialsPath2,
   clearBridgeCredentials,
   loadBridgeCredentials as loadBridgeCredentials2
 } from "@devpilot.sh/bridge-client";
-var disconnectCommand = new Command8("disconnect").description("Forget the bridge URL and token saved on this machine").action(async () => {
+var disconnectCommand = new Command9("disconnect").description("Forget the bridge URL and token saved on this machine").action(async () => {
   const saved = loadBridgeCredentials2();
   clearBridgeCredentials();
   if (saved) {
-    console.log(chalk12.green("\u2713 Forgot the saved token for ") + chalk12.gray(saved.url));
+    console.log(chalk13.green("\u2713 Forgot the saved token for ") + chalk13.gray(saved.url));
   } else {
-    console.log(chalk12.gray(`Nothing was saved at ${bridgeCredentialsPath2()}.`));
+    console.log(chalk13.gray(`Nothing was saved at ${bridgeCredentialsPath2()}.`));
   }
   console.log("");
-  console.log(chalk12.gray("  The token still works for anyone who has a copy of it. To end that,"));
-  console.log(chalk12.gray("  revoke it in the dashboard under Settings \u2192 Tokens \u2014 it stops being"));
-  console.log(chalk12.gray("  accepted on the very next request."));
-  console.log(chalk12.gray("  A bridge that is running now keeps running until you stop it (Ctrl+C)."));
+  console.log(chalk13.gray("  The token still works for anyone who has a copy of it. To end that,"));
+  console.log(chalk13.gray("  revoke it in the dashboard under Settings \u2192 Tokens \u2014 it stops being"));
+  console.log(chalk13.gray("  accepted on the very next request."));
+  console.log(chalk13.gray("  A bridge that is running now keeps running until you stop it (Ctrl+C)."));
   console.log("");
 });
 
 // src/commands/bridge/status.ts
-import { Command as Command9 } from "commander";
-import chalk13 from "chalk";
-var statusCommand2 = new Command9("status").description("Check bridge connection status").option("-u, --bridge-url <url>", "Bridge service URL", process.env.DEVPILOT_BRIDGE_URL).option("-i, --orchestrator-id <id>", "Orchestrator ID").option("-k, --api-key <key>", "API key", process.env.DEVPILOT_BRIDGE_API_KEY).action(async (options) => {
+import { Command as Command10 } from "commander";
+import chalk14 from "chalk";
+var statusCommand2 = new Command10("status").description("Check bridge connection status").option("-u, --bridge-url <url>", "Bridge service URL", process.env.DEVPILOT_BRIDGE_URL).option("-i, --orchestrator-id <id>", "Orchestrator ID").option("-k, --api-key <key>", "API key", process.env.DEVPILOT_BRIDGE_API_KEY).action(async (options) => {
   if (!options.bridgeUrl) {
-    console.error(chalk13.red("\u2717 Error: Bridge URL required"));
-    console.error(chalk13.gray("   Use: devpilot bridge status -u <url>"));
+    console.error(chalk14.red("\u2717 Error: Bridge URL required"));
+    console.error(chalk14.gray("   Use: devpilot bridge status -u <url>"));
     process.exit(1);
   }
-  console.log(chalk13.cyan("\u{1F309} DevPilot Bridge Status"));
+  console.log(chalk14.cyan("\u{1F309} DevPilot Bridge Status"));
   console.log("");
   try {
     const healthRes = await fetch(`${options.bridgeUrl}/health`);
     const health = await healthRes.json();
-    console.log(chalk13.white("Bridge Status:"));
+    console.log(chalk14.white("Bridge Status:"));
     if (health.status === "ok") {
-      console.log(chalk13.gray("  Status: ") + chalk13.green("\u2713 Online"));
+      console.log(chalk14.gray("  Status: ") + chalk14.green("\u2713 Online"));
     } else {
-      console.log(chalk13.gray("  Status: ") + chalk13.red("\u2717 Offline"));
+      console.log(chalk14.gray("  Status: ") + chalk14.red("\u2717 Offline"));
     }
     console.log("");
     if (options.orchestratorId) {
@@ -3625,75 +4176,75 @@ var statusCommand2 = new Command9("status").description("Check bridge connection
       );
       if (orchRes.ok) {
         const orch = await orchRes.json();
-        console.log(chalk13.white("Orchestrator Status:"));
-        console.log(chalk13.gray("  ID: ") + chalk13.cyan(orch.id));
-        console.log(chalk13.gray("  Name: ") + chalk13.white(orch.name));
+        console.log(chalk14.white("Orchestrator Status:"));
+        console.log(chalk14.gray("  ID: ") + chalk14.cyan(orch.id));
+        console.log(chalk14.gray("  Name: ") + chalk14.white(orch.name));
         if (orch.isOnline) {
-          console.log(chalk13.gray("  Online: ") + chalk13.green("\u2713"));
+          console.log(chalk14.gray("  Online: ") + chalk14.green("\u2713"));
         } else {
-          console.log(chalk13.gray("  Online: ") + chalk13.red("\u2717"));
+          console.log(chalk14.gray("  Online: ") + chalk14.red("\u2717"));
         }
-        console.log(chalk13.gray("  Active Jobs: ") + chalk13.yellow(orch.activeJobs));
-        console.log(chalk13.gray("  Last Heartbeat: ") + chalk13.white(orch.lastHeartbeat || "Never"));
-        console.log(chalk13.gray("  Repos: ") + chalk13.cyan(orch.repos?.join(", ") || "None"));
+        console.log(chalk14.gray("  Active Jobs: ") + chalk14.yellow(orch.activeJobs));
+        console.log(chalk14.gray("  Last Heartbeat: ") + chalk14.white(orch.lastHeartbeat || "Never"));
+        console.log(chalk14.gray("  Repos: ") + chalk14.cyan(orch.repos?.join(", ") || "None"));
       } else {
-        console.log(chalk13.white("Orchestrator Status:"));
-        console.log(chalk13.gray("  ") + chalk13.red("Not found or unauthorized"));
+        console.log(chalk14.white("Orchestrator Status:"));
+        console.log(chalk14.gray("  ") + chalk14.red("Not found or unauthorized"));
       }
     }
   } catch (error) {
-    console.error(chalk13.red("\u2717 Error checking status:"));
-    console.error(chalk13.red(`   ${error instanceof Error ? error.message : error}`));
+    console.error(chalk14.red("\u2717 Error checking status:"));
+    console.error(chalk14.red(`   ${error instanceof Error ? error.message : error}`));
     process.exit(1);
   }
 });
 
 // src/commands/bridge.ts
-var bridgeCommand = new Command10("bridge").description("Manage connection to DevPilot cloud bridge").addCommand(connectCommand).addCommand(disconnectCommand).addCommand(statusCommand2);
+var bridgeCommand = new Command11("bridge").description("Manage connection to DevPilot cloud bridge").addCommand(connectCommand).addCommand(disconnectCommand).addCommand(statusCommand2);
 
 // src/commands/session.ts
-import { Command as Command14 } from "commander";
+import { Command as Command15 } from "commander";
 
 // src/commands/session/new.ts
 import os2 from "os";
-import { Command as Command11 } from "commander";
-import chalk14 from "chalk";
+import { Command as Command12 } from "commander";
+import chalk15 from "chalk";
 import { buildSessionHandoff, SESSION_LIMITS } from "@devpilot.sh/bridge-protocol";
 import {
-  DEFAULT_BRIDGE_URL as DEFAULT_BRIDGE_URL2,
+  DEFAULT_BRIDGE_URL as DEFAULT_BRIDGE_URL3,
   SharedSessionClient,
-  resolveBridgeCredentials as resolveBridgeCredentials2
+  resolveBridgeCredentials as resolveBridgeCredentials3
 } from "@devpilot.sh/bridge-client";
 var MODES = ["observe", "relay", "auto"];
-var newCommand = new Command11("new").description("Create a shared session and print the message to send your teammate").argument("<title>", "What this session is about (stored in plaintext \u2014 no secrets)").option("-u, --url <url>", "Bridge URL (defaults to the one this machine is connected to)").option("-t, --token <token>", "Machine token (defaults to the one this machine is connected with)").option("--issue <identifier>", "Linear issue identifier to attach, e.g. ENG-394").option(
+var newCommand = new Command12("new").description("Create a shared session and print the message to send your teammate").argument("<title>", "What this session is about (stored in plaintext \u2014 no secrets)").option("-u, --url <url>", "Bridge URL (defaults to the one this machine is connected to)").option("-t, --token <token>", "Machine token (defaults to the one this machine is connected with)").option("--issue <identifier>", "Linear issue identifier to attach, e.g. ENG-394").option(
   "--mode <mode>",
   "observe (agents post only when asked) | relay | auto (agents may reply, bounded)",
   "observe"
 ).option("--budget <n>", `Agent messages allowed in auto mode (default ${SESSION_LIMITS.autoDefaultBudget})`).option("--minutes <n>", `Minutes auto mode lasts (default ${SESSION_LIMITS.autoDefaultTtlMinutes})`).option("-n, --name <name>", "Your display name in the transcript", os2.hostname()).option("-m, --message <text>", "Post this as the first message (encrypted)").option("--link-only", "Print just the join link, for scripts").action(async (title, options) => {
-  const credentials = resolveBridgeCredentials2({ url: options.url, token: options.token });
+  const credentials = resolveBridgeCredentials3({ url: options.url, token: options.token });
   if (!credentials.token) {
-    console.error(chalk14.red("\u2717 No machine token"));
+    console.error(chalk15.red("\u2717 No machine token"));
     console.error(
-      chalk14.gray("  Connect this machine once with `devpilot bridge connect --token <token>` and it")
+      chalk15.gray("  Connect this machine once with `devpilot bridge connect --token <token>` and it")
     );
-    console.error(chalk14.gray("  is remembered, or pass --token / set DEVPILOT_BRIDGE_TOKEN."));
+    console.error(chalk15.gray("  is remembered, or pass --token / set DEVPILOT_BRIDGE_TOKEN."));
     process.exit(1);
   }
   if (!MODES.includes(options.mode)) {
-    console.error(chalk14.red(`\u2717 Unknown mode "${options.mode}" \u2014 use observe, relay or auto`));
+    console.error(chalk15.red(`\u2717 Unknown mode "${options.mode}" \u2014 use observe, relay or auto`));
     process.exit(1);
   }
   const mode = options.mode;
   const autoBudget = options.budget ? parseInt(options.budget, 10) : SESSION_LIMITS.autoDefaultBudget;
   const autoTtlMinutes = options.minutes ? parseInt(options.minutes, 10) : SESSION_LIMITS.autoDefaultTtlMinutes;
   if (mode === "auto" && !(autoBudget > 0 && autoTtlMinutes > 0)) {
-    console.error(chalk14.red("\u2717 auto mode needs a positive --budget and --minutes"));
+    console.error(chalk15.red("\u2717 auto mode needs a positive --budget and --minutes"));
     process.exit(1);
   }
   let created;
   try {
     created = await SharedSessionClient.create({
-      baseUrl: credentials.url ?? DEFAULT_BRIDGE_URL2,
+      baseUrl: credentials.url ?? DEFAULT_BRIDGE_URL3,
       token: credentials.token,
       title,
       displayName: options.name,
@@ -3704,8 +4255,8 @@ var newCommand = new Command11("new").description("Create a shared session and p
       autoTtlMinutes
     });
   } catch (err) {
-    console.error(chalk14.red("\u2717 Could not create the session"));
-    console.error(chalk14.gray(`  ${err instanceof Error ? err.message : String(err)}`));
+    console.error(chalk15.red("\u2717 Could not create the session"));
+    console.error(chalk15.gray(`  ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
   }
   const { client: client2, link } = created;
@@ -3715,79 +4266,79 @@ var newCommand = new Command11("new").description("Create a shared session and p
     return;
   }
   console.log("");
-  console.log(chalk14.cyan(`  ${title}`) + chalk14.gray(`  \xB7  ${mode}`));
+  console.log(chalk15.cyan(`  ${title}`) + chalk15.gray(`  \xB7  ${mode}`));
   console.log("");
-  console.log(chalk14.gray("  Send this to your teammate:"));
+  console.log(chalk15.gray("  Send this to your teammate:"));
   console.log("");
   for (const line of buildSessionHandoff({ title, link, mode, autoBudget, autoTtlMinutes }).split("\n")) {
     console.log(`  ${line}`);
   }
   console.log("");
-  console.log(chalk14.yellow("  Anyone with that link can read the whole transcript."));
-  console.log(chalk14.gray("  The key is after the #, and never reaches the bridge. To revoke the"));
-  console.log(chalk14.gray("  link, re-key the session from the dashboard; that ends access for it"));
-  console.log(chalk14.gray("  but cannot un-send what was already read."));
+  console.log(chalk15.yellow("  Anyone with that link can read the whole transcript."));
+  console.log(chalk15.gray("  The key is after the #, and never reaches the bridge. To revoke the"));
+  console.log(chalk15.gray("  link, re-key the session from the dashboard; that ends access for it"));
+  console.log(chalk15.gray("  but cannot un-send what was already read."));
   console.log("");
-  console.log(chalk14.gray(`  Follow it here with:  devpilot session tail "${chalk14.italic("<link>")}"`));
+  console.log(chalk15.gray(`  Follow it here with:  devpilot session tail "${chalk15.italic("<link>")}"`));
   console.log("");
 });
 
 // src/commands/session/join.ts
 import os3 from "os";
-import { Command as Command12 } from "commander";
-import chalk15 from "chalk";
+import { Command as Command13 } from "commander";
+import chalk16 from "chalk";
 import { SharedSessionClient as SharedSessionClient2 } from "@devpilot.sh/bridge-client";
-var joinCommand = new Command12("join").description("Join a shared session by link and post a message").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", os3.hostname()).option("-m, --message <text>", "Post this message after joining").action(async (url, options) => {
+var joinCommand = new Command13("join").description("Join a shared session by link and post a message").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", os3.hostname()).option("-m, --message <text>", "Post this message after joining").action(async (url, options) => {
   try {
     const client2 = await SharedSessionClient2.join({ link: url, displayName: options.name });
     const s = client2.session;
-    console.log(chalk15.cyan(`
+    console.log(chalk16.cyan(`
   ${s.title}`));
-    console.log(chalk15.gray(`  mode: ${s.mode}  \xB7  messages: ${s.lastSeq ?? 0}
+    console.log(chalk16.gray(`  mode: ${s.mode}  \xB7  messages: ${s.lastSeq ?? 0}
 `));
     if (options.message) {
       const posted = await client2.post(options.message);
-      console.log(chalk15.green(`  posted #${posted.seq}
+      console.log(chalk16.green(`  posted #${posted.seq}
 `));
     }
     const participants = await client2.who();
     for (const p of participants) {
-      const agent = p.agentKind ? chalk15.gray(` [${p.agentKind}]`) : "";
-      console.log(`  \xB7 ${p.displayName}${agent}${p.leftAt ? chalk15.gray(" (left)") : ""}`);
+      const agent = p.agentKind ? chalk16.gray(` [${p.agentKind}]`) : "";
+      console.log(`  \xB7 ${p.displayName}${agent}${p.leftAt ? chalk16.gray(" (left)") : ""}`);
     }
     console.log("");
   } catch (err) {
-    console.error(chalk15.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
+    console.error(chalk16.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
   }
 });
 
 // src/commands/session/tail.ts
 import os4 from "os";
-import { Command as Command13 } from "commander";
-import chalk16 from "chalk";
+import { Command as Command14 } from "commander";
+import chalk17 from "chalk";
 import { SharedSessionClient as SharedSessionClient3 } from "@devpilot.sh/bridge-client";
-var tailCommand = new Command13("tail").description("Follow a shared session transcript in the terminal").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", os4.hostname()).option("-i, --interval <seconds>", "Poll interval", "3").action(async (url, options) => {
+var tailCommand = new Command14("tail").description("Follow a shared session transcript in the terminal").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", os4.hostname()).option("-i, --interval <seconds>", "Poll interval", "3").action(async (url, options) => {
   const intervalMs = Math.max(1, parseInt(options.interval, 10) || 3) * 1e3;
   let client2;
   try {
     client2 = await SharedSessionClient3.join({ link: url, displayName: options.name });
   } catch (err) {
-    console.error(chalk16.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
+    console.error(chalk17.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
     return;
   }
   const names = /* @__PURE__ */ new Map();
   for (const p of await client2.who()) names.set(p.id, p.displayName);
-  console.log(chalk16.cyan(`
+  console.log(chalk17.cyan(`
   ${client2.session.title}`));
-  console.log(chalk16.gray(`  following \xB7 ctrl-c to stop
+  console.log(chalk17.gray(`  following \xB7 ctrl-c to stop
 `));
   let cursor = 0;
   let stopped = false;
   process.on("SIGINT", () => {
     stopped = true;
-    console.log(chalk16.gray("\n  stopped\n"));
+    console.log(chalk17.gray("\n  stopped\n"));
     process.exit(0);
   });
   while (!stopped) {
@@ -3801,49 +4352,49 @@ var tailCommand = new Command13("tail").description("Follow a shared session tra
         cursor = latestSeq;
       }
     } catch (err) {
-      console.error(chalk16.gray(`  \u2026 ${err instanceof Error ? err.message : String(err)}`));
+      console.error(chalk17.gray(`  \u2026 ${err instanceof Error ? err.message : String(err)}`));
     }
     await new Promise((r) => setTimeout(r, intervalMs));
   }
 });
 function format(e, names) {
   const who = e.participantId ? names.get(e.participantId) ?? e.participantId : "system";
-  const seq = chalk16.gray(`#${String(e.seq).padStart(3)}`);
+  const seq = chalk17.gray(`#${String(e.seq).padStart(3)}`);
   if (e.status === "system") {
     const reason = e.systemNotice?.reason ? ` (${e.systemNotice.reason})` : "";
-    return `  ${seq} ${chalk16.yellow(`\u2699 ${e.systemNotice?.type ?? e.text}${reason}`)}`;
+    return `  ${seq} ${chalk17.yellow(`\u2699 ${e.systemNotice?.type ?? e.text}${reason}`)}`;
   }
   if (e.status === "undecryptable") {
-    return `  ${seq} ${chalk16.gray(`${who}: <sealed under an earlier key \u2014 not readable with this link>`)}`;
+    return `  ${seq} ${chalk17.gray(`${who}: <sealed under an earlier key \u2014 not readable with this link>`)}`;
   }
-  return `  ${seq} ${chalk16.bold(who)}: ${e.text}`;
+  return `  ${seq} ${chalk17.bold(who)}: ${e.text}`;
 }
 
 // src/commands/session.ts
-var sessionCommand = new Command14("session").description("Shared, end-to-end encrypted sessions across machines").addCommand(newCommand).addCommand(joinCommand).addCommand(tailCommand);
+var sessionCommand = new Command15("session").description("Shared, end-to-end encrypted sessions across machines").addCommand(newCommand).addCommand(joinCommand).addCommand(tailCommand);
 
 // src/commands/sessions/index.ts
 import os5 from "os";
-import { homedir as homedir5 } from "os";
-import { join as join11, dirname as dirname6 } from "path";
-import { existsSync as existsSync11, readFileSync as readFileSync11, writeFileSync as writeFileSync11, mkdirSync as mkdirSync9 } from "fs";
-import { Command as Command15 } from "commander";
-import chalk17 from "chalk";
+import { homedir as homedir6 } from "os";
+import { join as join13, dirname as dirname8 } from "path";
+import { existsSync as existsSync13, readFileSync as readFileSync13, writeFileSync as writeFileSync12, mkdirSync as mkdirSync11 } from "fs";
+import { Command as Command16 } from "commander";
+import chalk18 from "chalk";
 import inquirer from "inquirer";
-import { BridgeClient as BridgeClient2 } from "@devpilot.sh/bridge-client";
+import { BridgeClient as BridgeClient3 } from "@devpilot.sh/bridge-client";
 function stableMachineName2() {
-  const path = join11(homedir5(), ".devpilot", "machine.json");
+  const path = join13(homedir6(), ".devpilot", "machine.json");
   try {
-    if (existsSync11(path)) {
-      const saved = JSON.parse(readFileSync11(path, "utf8"));
+    if (existsSync13(path)) {
+      const saved = JSON.parse(readFileSync13(path, "utf8"));
       if (saved.name) return saved.name;
     }
   } catch {
   }
   const name = os5.hostname();
   try {
-    mkdirSync9(dirname6(path), { recursive: true });
-    writeFileSync11(path, JSON.stringify({ name }, null, 2), "utf8");
+    mkdirSync11(dirname8(path), { recursive: true });
+    writeFileSync12(path, JSON.stringify({ name }, null, 2), "utf8");
   } catch {
   }
   return name;
@@ -3867,22 +4418,22 @@ async function pipeline(options) {
     maxSummaries: Math.max(0, parseInt(options.maxSummaries, 10) || 25),
     summarize: true,
     onWarn: (message) => {
-      if (!options.json) console.log(chalk17.gray(`   ${message}`));
+      if (!options.json) console.log(chalk18.gray(`   ${message}`));
     }
   });
   return { machineName, result };
 }
 function destinationFor(outcome) {
-  if (!outcome) return chalk17.gray("\u2014");
+  if (!outcome) return chalk18.gray("\u2014");
   switch (outcome.status) {
     case "duplicate":
-      return chalk17.gray(`${outcome.linearIdentifier ?? "already adopted"} (tracked)`);
+      return chalk18.gray(`${outcome.linearIdentifier ?? "already adopted"} (tracked)`);
     case "attached":
-      return chalk17.green(`${outcome.linearIdentifier} (${outcome.matchedBy})`);
+      return chalk18.green(`${outcome.linearIdentifier} (${outcome.matchedBy})`);
     case "adopted":
-      return outcome.linearIdentifier ? chalk17.green(outcome.linearIdentifier) : chalk17.yellow("create");
+      return outcome.linearIdentifier ? chalk18.green(outcome.linearIdentifier) : chalk18.yellow("create");
     case "skipped":
-      return chalk17.yellow(outcome.reason ? `skip \u2014 ${outcome.reason.slice(0, 60)}` : "skip");
+      return chalk18.yellow(outcome.reason ? `skip \u2014 ${outcome.reason.slice(0, 60)}` : "skip");
   }
 }
 function rowsFrom(result, outcomes) {
@@ -3897,10 +4448,10 @@ function rowsFrom(result, outcomes) {
 }
 function client(options) {
   if (!options.url || !options.token) return null;
-  return new BridgeClient2({ bridgeUrl: options.url, token: options.token });
+  return new BridgeClient3({ bridgeUrl: options.url, token: options.token });
 }
 var scanCommand = withCommonOptions(
-  new Command15("scan").description(
+  new Command16("scan").description(
     "List agent sessions on this machine and what adopting them would do. Writes nothing."
   )
 ).action(async (options) => {
@@ -3917,8 +4468,8 @@ var scanCommand = withCommonOptions(
       outcomes = response.outcomes;
     } catch (err) {
       if (!options.json) {
-        console.log(chalk17.yellow(`   Could not preview against the bridge: ${describe3(err)}`));
-        console.log(chalk17.gray("   Showing the local scan only."));
+        console.log(chalk18.yellow(`   Could not preview against the bridge: ${describe3(err)}`));
+        console.log(chalk18.gray("   Showing the local scan only."));
       }
     }
   }
@@ -3944,23 +4495,23 @@ var scanCommand = withCommonOptions(
   console.log("");
   if (!bridge) {
     console.log(
-      chalk17.gray(
+      chalk18.gray(
         "  No bridge credentials, so this is a local listing only. Pass --url and --token"
       )
     );
-    console.log(chalk17.gray("  to see which Linear issues these would attach to."));
+    console.log(chalk18.gray("  to see which Linear issues these would attach to."));
   } else if (result.candidates.length > 0) {
-    console.log(chalk17.gray("  Nothing was written. Run `devpilot sessions adopt` to act on this."));
+    console.log(chalk18.gray("  Nothing was written. Run `devpilot sessions adopt` to act on this."));
   }
   console.log("");
 });
 var adoptCommand = withCommonOptions(
-  new Command15("adopt").description("Put agent sessions running on this machine onto the board")
+  new Command16("adopt").description("Put agent sessions running on this machine onto the board")
 ).option("-y, --yes", "Skip the confirmation").action(async (options) => {
   const bridge = client(options);
   if (!bridge) {
-    console.error(chalk17.red("\u2717 Bridge URL and token required (--url / --token)"));
-    console.error(chalk17.gray("  Mint a token in the dashboard under Settings \u2192 Tokens."));
+    console.error(chalk18.red("\u2717 Bridge URL and token required (--url / --token)"));
+    console.error(chalk18.gray("  Mint a token in the dashboard under Settings \u2192 Tokens."));
     process.exit(1);
   }
   const { machineName, result } = await pipeline(options);
@@ -3968,7 +4519,7 @@ var adoptCommand = withCommonOptions(
     console.log("");
     console.log(renderPreview([], result));
     console.log("");
-    console.log(chalk17.gray("  No sessions to adopt."));
+    console.log(chalk18.gray("  No sessions to adopt."));
     console.log("");
     return;
   }
@@ -3980,7 +4531,7 @@ var adoptCommand = withCommonOptions(
       dryRun: true
     });
   } catch (err) {
-    console.error(chalk17.red(`\u2717 ${describe3(err)}`));
+    console.error(chalk18.red(`\u2717 ${describe3(err)}`));
     process.exit(1);
   }
   console.log("");
@@ -3989,12 +4540,12 @@ var adoptCommand = withCommonOptions(
   const willCreate = preview.outcomes.filter((o) => o.status === "adopted").length;
   const willAttach = preview.outcomes.filter((o) => o.status === "attached").length;
   if (willCreate === 0 && willAttach === 0) {
-    console.log(chalk17.gray("  Nothing new to adopt \u2014 everything here is already tracked."));
+    console.log(chalk18.gray("  Nothing new to adopt \u2014 everything here is already tracked."));
     console.log("");
     return;
   }
   console.log(
-    `  This creates ${chalk17.bold(String(willCreate))} Linear issue${willCreate === 1 ? "" : "s"} and attaches ${chalk17.bold(String(willAttach))} existing.`
+    `  This creates ${chalk18.bold(String(willCreate))} Linear issue${willCreate === 1 ? "" : "s"} and attaches ${chalk18.bold(String(willAttach))} existing.`
   );
   console.log("");
   if (!options.yes) {
@@ -4002,7 +4553,7 @@ var adoptCommand = withCommonOptions(
       { type: "confirm", name: "proceed", message: "Continue?", default: false }
     ]);
     if (!proceed) {
-      console.log(chalk17.gray("  Nothing was written."));
+      console.log(chalk18.gray("  Nothing was written."));
       return;
     }
   }
@@ -4014,18 +4565,18 @@ var adoptCommand = withCommonOptions(
       dryRun: false
     });
   } catch (err) {
-    console.error(chalk17.red(`\u2717 ${describe3(err)}`));
+    console.error(chalk18.red(`\u2717 ${describe3(err)}`));
     process.exit(1);
   }
   console.log("");
   for (const outcome of response.outcomes) {
     if (outcome.status === "skipped") {
-      console.log(chalk17.yellow(`   \u25CB skipped \u2014 ${outcome.reason ?? "no reason given"}`));
+      console.log(chalk18.yellow(`   \u25CB skipped \u2014 ${outcome.reason ?? "no reason given"}`));
     } else if (outcome.status === "duplicate") {
-      console.log(chalk17.gray(`   \xB7 ${outcome.linearIdentifier ?? "?"} already tracked`));
+      console.log(chalk18.gray(`   \xB7 ${outcome.linearIdentifier ?? "?"} already tracked`));
     } else {
       console.log(
-        chalk17.green(
+        chalk18.green(
           `   \u2713 ${outcome.linearIdentifier}${outcome.status === "attached" ? ` (attached, ${outcome.matchedBy})` : ""}`
         )
       );
@@ -4033,12 +4584,12 @@ var adoptCommand = withCommonOptions(
   }
   console.log("");
   console.log(
-    chalk17.green(
+    chalk18.green(
       `\u2713 ${response.adopted} adopted, ${response.attached} attached, ${response.duplicates} already tracked, ${response.skipped} skipped`
     )
   );
   console.log(
-    chalk17.gray(
+    chalk18.gray(
       "  These are observed, not dispatched: DevPilot is watching them and will not move a ticket."
     )
   );
@@ -4047,25 +4598,26 @@ var adoptCommand = withCommonOptions(
 function describe3(err) {
   return err instanceof Error ? err.message : String(err);
 }
-var sessionsCommand = new Command15("sessions").description("Agent sessions running on this machine").addCommand(scanCommand).addCommand(adoptCommand);
+var sessionsCommand = new Command16("sessions").description("Agent sessions running on this machine").addCommand(scanCommand).addCommand(adoptCommand);
 
 // src/commands/session-runner/index.ts
-import { Command as Command16 } from "commander";
-import chalk18 from "chalk";
-import { resolve as resolve4 } from "path";
+import { Command as Command17 } from "commander";
+import chalk19 from "chalk";
+import { resolve as resolve6 } from "path";
 
 // src/commands/session-runner/server.ts
 import { createServer } from "http";
-import { randomUUID } from "crypto";
-import { existsSync as existsSync14 } from "fs";
-import { basename as basename4, isAbsolute, resolve as resolve3 } from "path";
+import { randomUUID as randomUUID2 } from "crypto";
+import { existsSync as existsSync16 } from "fs";
+import { basename as basename4, isAbsolute as isAbsolute2, resolve as resolve5 } from "path";
 
 // src/commands/session-runner/claude-runner.ts
-import { spawn as spawn2, execFile } from "child_process";
-import { promisify } from "util";
-import { mkdtempSync, rmSync, writeFileSync as writeFileSync12, existsSync as existsSync12, readFileSync as readFileSync12, mkdirSync as mkdirSync10 } from "fs";
-import { tmpdir, homedir as homedir6 } from "os";
-import { join as join12 } from "path";
+init_statusline_store();
+import { spawn as spawn2, execFile as execFile2 } from "child_process";
+import { promisify as promisify2 } from "util";
+import { mkdtempSync, rmSync as rmSync3, writeFileSync as writeFileSync13, existsSync as existsSync14, readFileSync as readFileSync14, mkdirSync as mkdirSync12 } from "fs";
+import { tmpdir, homedir as homedir7 } from "os";
+import { join as join14 } from "path";
 
 // src/commands/session-runner/stream-events.ts
 var MAX_ACTIONS = 200;
@@ -4096,6 +4648,8 @@ var TelemetryCollector = class {
      */
     this.meter = initialUsageMeter();
     this.turns = 0;
+    this.claudeSessionId = null;
+    this.windows = {};
     this.now = now;
     this.workdir = workdir;
     this.startedAt = now();
@@ -4116,8 +4670,34 @@ var TelemetryCollector = class {
     }
     this.ingest(event);
   }
+  /**
+   * The account's subscription windows, as the stream last reported them, with
+   * what this run had cost by then — in the shape `devpilot statusline`
+   * records for sessions a person runs by hand.
+   *
+   * A dispatched agent has no status line, but it spends the same windows. If
+   * its readings were not in the log, the points it moved would be shared out
+   * among whichever hand-run sessions happened to be open. Null until the
+   * stream has reported a window and named the session.
+   */
+  windowReading() {
+    if (!this.claudeSessionId || !this.windows.five && !this.windows.seven) return null;
+    return { t: this.now(), s: this.claudeSessionId, c: this.costUsd, ...this.windows };
+  }
   ingest(event) {
     this.lastEventAt = this.now();
+    if (typeof event.session_id === "string") this.claudeSessionId = event.session_id;
+    if (event.type === "rate_limit_event") {
+      const read = (w) => w && typeof w.utilization === "number" && typeof w.resetsAt === "number" ? (
+        // The stream reports a fraction; the status line reports a percentage.
+        { used: Math.max(0, Math.min(100, w.utilization * 100)), resetsAt: w.resetsAt }
+      ) : void 0;
+      const windows = event.rate_limit_info?.unifiedWindows;
+      const five = read(windows?.five_hour);
+      const seven = read(windows?.seven_day);
+      if (five) this.windows.five = five;
+      if (seven) this.windows.seven = seven;
+    }
     if (event.type === "assistant") {
       const usage = event.message?.usage;
       if (usage && this.costIsEstimate) {
@@ -4321,15 +4901,15 @@ function describeActivity(telemetry) {
 }
 
 // src/commands/session-runner/claude-runner.ts
-var execFileAsync = promisify(execFile);
+var execFileAsync2 = promisify2(execFile2);
 var OWNED_SESSION_LIMIT = 5e3;
 function recordOwnedSession(sessionId) {
   try {
-    const dir = join12(homedir6(), ".devpilot");
-    const path = join12(dir, "owned-sessions.json");
+    const dir = join14(homedir7(), ".devpilot");
+    const path = join14(dir, "owned-sessions.json");
     let ids = [];
-    if (existsSync12(path)) {
-      const parsed = JSON.parse(readFileSync12(path, "utf8"));
+    if (existsSync14(path)) {
+      const parsed = JSON.parse(readFileSync14(path, "utf8"));
       if (Array.isArray(parsed.sessionIds)) {
         ids = parsed.sessionIds.filter((v) => typeof v === "string");
       }
@@ -4337,13 +4917,13 @@ function recordOwnedSession(sessionId) {
     if (ids.includes(sessionId)) return;
     ids.push(sessionId);
     if (ids.length > OWNED_SESSION_LIMIT) ids = ids.slice(-OWNED_SESSION_LIMIT);
-    mkdirSync10(dir, { recursive: true });
-    writeFileSync12(path, JSON.stringify({ version: 1, sessionIds: ids }, null, 2), "utf8");
+    mkdirSync12(dir, { recursive: true });
+    writeFileSync13(path, JSON.stringify({ version: 1, sessionIds: ids }, null, 2), "utf8");
   } catch {
   }
 }
-async function git(workdir, args) {
-  const { stdout } = await execFileAsync("git", args, {
+async function git2(workdir, args) {
+  const { stdout } = await execFileAsync2("git", args, {
     cwd: workdir,
     maxBuffer: 32 * 1024 * 1024
   });
@@ -4352,7 +4932,7 @@ async function git(workdir, args) {
 async function snapshot(workdir) {
   const state = /* @__PURE__ */ new Map();
   try {
-    const out = await git(workdir, ["status", "--porcelain", "-uall"]);
+    const out = await git2(workdir, ["status", "--porcelain", "-uall"]);
     for (const line of out.split("\n")) {
       if (line.length < 4) continue;
       state.set(line.slice(3).trim(), line.slice(0, 2));
@@ -4363,7 +4943,7 @@ async function snapshot(workdir) {
 }
 async function headSha(workdir) {
   try {
-    return (await git(workdir, ["rev-parse", "HEAD"])).trim();
+    return (await git2(workdir, ["rev-parse", "HEAD"])).trim();
   } catch {
     return void 0;
   }
@@ -4398,9 +4978,9 @@ function parseEnvelope(stdout) {
   return null;
 }
 function writeSessionMcpConfig(sessionLink2) {
-  const dir = mkdtempSync(join12(tmpdir(), "devpilot-mcp-"));
-  const file = join12(dir, "mcp.json");
-  writeFileSync12(
+  const dir = mkdtempSync(join14(tmpdir(), "devpilot-mcp-"));
+  const file = join14(dir, "mcp.json");
+  writeFileSync13(
     file,
     JSON.stringify(
       {
@@ -4459,9 +5039,10 @@ async function runClaudeSession(options) {
     args.push("--mcp-config", cfg.file, "--strict-mcp-config");
     effectivePrompt = sessionPreamble() + prompt2;
   }
-  const harnessBuild = harness?.build({ hasMcpConfig: Boolean(sessionLink2) });
+  const harnessBuild = harness?.build({ hasMcpConfig: Boolean(sessionLink2), codeGraph: options.codeGraph });
+  const stamp = harnessBuild?.stamp ?? harness?.stamp;
   if (harnessBuild) args.push(...harnessBuild.args);
-  const outcome = await new Promise((resolve5) => {
+  const outcome = await new Promise((resolve7) => {
     const child = spawn2(claudePath, args, {
       cwd: workdir,
       // The prompt goes in on stdin, not argv. A composed prompt carries
@@ -4475,6 +5056,15 @@ async function runClaudeSession(options) {
     const collector = new TelemetryCollector(Date.now, workdir);
     let timedOut = false;
     let killed = false;
+    let loggedWindow = "";
+    const logWindow = () => {
+      const reading = collector.windowReading();
+      if (!reading) return;
+      const key = JSON.stringify([reading.five, reading.seven, reading.c]);
+      if (key === loggedWindow) return;
+      loggedWindow = key;
+      recordWindowReading(reading, options.statuslineDir ?? statuslineDir());
+    };
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
@@ -4492,7 +5082,8 @@ async function runClaudeSession(options) {
       pending = lines.pop() ?? "";
       for (const line of lines) collector.ingestLine(line);
       if (lines.length > 0) {
-        options.onTelemetry?.({ ...collector.snapshot(), harness: harness?.stamp });
+        options.onTelemetry?.({ ...collector.snapshot(), harness: stamp });
+        logWindow();
       }
     });
     child.stderr.on("data", (chunk) => {
@@ -4502,18 +5093,18 @@ async function runClaudeSession(options) {
     });
     child.on("error", (error2) => {
       clearTimeout(timer);
-      resolve5({ code: null, stdout, stderr: `${stderr}
+      resolve7({ code: null, stdout, stderr: `${stderr}
 ${error2.message}`, timedOut, killed });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      resolve5({ code, stdout, stderr, timedOut, killed });
+      resolve7({ code, stdout, stderr, timedOut, killed });
     });
     child.stdin.write(effectivePrompt);
     child.stdin.end();
   }).finally(() => {
-    if (mcpDir) rmSync(mcpDir, { recursive: true, force: true });
-    if (harnessBuild?.cleanupDir) rmSync(harnessBuild.cleanupDir, { recursive: true, force: true });
+    if (mcpDir) rmSync3(mcpDir, { recursive: true, force: true });
+    if (harnessBuild?.cleanupDir) rmSync3(harnessBuild.cleanupDir, { recursive: true, force: true });
   });
   const after = await snapshot(workdir);
   const files = classify(before, after);
@@ -4546,7 +5137,7 @@ ${error2.message}`, timedOut, killed });
 // src/commands/session-runner/callbacks.ts
 var BACKOFF_MS = [1e3, 2e3, 4e3, 8e3, 16e3, 32e3, 6e4, 12e4, 24e4, 24e4];
 function sleep(ms) {
-  return new Promise((resolve5) => setTimeout(resolve5, ms));
+  return new Promise((resolve7) => setTimeout(resolve7, ms));
 }
 async function post(url, body, token, log) {
   const headers = { "Content-Type": "application/json" };
@@ -4582,13 +5173,13 @@ function sendCompletion(callbackUrl, report, token, log) {
 }
 
 // src/commands/session-runner/isolation.ts
-import { execFile as execFile2 } from "child_process";
+import { execFile as execFile3 } from "child_process";
 import { createHash } from "crypto";
-import { existsSync as existsSync13, mkdirSync as mkdirSync11, realpathSync, rmSync as rmSync2 } from "fs";
-import { homedir as homedir7 } from "os";
-import { basename as basename3, dirname as dirname7, join as join13 } from "path";
-import { promisify as promisify2 } from "util";
-var execFileAsync2 = promisify2(execFile2);
+import { existsSync as existsSync15, mkdirSync as mkdirSync13, realpathSync as realpathSync2, rmSync as rmSync4 } from "fs";
+import { homedir as homedir8 } from "os";
+import { basename as basename3, dirname as dirname9, join as join15 } from "path";
+import { promisify as promisify3 } from "util";
+var execFileAsync3 = promisify3(execFile3);
 var IsolationError = class extends Error {
   constructor(message, code) {
     super(message);
@@ -4599,8 +5190,8 @@ var IsolationError = class extends Error {
 var GIT_TIMEOUT_MS = 12e4;
 var DEFAULT_SETUP_TIMEOUT_MS = 10 * 6e4;
 var FALLBACK_IDENTITY = ["-c", "user.name=DevPilot", "-c", "user.email=devpilot@localhost"];
-async function git2(cwd, args) {
-  const { stdout } = await execFileAsync2("git", args, {
+async function git3(cwd, args) {
+  const { stdout } = await execFileAsync3("git", args, {
     cwd,
     maxBuffer: 32 * 1024 * 1024,
     timeout: GIT_TIMEOUT_MS,
@@ -4612,7 +5203,7 @@ async function git2(cwd, args) {
 }
 async function gitOk(cwd, args) {
   try {
-    await git2(cwd, args);
+    await git3(cwd, args);
     return true;
   } catch {
     return false;
@@ -4636,12 +5227,12 @@ function taskBranchName(runId, taskCode) {
   return `devpilot/${refSafe(runId)}/task-${refSafe(taskCode)}`;
 }
 function worktreeRoot(config) {
-  return config.worktreeRoot ?? join13(homedir7(), ".devpilot", "worktrees");
+  return config.worktreeRoot ?? join15(homedir8(), ".devpilot", "worktrees");
 }
 function repoKey(repoDir) {
   let real = repoDir;
   try {
-    real = realpathSync(repoDir);
+    real = realpathSync2(repoDir);
   } catch {
   }
   const hash = createHash("sha1").update(real).digest("hex").slice(0, 8);
@@ -4659,7 +5250,7 @@ function withRepoLock(repoDir, fn) {
 }
 async function revParse(cwd, ref) {
   try {
-    return (await git2(cwd, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])).trim() || null;
+    return (await git3(cwd, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])).trim() || null;
   } catch {
     return null;
   }
@@ -4670,9 +5261,9 @@ async function identityArgs(cwd) {
   return hasName && hasEmail ? [] : FALLBACK_IDENTITY;
 }
 async function removeWorktree(repoDir, dir) {
-  await git2(repoDir, ["worktree", "remove", "--force", dir]).catch(() => void 0);
-  rmSync2(dir, { recursive: true, force: true });
-  await git2(repoDir, ["worktree", "prune"]).catch(() => void 0);
+  await git3(repoDir, ["worktree", "remove", "--force", dir]).catch(() => void 0);
+  rmSync4(dir, { recursive: true, force: true });
+  await git3(repoDir, ["worktree", "prune"]).catch(() => void 0);
 }
 async function checkIsolatable(repoDir) {
   if (!await gitOk(repoDir, ["rev-parse", "--git-dir"])) {
@@ -4691,7 +5282,7 @@ async function checkIsolatable(repoDir) {
 async function prepareTaskWorkspace(repoDir, request, config = {}) {
   const runBranch = runBranchName(request.runId);
   const branch = taskBranchName(request.runId, request.taskCode);
-  const dir = join13(
+  const dir = join15(
     worktreeRoot(config),
     repoKey(repoDir),
     refSafe(request.runId),
@@ -4701,20 +5292,20 @@ async function prepareTaskWorkspace(repoDir, request, config = {}) {
     await checkIsolatable(repoDir);
     try {
       if (!await revParse(repoDir, `refs/heads/${runBranch}`)) {
-        await git2(repoDir, ["branch", runBranch, "HEAD"]);
+        await git3(repoDir, ["branch", runBranch, "HEAD"]);
       }
       const baseSha = await revParse(repoDir, `refs/heads/${runBranch}`);
-      if (existsSync13(dir)) await removeWorktree(repoDir, dir);
+      if (existsSync15(dir)) await removeWorktree(repoDir, dir);
       const previous = await revParse(repoDir, `refs/heads/${branch}`);
       if (previous) {
         let kept = `${branch}-attempt-${previous.slice(0, 8)}`;
         for (let n2 = 2; await revParse(repoDir, `refs/heads/${kept}`); n2++) {
           kept = `${branch}-attempt-${previous.slice(0, 8)}-${n2}`;
         }
-        await git2(repoDir, ["branch", "-m", branch, kept]);
+        await git3(repoDir, ["branch", "-m", branch, kept]);
       }
-      mkdirSync11(dirname7(dir), { recursive: true });
-      await git2(repoDir, ["worktree", "add", "-b", branch, dir, runBranch]);
+      mkdirSync13(dirname9(dir), { recursive: true });
+      await git3(repoDir, ["worktree", "add", "-b", branch, dir, runBranch]);
       return { repoDir, dir, branch, runBranch, baseSha, taskCode: request.taskCode };
     } catch (error) {
       if (error instanceof IsolationError) throw error;
@@ -4726,7 +5317,7 @@ async function prepareTaskWorkspace(repoDir, request, config = {}) {
   });
   if (config.setupCommand) {
     try {
-      await execFileAsync2("/bin/sh", ["-c", config.setupCommand], {
+      await execFileAsync3("/bin/sh", ["-c", config.setupCommand], {
         cwd: workspace.dir,
         timeout: config.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS,
         maxBuffer: 32 * 1024 * 1024
@@ -4734,7 +5325,7 @@ async function prepareTaskWorkspace(repoDir, request, config = {}) {
     } catch (error) {
       await withRepoLock(repoDir, async () => {
         await removeWorktree(repoDir, workspace.dir);
-        await git2(repoDir, ["branch", "-D", workspace.branch]).catch(() => void 0);
+        await git3(repoDir, ["branch", "-D", workspace.branch]).catch(() => void 0);
       });
       throw new IsolationError(
         `The worktree setup command failed for task ${request.taskCode}: ${gitMessage(error)}`,
@@ -4749,9 +5340,9 @@ async function finishTaskWorkspace(workspace, options) {
   return withRepoLock(repoDir, async () => {
     let commitSha;
     try {
-      await git2(dir, ["add", "-A"]);
-      if ((await git2(dir, ["status", "--porcelain"])).trim()) {
-        await git2(dir, [
+      await git3(dir, ["add", "-A"]);
+      if ((await git3(dir, ["status", "--porcelain"])).trim()) {
+        await git3(dir, [
           ...await identityArgs(dir),
           "commit",
           "--no-verify",
@@ -4762,7 +5353,7 @@ async function finishTaskWorkspace(workspace, options) {
       }
       commitSha = await revParse(dir, "HEAD");
       if (await revParse(repoDir, `refs/heads/${branch}`) !== commitSha) {
-        await git2(repoDir, ["update-ref", `refs/heads/${branch}`, commitSha]);
+        await git3(repoDir, ["update-ref", `refs/heads/${branch}`, commitSha]);
       }
     } catch (error) {
       throw new IsolationError(
@@ -4774,7 +5365,7 @@ async function finishTaskWorkspace(workspace, options) {
       const filesModified = [];
       const filesCreated = [];
       const filesDeleted = [];
-      const diff = await git2(repoDir, [
+      const diff = await git3(repoDir, [
         "diff",
         "--name-status",
         "--no-renames",
@@ -4805,13 +5396,13 @@ async function finishTaskWorkspace(workspace, options) {
       );
     } finally {
       if (await gitOk(repoDir, ["worktree", "remove", dir])) {
-        rmSync2(dir, { recursive: true, force: true });
+        rmSync4(dir, { recursive: true, force: true });
       }
     }
   });
 }
 async function checkedOutAt(repoDir, branch) {
-  const out = await git2(repoDir, ["worktree", "list", "--porcelain"]);
+  const out = await git3(repoDir, ["worktree", "list", "--porcelain"]);
   let current = null;
   for (const line of out.split("\n")) {
     if (line.startsWith("worktree ")) current = line.slice("worktree ".length);
@@ -4821,7 +5412,7 @@ async function checkedOutAt(repoDir, branch) {
 }
 async function integrateRun(repoDir, request, config = {}) {
   const runBranch = runBranchName(request.runId);
-  const dir = join13(worktreeRoot(config), repoKey(repoDir), refSafe(request.runId), "_integrate");
+  const dir = join15(worktreeRoot(config), repoKey(repoDir), refSafe(request.runId), "_integrate");
   return withRepoLock(repoDir, async () => {
     await checkIsolatable(repoDir);
     const startSha = await revParse(repoDir, `refs/heads/${runBranch}`);
@@ -4845,10 +5436,10 @@ async function integrateRun(repoDir, request, config = {}) {
       conflicts: [],
       missing: []
     };
-    if (existsSync13(dir)) await removeWorktree(repoDir, dir);
-    mkdirSync11(dirname7(dir), { recursive: true });
+    if (existsSync15(dir)) await removeWorktree(repoDir, dir);
+    mkdirSync13(dirname9(dir), { recursive: true });
     try {
-      await git2(repoDir, ["worktree", "add", "--detach", dir, runBranch]);
+      await git3(repoDir, ["worktree", "add", "--detach", dir, runBranch]);
       const identity = await identityArgs(dir);
       for (const taskCode of request.taskCodes) {
         const branch = taskBranchName(request.runId, taskCode);
@@ -4862,7 +5453,7 @@ async function integrateRun(repoDir, request, config = {}) {
           continue;
         }
         try {
-          await git2(dir, [
+          await git3(dir, [
             ...identity,
             "merge",
             "--no-ff",
@@ -4874,12 +5465,12 @@ async function integrateRun(repoDir, request, config = {}) {
           ]);
           result.merged.push({ taskCode, branch, commitSha, alreadyMerged: false });
         } catch (error) {
-          const unmerged = await git2(dir, ["diff", "--name-only", "--diff-filter=U", "-z"]).catch(
+          const unmerged = await git3(dir, ["diff", "--name-only", "--diff-filter=U", "-z"]).catch(
             () => ""
           );
           const files = unmerged.split("\0").filter(Boolean);
-          await git2(dir, ["merge", "--abort"]).catch(() => void 0);
-          await git2(dir, ["reset", "--hard", "--quiet"]).catch(() => void 0);
+          await git3(dir, ["merge", "--abort"]).catch(() => void 0);
+          await git3(dir, ["reset", "--hard", "--quiet"]).catch(() => void 0);
           if (files.length === 0) {
             throw new IsolationError(
               `Merging task ${taskCode} into ${runBranch} failed: ${gitMessage(error)}`,
@@ -4892,7 +5483,7 @@ async function integrateRun(repoDir, request, config = {}) {
       const headSha2 = await revParse(dir, "HEAD");
       if (headSha2 !== startSha) {
         try {
-          await git2(repoDir, ["update-ref", `refs/heads/${runBranch}`, headSha2, startSha]);
+          await git3(repoDir, ["update-ref", `refs/heads/${runBranch}`, headSha2, startSha]);
         } catch (error) {
           throw new IsolationError(
             `${runBranch} changed while the wave was being merged; nothing was written. ${gitMessage(error)}`,
@@ -4934,8 +5525,9 @@ function workspacePreamble(workspace, config = {}) {
 }
 
 // src/commands/session-runner/server.ts
+import { codeGraph as graph } from "@devpilot.sh/core";
 var VERSION2 = "1.1.0";
-var CAPABILITIES = ["isolation"];
+var CAPABILITIES = ["isolation", "code-graph"];
 function commitSubject(taskCode, title) {
   const line = (title ?? "").replace(/\s+/g, " ").trim();
   const subject = line ? `devpilot(${taskCode}): ${line}` : `devpilot: task ${taskCode}`;
@@ -4988,10 +5580,10 @@ var SessionRunner = class {
   resolveWorkdir(repo) {
     const mapped = this.config.repoMap.get(repo);
     if (mapped) {
-      return existsSync14(mapped) ? { workdir: mapped } : { error: `Mapped path for '${repo}' does not exist: ${mapped}` };
+      return existsSync16(mapped) ? { workdir: mapped } : { error: `Mapped path for '${repo}' does not exist: ${mapped}` };
     }
-    const candidate = isAbsolute(repo) ? repo : resolve3(this.config.workspace, basename4(repo));
-    if (!existsSync14(candidate)) {
+    const candidate = isAbsolute2(repo) ? repo : resolve5(this.config.workspace, basename4(repo));
+    if (!existsSync16(candidate)) {
       return {
         error: `No checkout for '${repo}'. Tried ${candidate}. Pass --repo ${repo}=/path/to/checkout, or set --workspace.`
       };
@@ -5033,6 +5625,21 @@ var SessionRunner = class {
         );
       }
       const rundir = workspace?.dir ?? session.workdir;
+      let codeGraph3 = null;
+      const indexer = this.config.codeGraph;
+      if (indexer && hasIndex(session.workdir)) {
+        try {
+          await excludeIndexFromGit(session.workdir);
+          if (workspace && seedIndex(session.workdir, workspace.dir)) {
+            await syncIndex(indexer, workspace.dir, 6e4);
+          }
+          if (hasIndex(rundir)) codeGraph3 = mcpServerFor(indexer, rundir);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.config.log(`[${session.externalSessionId}] code graph unavailable for this run: ${message.slice(0, 300)}`);
+          codeGraph3 = null;
+        }
+      }
       session.progressPercent = 5;
       session.currentStep = "session started";
       this.reportStatus(session, callbackUrl, callbackToken, {
@@ -5066,6 +5673,7 @@ var SessionRunner = class {
         resumeSessionId: request.resumeSessionId,
         timeoutMs: this.config.timeoutMs,
         harness: this.config.harness,
+        codeGraph: codeGraph3,
         onLog: (line) => this.config.log(`[${session.externalSessionId}] ${line}`),
         onSpawn: (kill) => {
           session.kill = kill;
@@ -5087,6 +5695,7 @@ var SessionRunner = class {
         }
       });
       clearInterval(heartbeat);
+      if (codeGraph3) await stopIndexDaemon(rundir);
       if (workspace && request.isolation) {
         try {
           const result = await finishTaskWorkspace(workspace, {
@@ -5207,7 +5816,7 @@ ${message}` : message;
         return json(res, 400, { error: "ISOLATION_UNAVAILABLE", message: refusal });
       }
     }
-    const externalSessionId = `run_${randomUUID()}`;
+    const externalSessionId = `run_${randomUUID2()}`;
     const session = {
       externalSessionId,
       devpilotSessionId: body.sessionId,
@@ -5288,6 +5897,48 @@ ${message}` : message;
       return json(res, status, { error: error2.code, message });
     }
   }
+  /**
+   * `POST /v1/graph/dependents` and `POST /v1/graph/affected-tests`.
+   *
+   * The cockpit plans the work but does not know where a repository is checked
+   * out; this runner does. So the planner asks here which files depend on the
+   * files a task will change, and gets an answer read straight from the index
+   * — no model, no agent, a few milliseconds.
+   *
+   * "No index" is an ordinary answer, `{ available: false, reason }` with a
+   * 200: the caller plans without the graph, exactly as it did before.
+   */
+  async handleGraph(req, res, kind) {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (error2) {
+      return json(res, 400, { error: "INVALID_PAYLOAD", message: error2 instanceof Error ? error2.message : "invalid JSON" });
+    }
+    if (typeof body?.repo !== "string" || !Array.isArray(body.files) || body.files.length > 2e3 || body.files.some((f) => typeof f !== "string" || !f || f.length > 500)) {
+      return json(res, 400, { error: "INVALID_PAYLOAD", message: "repo and files (at most 2000 paths) are required" });
+    }
+    const { workdir, error } = this.resolveWorkdir(body.repo);
+    if (!workdir) return json(res, 200, { available: false, reason: error });
+    if (!hasIndex(workdir)) {
+      return json(res, 200, {
+        available: false,
+        reason: `No code graph index for ${body.repo}. Run \`devpilot graph enable\` in its checkout to build one.`
+      });
+    }
+    const files = body.files;
+    if (kind === "dependents") {
+      const depth = typeof body.depth === "number" ? body.depth : void 0;
+      const limit = typeof body.limit === "number" ? body.limit : void 0;
+      const result = graph.dependentsOf(workdir, files, { depth, limit });
+      const status = graph.readGraphStatus(workdir);
+      return json(res, 200, {
+        ...result,
+        indexedAt: status.indexedAt ? new Date(status.indexedAt).toISOString() : null
+      });
+    }
+    return json(res, 200, graph.affectedTests(workdir, files));
+  }
   handleGet(res, externalSessionId) {
     const session = this.sessions.get(externalSessionId);
     if (!session) return json(res, 404, { error: "NOT_FOUND" });
@@ -5341,6 +5992,12 @@ ${message}` : message;
     if (path === "/v1/integrate" && req.method === "POST") {
       return this.handleIntegrate(req, res);
     }
+    if (path === "/v1/graph/dependents" && req.method === "POST") {
+      return this.handleGraph(req, res, "dependents");
+    }
+    if (path === "/v1/graph/affected-tests" && req.method === "POST") {
+      return this.handleGraph(req, res, "affected-tests");
+    }
     const match = path.match(/^\/v1\/sessions\/([^/]+)(\/messages|\/stop)?$/);
     if (match) {
       const [, id, suffix] = match;
@@ -5376,9 +6033,9 @@ ${message}` : message;
 };
 
 // src/commands/session-runner/harness.ts
-import { mkdtempSync as mkdtempSync2, writeFileSync as writeFileSync13 } from "fs";
+import { mkdtempSync as mkdtempSync2, writeFileSync as writeFileSync14 } from "fs";
 import { tmpdir as tmpdir2 } from "os";
-import { join as join14 } from "path";
+import { join as join16 } from "path";
 var HARNESS_VERSION = 1;
 var TECHNIQUES = [
   {
@@ -5388,8 +6045,8 @@ var TECHNIQUES = [
     watch: "tool-not-found errors, or a task that needed a project MCP server failing",
     args: (ctx) => {
       if (ctx.hasMcpConfig) return [];
-      const file = join14(ctx.scratchDir(), "mcp-none.json");
-      writeFileSync13(file, JSON.stringify({ mcpServers: {} }), { mode: 384 });
+      const file = join16(ctx.scratchDir(), "mcp-none.json");
+      writeFileSync14(file, JSON.stringify({ mcpServers: {} }), { mode: 384 });
       return ["--mcp-config", file, "--strict-mcp-config"];
     }
   },
@@ -5422,7 +6079,30 @@ var TECHNIQUES = [
     args: () => {
       const cap = Number(process.env.DEVPILOT_HARNESS_MAX_BUDGET_USD);
       return Number.isFinite(cap) && cap > 0 ? ["--max-budget-usd", String(cap)] : [];
+    },
+    applies: () => {
+      const cap = Number(process.env.DEVPILOT_HARNESS_MAX_BUDGET_USD);
+      return Number.isFinite(cap) && cap > 0;
     }
+  },
+  {
+    id: "code-graph",
+    summary: 'Give the agent one tool that answers "where is this and what depends on it" from an index of the repository',
+    // What it is meant to reduce is the reading an agent does to find its way
+    // around. It is in no profile: whether it does reduce it, at equal task
+    // success, is exactly what running with and without this technique is for.
+    bucket: "context-size",
+    watch: "more tokens per written change, not fewer; retrieved context left sitting in the window; answers about the wrong module",
+    // In addition to whatever MCP config the run already has: `claude` merges
+    // several `--mcp-config` files, and `--strict-mcp-config` (from strict-mcp
+    // or a shared session) keeps the total to exactly the ones named.
+    args: (ctx) => {
+      if (!ctx.codeGraph) return [];
+      const file = join16(ctx.scratchDir(), "mcp-code-graph.json");
+      writeFileSync14(file, JSON.stringify({ mcpServers: { codegraph: ctx.codeGraph } }), { mode: 384 });
+      return ["--mcp-config", file];
+    },
+    applies: (ctx) => Boolean(ctx.codeGraph)
   }
 ];
 var PROFILES = {
@@ -5453,19 +6133,27 @@ function resolveHarness(spec) {
   return {
     stamp,
     techniques,
-    build({ hasMcpConfig }) {
+    build({ hasMcpConfig, codeGraph: codeGraph3 }) {
       let dir;
       const ctx = {
         hasMcpConfig,
-        scratchDir: () => dir ?? (dir = mkdtempSync2(join14(tmpdir2(), "devpilot-harness-")))
+        codeGraph: codeGraph3,
+        scratchDir: () => dir ?? (dir = mkdtempSync2(join16(tmpdir2(), "devpilot-harness-")))
       };
-      const args = techniques.flatMap((t) => t.args(ctx));
-      return { args, cleanupDir: dir };
+      const applied = techniques.filter((t) => t.applies?.(ctx) ?? true);
+      const args = applied.flatMap((t) => t.args(ctx));
+      const ran = new Set(applied.map((t) => t.id));
+      return {
+        args,
+        cleanupDir: dir,
+        stamp: `${[profile, ...new Set(added.filter((id) => ran.has(id)))].join("+")}@${HARNESS_VERSION}`
+      };
     }
   };
 }
 
 // src/commands/session-runner/index.ts
+var wantsCodeGraph = (harness) => harness.techniques.some((t) => t.id === "code-graph");
 function parseRepoMap(values) {
   const map = /* @__PURE__ */ new Map();
   for (const entry of values) {
@@ -5473,11 +6161,11 @@ function parseRepoMap(values) {
     if (idx === -1) {
       throw new Error(`--repo expects <repo>=<path>, got '${entry}'`);
     }
-    map.set(entry.slice(0, idx).trim(), resolve4(entry.slice(idx + 1).trim()));
+    map.set(entry.slice(0, idx).trim(), resolve6(entry.slice(idx + 1).trim()));
   }
   return map;
 }
-var sessionRunnerCommand = new Command16("session-runner").description("Run Claude Code sessions dispatched by DevPilot (claude-session mode)").option("-p, --port <port>", "Port to listen on", "3900").option("--host <host>", "Interface to bind", "127.0.0.1").option("--token <token>", "Bearer token the dispatcher must present").option("-w, --workspace <dir>", "Directory containing repo checkouts", process.cwd()).option(
+var sessionRunnerCommand = new Command17("session-runner").description("Run Claude Code sessions dispatched by DevPilot (claude-session mode)").option("-p, --port <port>", "Port to listen on", "3900").option("--host <host>", "Interface to bind", "127.0.0.1").option("--token <token>", "Bearer token the dispatcher must present").option("-w, --workspace <dir>", "Directory containing repo checkouts", process.cwd()).option(
   "--repo <mapping>",
   "Explicit repo mapping, <owner/name>=<path> (repeatable)",
   (value, previous) => [...previous, value],
@@ -5503,7 +6191,7 @@ var sessionRunnerCommand = new Command16("session-runner").description("Run Clau
   try {
     repoMap = parseRepoMap(options.repo ?? []);
   } catch (error) {
-    console.error(chalk18.red(error instanceof Error ? error.message : String(error)));
+    console.error(chalk19.red(error instanceof Error ? error.message : String(error)));
     process.exitCode = 1;
     return;
   }
@@ -5511,7 +6199,7 @@ var sessionRunnerCommand = new Command16("session-runner").description("Run Clau
   try {
     harness = resolveHarness(options.harness);
   } catch (error) {
-    console.error(chalk18.red(error instanceof Error ? error.message : String(error)));
+    console.error(chalk19.red(error instanceof Error ? error.message : String(error)));
     process.exitCode = 1;
     return;
   }
@@ -5519,57 +6207,69 @@ var sessionRunnerCommand = new Command16("session-runner").description("Run Clau
     port: parseInt(options.port, 10),
     host: options.host,
     apiKey: options.token ?? process.env.DEVPILOT_SESSION_API_KEY,
-    workspace: resolve4(options.workspace),
+    workspace: resolve6(options.workspace),
     repoMap,
     claudePath: options.claudePath,
     permissionMode: options.permissionMode,
     maxConcurrent: parseInt(options.maxConcurrent, 10),
     timeoutMs: parseInt(options.timeout, 10) * 6e4,
     harness,
+    // Found once, at start. Absent is the ordinary case and switches every
+    // graph feature off.
+    codeGraph: await findIndexer(),
     isolation: {
-      worktreeRoot: options.worktreeRoot ? resolve4(options.worktreeRoot) : void 0,
+      worktreeRoot: options.worktreeRoot ? resolve6(options.worktreeRoot) : void 0,
       setupCommand: options.worktreeSetup || void 0
     },
-    log: (line) => console.log(chalk18.dim(`[runner] ${line}`))
+    log: (line) => console.log(chalk19.dim(`[runner] ${line}`))
   };
   const runner = new SessionRunner(config);
   try {
     await runner.start();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(chalk18.red(`Failed to start session runner: ${message}`));
+    console.error(chalk19.red(`Failed to start session runner: ${message}`));
     process.exitCode = 1;
     return;
   }
   const base = `http://${config.host}:${config.port}`;
-  console.log(chalk18.bold("\n  DevPilot session runner\n"));
-  console.log(`  ${chalk18.dim("listening")}   ${base}`);
-  console.log(`  ${chalk18.dim("workspace")}   ${config.workspace}`);
-  console.log(`  ${chalk18.dim("claude")}      ${config.claudePath} (${config.permissionMode})`);
-  console.log(`  ${chalk18.dim("concurrency")} ${config.maxConcurrent}`);
-  console.log(`  ${chalk18.dim("harness")}     ${harness.stamp}`);
+  console.log(chalk19.bold("\n  DevPilot session runner\n"));
+  console.log(`  ${chalk19.dim("listening")}   ${base}`);
+  console.log(`  ${chalk19.dim("workspace")}   ${config.workspace}`);
+  console.log(`  ${chalk19.dim("claude")}      ${config.claudePath} (${config.permissionMode})`);
+  console.log(`  ${chalk19.dim("concurrency")} ${config.maxConcurrent}`);
+  console.log(`  ${chalk19.dim("harness")}     ${harness.stamp}`);
   for (const t of harness.techniques) {
-    console.log(`  ${chalk18.dim("           ")} ${t.id}: ${t.summary}`);
-    console.log(chalk18.dim(`               watch for ${t.watch}`));
+    console.log(`  ${chalk19.dim("           ")} ${t.id}: ${t.summary}`);
+    console.log(chalk19.dim(`               watch for ${t.watch}`));
   }
   console.log(
-    `  ${chalk18.dim("worktrees")}   ${config.isolation?.worktreeRoot ?? "~/.devpilot/worktrees"}` + (config.isolation?.setupCommand ? chalk18.dim(` (setup: ${config.isolation.setupCommand})`) : chalk18.dim(" (no --worktree-setup: tracked files only)"))
+    `  ${chalk19.dim("worktrees")}   ${config.isolation?.worktreeRoot ?? "~/.devpilot/worktrees"}` + (config.isolation?.setupCommand ? chalk19.dim(` (setup: ${config.isolation.setupCommand})`) : chalk19.dim(" (no --worktree-setup: tracked files only)"))
   );
+  console.log(
+    `  ${chalk19.dim("code graph")}  ` + (config.codeGraph ? `codegraph ${config.codeGraph.version ?? ""}`.trim() + chalk19.dim(" (used for a repository once `devpilot graph enable` has indexed it)") : chalk19.dim(`not installed \u2014 optional: ${installHint()}`))
+  );
+  if (wantsCodeGraph(harness) && !config.codeGraph) {
+    console.log(
+      chalk19.yellow("  The harness asks for code-graph but the indexer is not installed; agents will run without it,")
+    );
+    console.log(chalk19.yellow("  and their readings will not carry the code-graph stamp."));
+  }
   if (repoMap.size > 0) {
-    for (const [repo, path] of repoMap) console.log(`  ${chalk18.dim("repo")}        ${repo} \u2192 ${path}`);
+    for (const [repo, path] of repoMap) console.log(`  ${chalk19.dim("repo")}        ${repo} \u2192 ${path}`);
   }
   if (!config.apiKey) {
-    console.log(chalk18.yellow("\n  No --token set: the dispatcher API is unauthenticated."));
+    console.log(chalk19.yellow("\n  No --token set: the dispatcher API is unauthenticated."));
   }
-  console.log(chalk18.dim("\n  Point DevPilot at it:"));
+  console.log(chalk19.dim("\n  Point DevPilot at it:"));
   console.log(
-    chalk18.dim(
+    chalk19.dim(
       `    DEVPILOT_ORCHESTRATOR_MODE=claude-session DEVPILOT_SESSION_API_URL=${base} devpilot serve
 `
     )
   );
   const shutdown = async () => {
-    console.log(chalk18.dim("\n[runner] shutting down\u2026"));
+    console.log(chalk19.dim("\n[runner] shutting down\u2026"));
     await runner.stop();
     process.exit(0);
   };
@@ -5578,9 +6278,9 @@ var sessionRunnerCommand = new Command16("session-runner").description("Run Clau
 });
 
 // src/commands/update.ts
-import { Command as Command17 } from "commander";
+import { Command as Command18 } from "commander";
 import { execSync as execSync2, spawn as spawn3 } from "child_process";
-import chalk19 from "chalk";
+import chalk20 from "chalk";
 async function getLatestVersion() {
   try {
     const result = execSync2("npm view @devpilot.sh/cli version", {
@@ -5639,35 +6339,35 @@ function getUpdateCommand(pm) {
       return "npm install -g @devpilot.sh/cli@latest";
   }
 }
-var updateCommand = new Command17("update").description("Update DevPilot CLI to the latest version").option("-c, --check", "Only check for updates without installing").option("--force", "Force update even if already on latest version").action(async (options) => {
-  console.log(chalk19.cyan("Checking for updates..."));
+var updateCommand = new Command18("update").description("Update DevPilot CLI to the latest version").option("-c, --check", "Only check for updates without installing").option("--force", "Force update even if already on latest version").action(async (options) => {
+  console.log(chalk20.cyan("Checking for updates..."));
   const latestVersion = await getLatestVersion();
   if (!latestVersion) {
-    console.log(chalk19.yellow("Could not check for updates. Please check your network connection."));
-    console.log(chalk19.gray("You can manually update with: npm install -g @devpilot.sh/cli@latest"));
+    console.log(chalk20.yellow("Could not check for updates. Please check your network connection."));
+    console.log(chalk20.gray("You can manually update with: npm install -g @devpilot.sh/cli@latest"));
     return;
   }
   const comparison = compareVersions(latestVersion, VERSION);
   if (comparison === 0 && !options.force) {
-    console.log(chalk19.green(`You're already on the latest version (${VERSION})`));
+    console.log(chalk20.green(`You're already on the latest version (${VERSION})`));
     return;
   }
   if (comparison === -1 && !options.force) {
-    console.log(chalk19.yellow(`You're on a newer version (${VERSION}) than the latest release (${latestVersion})`));
-    console.log(chalk19.gray("This might be a pre-release or development version."));
+    console.log(chalk20.yellow(`You're on a newer version (${VERSION}) than the latest release (${latestVersion})`));
+    console.log(chalk20.gray("This might be a pre-release or development version."));
     return;
   }
   if (options.check) {
     if (comparison === 1) {
-      console.log(chalk19.yellow(`Update available: ${VERSION} \u2192 ${latestVersion}`));
-      console.log(chalk19.gray('Run "devpilot update" to install the latest version.'));
+      console.log(chalk20.yellow(`Update available: ${VERSION} \u2192 ${latestVersion}`));
+      console.log(chalk20.gray('Run "devpilot update" to install the latest version.'));
     }
     return;
   }
   const pm = detectPackageManager();
   const updateCmd = getUpdateCommand(pm);
-  console.log(chalk19.cyan(`Updating from ${VERSION} to ${latestVersion}...`));
-  console.log(chalk19.gray(`Using: ${updateCmd}`));
+  console.log(chalk20.cyan(`Updating from ${VERSION} to ${latestVersion}...`));
+  console.log(chalk20.gray(`Using: ${updateCmd}`));
   console.log("");
   try {
     const [cmd, ...args] = updateCmd.split(" ");
@@ -5678,49 +6378,49 @@ var updateCommand = new Command17("update").description("Update DevPilot CLI to 
     child.on("close", (code) => {
       if (code === 0) {
         console.log("");
-        console.log(chalk19.green(`Successfully updated to ${latestVersion}`));
-        console.log(chalk19.gray('Run "devpilot --version" to verify.'));
+        console.log(chalk20.green(`Successfully updated to ${latestVersion}`));
+        console.log(chalk20.gray('Run "devpilot --version" to verify.'));
       } else {
         console.log("");
-        console.log(chalk19.red("Update failed. Please try manually:"));
-        console.log(chalk19.cyan(`  ${updateCmd}`));
+        console.log(chalk20.red("Update failed. Please try manually:"));
+        console.log(chalk20.cyan(`  ${updateCmd}`));
       }
     });
     child.on("error", (err) => {
-      console.log(chalk19.red(`Update failed: ${err.message}`));
-      console.log(chalk19.gray("Please try manually:"));
-      console.log(chalk19.cyan(`  ${updateCmd}`));
+      console.log(chalk20.red(`Update failed: ${err.message}`));
+      console.log(chalk20.gray("Please try manually:"));
+      console.log(chalk20.cyan(`  ${updateCmd}`));
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    console.log(chalk19.red(`Update failed: ${message}`));
-    console.log(chalk19.gray("Please try manually:"));
-    console.log(chalk19.cyan(`  ${updateCmd}`));
+    console.log(chalk20.red(`Update failed: ${message}`));
+    console.log(chalk20.gray("Please try manually:"));
+    console.log(chalk20.cyan(`  ${updateCmd}`));
   }
 });
 
 // src/commands/wiki.ts
-import { Command as Command18 } from "commander";
-import { existsSync as existsSync15, mkdirSync as mkdirSync12, readFileSync as readFileSync13, writeFileSync as writeFileSync14 } from "fs";
-import { join as join15 } from "path";
-import chalk20 from "chalk";
+import { Command as Command19 } from "commander";
+import { existsSync as existsSync17, mkdirSync as mkdirSync14, readFileSync as readFileSync15, writeFileSync as writeFileSync15 } from "fs";
+import { join as join17 } from "path";
+import chalk21 from "chalk";
 import { resolveWikiModel } from "@devpilot.sh/core/wave-planner";
-var wikiCommand = new Command18("wiki").description("LLM-compiled knowledge base \u2014 institutional memory for your codebase");
+var wikiCommand = new Command19("wiki").description("LLM-compiled knowledge base \u2014 institutional memory for your codebase");
 wikiCommand.command("init").description("Initialize the wiki system in the current repository").option("--wiki-dir <path>", "Wiki output directory", ".devpilot/wiki").action(async (options) => {
   const cwd = process.cwd();
-  const devpilotDir = join15(cwd, ".devpilot");
-  const wikiDir = join15(cwd, options.wikiDir);
-  if (!existsSync15(devpilotDir)) {
+  const devpilotDir = join17(cwd, ".devpilot");
+  const wikiDir = join17(cwd, options.wikiDir);
+  if (!existsSync17(devpilotDir)) {
     console.log(
-      chalk20.yellow("\u26A0\uFE0F  DevPilot not initialized. Run `devpilot init` first.")
+      chalk21.yellow("\u26A0\uFE0F  DevPilot not initialized. Run `devpilot init` first.")
     );
     return;
   }
-  if (!existsSync15(wikiDir)) {
-    mkdirSync12(wikiDir, { recursive: true });
+  if (!existsSync17(wikiDir)) {
+    mkdirSync14(wikiDir, { recursive: true });
   }
-  const indexPath = join15(wikiDir, "index.md");
-  if (!existsSync15(indexPath)) {
+  const indexPath = join17(wikiDir, "index.md");
+  if (!existsSync17(indexPath)) {
     const initialIndex = `# Wiki Index
 
 > Auto-generated wiki \u2014 compiled from session logs, commits, specs, and decisions.
@@ -5735,11 +6435,11 @@ This wiki will grow automatically as you work with DevPilot:
 
 Run \`devpilot wiki ingest\` to manually add sources, or let the session hook capture knowledge automatically.
 `;
-    writeFileSync14(indexPath, initialIndex);
+    writeFileSync15(indexPath, initialIndex);
   }
-  const logPath = join15(wikiDir, "log.md");
-  if (!existsSync15(logPath)) {
-    writeFileSync14(
+  const logPath = join17(wikiDir, "log.md");
+  if (!existsSync17(logPath)) {
+    writeFileSync15(
       logPath,
       `# Wiki Activity Log
 
@@ -5749,29 +6449,29 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
 `
     );
   }
-  const gitignorePath = join15(cwd, ".gitignore");
-  if (existsSync15(gitignorePath)) {
-    const gitignore = readFileSync13(gitignorePath, "utf-8");
+  const gitignorePath = join17(cwd, ".gitignore");
+  if (existsSync17(gitignorePath)) {
+    const gitignore = readFileSync15(gitignorePath, "utf-8");
     if (!gitignore.includes(".devpilot/wiki")) {
     }
   }
-  console.log(chalk20.green("\u2705 Wiki initialized!"));
+  console.log(chalk21.green("\u2705 Wiki initialized!"));
   console.log("");
-  console.log(chalk20.white("Wiki directory: ") + chalk20.cyan(wikiDir));
+  console.log(chalk21.white("Wiki directory: ") + chalk21.cyan(wikiDir));
   console.log("");
-  console.log(chalk20.white("Next steps:"));
+  console.log(chalk21.white("Next steps:"));
   console.log(
-    chalk20.gray("  1. ") + chalk20.cyan("devpilot wiki ingest --file <path>") + chalk20.gray(" to add source material")
+    chalk21.gray("  1. ") + chalk21.cyan("devpilot wiki ingest --file <path>") + chalk21.gray(" to add source material")
   );
   console.log(
-    chalk20.gray("  2. ") + chalk20.cyan('devpilot wiki query "How does auth work?"') + chalk20.gray(" to ask questions")
+    chalk21.gray("  2. ") + chalk21.cyan('devpilot wiki query "How does auth work?"') + chalk21.gray(" to ask questions")
   );
   console.log(
-    chalk20.gray("  3. ") + chalk20.cyan("devpilot wiki status") + chalk20.gray(" to check wiki health")
+    chalk21.gray("  3. ") + chalk21.cyan("devpilot wiki status") + chalk21.gray(" to check wiki health")
   );
   console.log("");
   console.log(
-    chalk20.gray(
+    chalk21.gray(
       "The wiki will grow automatically as agents work \u2014 each session compounds the knowledge base."
     )
   );
@@ -5779,29 +6479,29 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
 wikiCommand.command("ingest").description("Ingest a source document into the wiki").requiredOption("--type <type>", "Source type: session_log, commit, spec, decision, manual").requiredOption("--title <title>", "Human-readable title for the source").option("--file <path>", "Path to source file").option("--stdin", "Read source from stdin").option("--origin <origin>", "Origin identifier (e.g. session ID, commit SHA)").action(async (options) => {
   let content;
   if (options.file) {
-    if (!existsSync15(options.file)) {
-      console.log(chalk20.red(`\u274C File not found: ${options.file}`));
+    if (!existsSync17(options.file)) {
+      console.log(chalk21.red(`\u274C File not found: ${options.file}`));
       return;
     }
-    content = readFileSync13(options.file, "utf-8");
+    content = readFileSync15(options.file, "utf-8");
   } else if (options.stdin) {
-    content = readFileSync13(0, "utf-8");
+    content = readFileSync15(0, "utf-8");
   } else {
     console.log(
-      chalk20.red("\u274C Provide either --file <path> or --stdin")
+      chalk21.red("\u274C Provide either --file <path> or --stdin")
     );
     return;
   }
   const validTypes = ["session_log", "commit", "spec", "decision", "manual"];
   if (!validTypes.includes(options.type)) {
     console.log(
-      chalk20.red(
+      chalk21.red(
         `\u274C Invalid type "${options.type}". Must be one of: ${validTypes.join(", ")}`
       )
     );
     return;
   }
-  console.log(chalk20.gray(`Ingesting ${options.type}: "${options.title}"...`));
+  console.log(chalk21.gray(`Ingesting ${options.type}: "${options.title}"...`));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
@@ -5812,75 +6512,75 @@ wikiCommand.command("ingest").description("Ingest a source document into the wik
       options.title,
       options.origin
     );
-    console.log(chalk20.green("\u2705 Ingested successfully!"));
+    console.log(chalk21.green("\u2705 Ingested successfully!"));
     console.log(
-      chalk20.gray(`   Source ID: ${result.sourceId}`)
+      chalk21.gray(`   Source ID: ${result.sourceId}`)
     );
     if (result.articlesCreated.length > 0) {
       console.log(
-        chalk20.white(`   Articles created: `) + chalk20.cyan(result.articlesCreated.join(", "))
+        chalk21.white(`   Articles created: `) + chalk21.cyan(result.articlesCreated.join(", "))
       );
     }
     if (result.articlesUpdated.length > 0) {
       console.log(
-        chalk20.white(`   Articles updated: `) + chalk20.yellow(result.articlesUpdated.join(", "))
+        chalk21.white(`   Articles updated: `) + chalk21.yellow(result.articlesUpdated.join(", "))
       );
     }
     console.log(
-      chalk20.gray(`   Tokens used: ${result.tokensUsed}`)
+      chalk21.gray(`   Tokens used: ${result.tokensUsed}`)
     );
   } catch (error) {
     console.log(
-      chalk20.red(
+      chalk21.red(
         `\u274C Ingest failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
   }
 });
 wikiCommand.command("query <question>").description("Ask a question against the wiki").action(async (question) => {
-  console.log(chalk20.gray(`Searching wiki for: "${question}"...`));
+  console.log(chalk21.gray(`Searching wiki for: "${question}"...`));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const result = await compiler.query(question);
     console.log("");
-    console.log(chalk20.white(result.answer));
+    console.log(chalk21.white(result.answer));
     console.log("");
     if (result.citedArticles.length > 0) {
       console.log(
-        chalk20.gray("Cited: ") + chalk20.cyan(result.citedArticles.map((s) => `[[${s}]]`).join(", "))
+        chalk21.gray("Cited: ") + chalk21.cyan(result.citedArticles.map((s) => `[[${s}]]`).join(", "))
       );
     }
     if (result.newArticleSlug) {
       console.log(
-        chalk20.green(
+        chalk21.green(
           `\u{1F4DD} New article created from this query: [[${result.newArticleSlug}]]`
         )
       );
     }
-    console.log(chalk20.gray(`Tokens used: ${result.tokensUsed}`));
+    console.log(chalk21.gray(`Tokens used: ${result.tokensUsed}`));
   } catch (error) {
     console.log(
-      chalk20.red(
+      chalk21.red(
         `\u274C Query failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
   }
 });
 wikiCommand.command("lint").description("Check wiki health \u2014 find stale content, orphans, and gaps").action(async () => {
-  console.log(chalk20.gray("Linting wiki..."));
+  console.log(chalk21.gray("Linting wiki..."));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const result = await compiler.lint();
     if (result.findings.length === 0) {
-      console.log(chalk20.green("\u2705 Wiki is healthy \u2014 no issues found!"));
+      console.log(chalk21.green("\u2705 Wiki is healthy \u2014 no issues found!"));
       return;
     }
     console.log(
-      chalk20.yellow(`\u26A0\uFE0F  Found ${result.findings.length} issue(s):
+      chalk21.yellow(`\u26A0\uFE0F  Found ${result.findings.length} issue(s):
 `)
     );
     for (const finding of result.findings) {
@@ -5892,23 +6592,23 @@ wikiCommand.command("lint").description("Check wiki health \u2014 find stale con
         broken_link: "\u{1F494}"
       }[finding.type];
       console.log(
-        `  ${icon} ${chalk20.white(`[${finding.type}]`)} ${chalk20.cyan(`[[${finding.articleSlug}]]`)}`
+        `  ${icon} ${chalk21.white(`[${finding.type}]`)} ${chalk21.cyan(`[[${finding.articleSlug}]]`)}`
       );
-      console.log(chalk20.gray(`     ${finding.description}`));
-      console.log(chalk20.gray(`     \u2192 ${finding.suggestion}`));
+      console.log(chalk21.gray(`     ${finding.description}`));
+      console.log(chalk21.gray(`     \u2192 ${finding.suggestion}`));
       console.log("");
     }
     if (result.articlesMarkedStale.length > 0) {
       console.log(
-        chalk20.yellow(
+        chalk21.yellow(
           `Marked ${result.articlesMarkedStale.length} article(s) as stale.`
         )
       );
     }
-    console.log(chalk20.gray(`Tokens used: ${result.tokensUsed}`));
+    console.log(chalk21.gray(`Tokens used: ${result.tokensUsed}`));
   } catch (error) {
     console.log(
-      chalk20.red(
+      chalk21.red(
         `\u274C Lint failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -5920,46 +6620,46 @@ wikiCommand.command("status").description("Show wiki statistics").action(async (
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const status = await compiler.getStatus();
-    console.log(chalk20.white.bold("\n\u{1F4DA} Wiki Status\n"));
+    console.log(chalk21.white.bold("\n\u{1F4DA} Wiki Status\n"));
     console.log(
-      chalk20.gray("  Sources:    ") + chalk20.white(String(status.totalSources))
+      chalk21.gray("  Sources:    ") + chalk21.white(String(status.totalSources))
     );
     console.log(
-      chalk20.gray("  Articles:   ") + chalk20.white(String(status.totalArticles)) + chalk20.gray(" (") + chalk20.green(`${status.activeArticles} active`) + (status.staleArticles > 0 ? chalk20.yellow(`, ${status.staleArticles} stale`) : "") + (status.archivedArticles > 0 ? chalk20.gray(`, ${status.archivedArticles} archived`) : "") + chalk20.gray(")")
+      chalk21.gray("  Articles:   ") + chalk21.white(String(status.totalArticles)) + chalk21.gray(" (") + chalk21.green(`${status.activeArticles} active`) + (status.staleArticles > 0 ? chalk21.yellow(`, ${status.staleArticles} stale`) : "") + (status.archivedArticles > 0 ? chalk21.gray(`, ${status.archivedArticles} archived`) : "") + chalk21.gray(")")
     );
     if (Object.keys(status.categories).length > 0) {
-      console.log(chalk20.gray("\n  Categories:"));
+      console.log(chalk21.gray("\n  Categories:"));
       for (const [category, count] of Object.entries(status.categories).sort()) {
         console.log(
-          chalk20.gray("    ") + chalk20.cyan(category) + chalk20.gray(": ") + chalk20.white(String(count))
+          chalk21.gray("    ") + chalk21.cyan(category) + chalk21.gray(": ") + chalk21.white(String(count))
         );
       }
     }
     if (status.lastActivity) {
       console.log(
-        chalk20.gray("\n  Last activity: ") + chalk20.white(status.lastActivity.toISOString().split("T")[0])
+        chalk21.gray("\n  Last activity: ") + chalk21.white(status.lastActivity.toISOString().split("T")[0])
       );
     }
     console.log("");
   } catch (error) {
     console.log(
-      chalk20.red(
+      chalk21.red(
         `\u274C Status failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
   }
 });
 wikiCommand.command("flush").description("Export wiki to disk as markdown files").action(async () => {
-  console.log(chalk20.gray("Flushing wiki to disk..."));
+  console.log(chalk21.gray("Flushing wiki to disk..."));
   try {
     const { createWikiCompiler } = await import("@devpilot.sh/core/wiki");
     const config = getWikiConfig();
     const compiler = createWikiCompiler(config);
     const result = await compiler.flushToDisk();
-    console.log(chalk20.green(`\u2705 Wrote ${result.filesWritten} files to ${result.wikiDir}`));
+    console.log(chalk21.green(`\u2705 Wrote ${result.filesWritten} files to ${result.wikiDir}`));
   } catch (error) {
     console.log(
-      chalk20.red(
+      chalk21.red(
         `\u274C Flush failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -5975,7 +6675,7 @@ wikiCommand.command("index").description("Show the wiki table of contents").opti
       index = index.filter((e) => e.category === options.category);
     }
     if (index.length === 0) {
-      console.log(chalk20.gray("Wiki is empty. Run `devpilot wiki ingest` to add sources."));
+      console.log(chalk21.gray("Wiki is empty. Run `devpilot wiki ingest` to add sources."));
       return;
     }
     const byCategory = {};
@@ -5985,25 +6685,25 @@ wikiCommand.command("index").description("Show the wiki table of contents").opti
       }
       byCategory[entry.category].push(entry);
     }
-    console.log(chalk20.white.bold("\n\u{1F4D6} Wiki Index\n"));
+    console.log(chalk21.white.bold("\n\u{1F4D6} Wiki Index\n"));
     for (const [category, entries] of Object.entries(byCategory).sort()) {
       console.log(
-        chalk20.cyan.bold(
+        chalk21.cyan.bold(
           `  ${category.charAt(0).toUpperCase() + category.slice(1)}`
         )
       );
       for (const entry of entries) {
-        const statusColor = entry.status === "active" ? chalk20.green : entry.status === "stale" ? chalk20.yellow : chalk20.gray;
+        const statusColor = entry.status === "active" ? chalk21.green : entry.status === "stale" ? chalk21.yellow : chalk21.gray;
         const badge = statusColor(`[${entry.status}]`);
         console.log(
-          `    ${badge} ${chalk20.white(entry.title)} ${chalk20.gray(`[[${entry.slug}]]`)}`
+          `    ${badge} ${chalk21.white(entry.title)} ${chalk21.gray(`[[${entry.slug}]]`)}`
         );
       }
       console.log("");
     }
   } catch (error) {
     console.log(
-      chalk20.red(
+      chalk21.red(
         `\u274C Index failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -6016,30 +6716,30 @@ wikiCommand.command("read <slug>").description("Read a specific wiki article").a
     const compiler = createWikiCompiler(config);
     const article = await compiler.getArticle(slug);
     if (!article) {
-      console.log(chalk20.red(`\u274C Article not found: [[${slug}]]`));
+      console.log(chalk21.red(`\u274C Article not found: [[${slug}]]`));
       return;
     }
-    console.log(chalk20.white.bold(`
+    console.log(chalk21.white.bold(`
 # ${article.title}
 `));
     console.log(
-      chalk20.gray(
+      chalk21.gray(
         `Category: ${article.category} | Status: ${article.status} | v${article.version}`
       )
     );
     if (article.backlinks.length > 0) {
       console.log(
-        chalk20.gray(
+        chalk21.gray(
           `Related: ${article.backlinks.map((b) => `[[${b}]]`).join(", ")}`
         )
       );
     }
-    console.log(chalk20.gray("\u2500".repeat(60)));
+    console.log(chalk21.gray("\u2500".repeat(60)));
     console.log(article.content);
     console.log("");
   } catch (error) {
     console.log(
-      chalk20.red(
+      chalk21.red(
         `\u274C Read failed: ${error instanceof Error ? error.message : String(error)}`
       )
     );
@@ -6052,7 +6752,7 @@ function getWikiConfig() {
     model: resolveWikiModel(),
     maxTokens: parseInt(process.env.WIKI_MAX_TOKENS || "8192", 10),
     repo: getRepoName(cwd),
-    wikiDir: join15(cwd, ".devpilot", "wiki")
+    wikiDir: join17(cwd, ".devpilot", "wiki")
   };
 }
 function getRepoName(cwd) {
@@ -6075,13 +6775,14 @@ var pkg = {
   name: "@devpilot.sh/cli",
   version: VERSION
 };
-var cli = new Command19();
+var cli = new Command20();
 cli.name("devpilot").description("DevPilot CLI - Manage your AI coding agent fleet").version(VERSION);
 cli.addCommand(initCommand);
 cli.addCommand(setupCommand);
 cli.addCommand(serveCommand);
 cli.addCommand(statusCommand);
 cli.addCommand(statuslineCommand);
+cli.addCommand(graphCommand);
 cli.addCommand(configCommand);
 cli.addCommand(bridgeCommand);
 cli.addCommand(sessionCommand);

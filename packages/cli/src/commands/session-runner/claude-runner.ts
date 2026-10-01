@@ -280,6 +280,11 @@ export interface RunClaudeOptions {
    * `baseline`, which adds nothing to the invocation.
    */
   harness?: Harness;
+  /**
+   * The code graph MCP server for the directory the agent runs in, when there
+   * is one. Only used if the harness includes the `code-graph` technique.
+   */
+  codeGraph?: { command: string; args: string[]; env?: Record<string, string> } | null;
   /** Where window readings are logged. Defaults to `~/.devpilot/statusline`; set in tests. */
   statuslineDir?: string;
   /**
@@ -355,7 +360,10 @@ export async function runClaudeSession(
   // The harness goes last so its arguments are easy to find in a process
   // listing, and after the session wiring so a technique can tell whether an
   // MCP config has already been supplied.
-  const harnessBuild = harness?.build({ hasMcpConfig: Boolean(sessionLink) });
+  const harnessBuild = harness?.build({ hasMcpConfig: Boolean(sessionLink), codeGraph: options.codeGraph });
+  // The stamp for this run, not for the runner: a technique that could not
+  // take effect here (no index for this repository, say) is not in it.
+  const stamp = harnessBuild?.stamp ?? harness?.stamp;
   if (harnessBuild) args.push(...harnessBuild.args);
 
   const outcome = await new Promise<{
@@ -425,7 +433,7 @@ export async function runClaudeSession(
       pending = lines.pop() ?? '';
       for (const line of lines) collector.ingestLine(line);
       if (lines.length > 0) {
-        options.onTelemetry?.({ ...collector.snapshot(), harness: harness?.stamp });
+        options.onTelemetry?.({ ...collector.snapshot(), harness: stamp });
         logWindow();
       }
     });

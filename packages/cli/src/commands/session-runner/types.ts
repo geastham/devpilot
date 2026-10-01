@@ -191,6 +191,12 @@ export interface RunnerConfig {
    * OPERATOR's, for the same reason again: the setup step is a shell command.
    */
   isolation?: import('./isolation').IsolationConfig;
+  /**
+   * The code graph indexer, when it is installed on this machine — see
+   * ../../utils/codegraph. Null or absent means every graph feature is off
+   * and the runner behaves exactly as it did before there was one.
+   */
+  codeGraph?: import('../../utils/codegraph').Indexer | null;
   /** Emit a log line. */
   log: (line: string) => void;
 }

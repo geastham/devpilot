@@ -53,6 +53,16 @@ export interface Technique {
   watch: string;
   /** Arguments it adds to the `claude` invocation. */
   args(ctx: HarnessContext): string[];
+  /**
+   * Whether the technique can take effect in THIS run. Absent means always.
+   *
+   * A technique that needs something the run does not have — an index for the
+   * repository, a figure the operator has not named — does nothing. A run it
+   * did nothing for must not carry its name: the stamp is what the readings
+   * are grouped by, and a row labelled `+code-graph` that mixes runs which had
+   * a graph with runs which did not would compare a thing with itself.
+   */
+  applies?(ctx: HarnessContext): boolean;
 }
 
 export interface HarnessContext {
@@ -62,12 +72,21 @@ export interface HarnessContext {
    * second, empty config must not be added on top of it.
    */
   hasMcpConfig: boolean;
+  /**
+   * The MCP server entry for this run's code graph, when the indexer is
+   * installed and the directory the agent runs in has an index. Null or absent
+   * otherwise.
+   */
+  codeGraph?: { command: string; args: string[]; env?: Record<string, string> } | null;
   /** Where to write files a technique needs. Deleted with the run. */
   scratchDir: () => string;
 }
 
 /**
- * Bumped whenever a technique's arguments change. A session's stamp carries
+ * Bumped whenever a technique's arguments change. Adding a technique does not
+ * bump it: `lean@1` means what it meant before `code-graph` existed, and
+ * readings taken under it stay comparable.
+ * A session's stamp carries
  * it, so readings taken under an older definition are not mixed with newer
  * ones under the same name.
  */
@@ -118,6 +137,29 @@ export const TECHNIQUES: readonly Technique[] = [
       // else's work. The technique does nothing until the operator names one.
       return Number.isFinite(cap) && cap > 0 ? ['--max-budget-usd', String(cap)] : [];
     },
+    applies: () => {
+      const cap = Number(process.env.DEVPILOT_HARNESS_MAX_BUDGET_USD);
+      return Number.isFinite(cap) && cap > 0;
+    },
+  },
+  {
+    id: 'code-graph',
+    summary: 'Give the agent one tool that answers "where is this and what depends on it" from an index of the repository',
+    // What it is meant to reduce is the reading an agent does to find its way
+    // around. It is in no profile: whether it does reduce it, at equal task
+    // success, is exactly what running with and without this technique is for.
+    bucket: 'context-size',
+    watch: 'more tokens per written change, not fewer; retrieved context left sitting in the window; answers about the wrong module',
+    // In addition to whatever MCP config the run already has: `claude` merges
+    // several `--mcp-config` files, and `--strict-mcp-config` (from strict-mcp
+    // or a shared session) keeps the total to exactly the ones named.
+    args: (ctx) => {
+      if (!ctx.codeGraph) return [];
+      const file = join(ctx.scratchDir(), 'mcp-code-graph.json');
+      writeFileSync(file, JSON.stringify({ mcpServers: { codegraph: ctx.codeGraph } }), { mode: 0o600 });
+      return ['--mcp-config', file];
+    },
+    applies: (ctx) => Boolean(ctx.codeGraph),
   },
 ];
 
@@ -135,8 +177,16 @@ export interface Harness {
   /** `baseline@1`, `lean@1`, `baseline+compact-200k@1`. Travels with the readings. */
   stamp: string;
   techniques: Technique[];
-  /** Extra arguments for `claude`, and the directory to delete afterwards. */
-  build(ctx: { hasMcpConfig: boolean }): { args: string[]; cleanupDir?: string };
+  /**
+   * Extra arguments for `claude`, the directory to delete afterwards, and the
+   * stamp for THIS run — which names only the techniques that could take
+   * effect in it (see `Technique.applies`).
+   */
+  build(ctx: Pick<HarnessContext, 'hasMcpConfig' | 'codeGraph'>): {
+    args: string[];
+    cleanupDir?: string;
+    stamp: string;
+  };
 }
 
 /**
@@ -178,14 +228,21 @@ export function resolveHarness(spec: string | undefined | null): Harness {
   return {
     stamp,
     techniques,
-    build({ hasMcpConfig }) {
+    build({ hasMcpConfig, codeGraph }) {
       let dir: string | undefined;
       const ctx: HarnessContext = {
         hasMcpConfig,
+        codeGraph,
         scratchDir: () => (dir ??= mkdtempSync(join(tmpdir(), 'devpilot-harness-'))),
       };
-      const args = techniques.flatMap((t) => t.args(ctx));
-      return { args, cleanupDir: dir };
+      const applied = techniques.filter((t) => t.applies?.(ctx) ?? true);
+      const args = applied.flatMap((t) => t.args(ctx));
+      const ran = new Set(applied.map((t) => t.id));
+      return {
+        args,
+        cleanupDir: dir,
+        stamp: `${[profile, ...new Set(added.filter((id) => ran.has(id)))].join('+')}@${HARNESS_VERSION}`,
+      };
     },
   };
 }
