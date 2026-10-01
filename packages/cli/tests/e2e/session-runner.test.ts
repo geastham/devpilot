@@ -351,6 +351,10 @@ process.stdin.on('end', () => {
       // The key must not be visible to `ps`.
       expect(argv.join(' ')).not.toContain('SECRETKEY');
       expect(argv).toContain('--strict-mcp-config');
+      // The agent is told to join the session first, and must be allowed to:
+      // a headless agent cannot be asked for permission, and without the
+      // grant every session tool it was given was refused.
+      expect(argv.slice(-2)).toEqual(['--allowedTools', 'mcp__devpilot-session']);
 
       // It reaches the agent only through a 0600 file.
       expect(cfg.mode).toBe('600');

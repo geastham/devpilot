@@ -227,6 +227,11 @@ describe('a task in a repository that has an index', () => {
     expect(server.env.DO_NOT_TRACK).toBe('1');
     // `lean` keeps every other server out, and the graph's is added to it.
     expect(agent.argv).toContain('--strict-mcp-config');
+    // And the agent is allowed to call it. A headless agent cannot be asked
+    // for permission: in the first live run of this technique the tool was
+    // configured, refused three times, and the agent used grep — while every
+    // test that only looked at the config passed.
+    expect(agent.argv.slice(-2)).toEqual(['--allowedTools', 'mcp__codegraph__codegraph_explore']);
 
     // And its readings say so.
     const stamps = reports.map((r) => r.body?.telemetry?.harness).filter(Boolean);
@@ -271,6 +276,7 @@ describe('a task with no graph to give it', () => {
     expect(report.success).toBe(true);
     expect(agent.hadIndex).toBe(false);
     expect(agent.configs.some((c: any) => c.mcpServers?.codegraph)).toBe(false);
+    expect(agent.argv).not.toContain('--allowedTools');
     expect(indexerCalls()).toEqual([]);
     // The harness asked for code-graph; this run could not have it. Its
     // readings must not sit in the same row as runs that did.

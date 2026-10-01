@@ -100,7 +100,8 @@ const MAX_CAUSES = 16;
 const SESSION_ID = /^[A-Za-z0-9_-]{8,80}$/;
 
 export function statuslineDir(home: string = homedir()): string {
-  return join(home, '.devpilot', 'statusline');
+  // Overridable so a test run or a sandbox does not write into the real store.
+  return process.env.DEVPILOT_STATUSLINE_DIR?.trim() || join(home, '.devpilot', 'statusline');
 }
 
 function windowOf(raw: { used_percentage?: number; resets_at?: number } | undefined): WindowState | undefined {

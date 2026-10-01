@@ -63,6 +63,19 @@ export interface Technique {
    * a graph with runs which did not would compare a thing with itself.
    */
   applies?(ctx: HarnessContext): boolean;
+  /**
+   * Tools the agent must be allowed to call for the technique to do anything.
+   *
+   * A headless agent cannot be asked for permission, so a tool it has not been
+   * granted is simply refused. The first live run of `code-graph` showed what
+   * that looks like: the agent called the graph tool three times, was refused
+   * each time ("you haven't granted it yet"), and found the answer with grep —
+   * under a stamp that said it had a code graph. Every stubbed test passed.
+   *
+   * Returned separately from `args` because `--allowedTools` takes a list and
+   * the runner has names of its own to add; it must be written once.
+   */
+  allowedTools?(ctx: HarnessContext): string[];
 }
 
 export interface HarnessContext {
@@ -160,6 +173,9 @@ export const TECHNIQUES: readonly Technique[] = [
       return ['--mcp-config', file];
     },
     applies: (ctx) => Boolean(ctx.codeGraph),
+    // The one tool, by its full name — not the whole server — so a later
+    // version of the indexer that adds tools does not have them granted here.
+    allowedTools: (ctx) => (ctx.codeGraph ? ['mcp__codegraph__codegraph_explore'] : []),
   },
 ];
 
@@ -184,6 +200,8 @@ export interface Harness {
    */
   build(ctx: Pick<HarnessContext, 'hasMcpConfig' | 'codeGraph'>): {
     args: string[];
+    /** Tool names to grant; the runner writes them into one `--allowedTools`. */
+    allowedTools: string[];
     cleanupDir?: string;
     stamp: string;
   };
@@ -240,6 +258,7 @@ export function resolveHarness(spec: string | undefined | null): Harness {
       const ran = new Set(applied.map((t) => t.id));
       return {
         args,
+        allowedTools: applied.flatMap((t) => t.allowedTools?.(ctx) ?? []),
         cleanupDir: dir,
         stamp: `${[profile, ...new Set(added.filter((id) => ran.has(id)))].join('+')}@${HARNESS_VERSION}`,
       };

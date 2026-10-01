@@ -37,7 +37,7 @@ var CAUSE = /^[a-z0-9_]{1,40}$/;
 var MAX_CAUSES = 16;
 var SESSION_ID = /^[A-Za-z0-9_-]{8,80}$/;
 function statuslineDir(home = (0, import_os.homedir)()) {
-  return (0, import_path.join)(home, ".devpilot", "statusline");
+  return process.env.DEVPILOT_STATUSLINE_DIR?.trim() || (0, import_path.join)(home, ".devpilot", "statusline");
 }
 function windowOf(raw) {
   const used = n(raw?.used_percentage);

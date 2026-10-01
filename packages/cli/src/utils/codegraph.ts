@@ -147,13 +147,14 @@ export async function excludeIndexFromGit(repoDir: string): Promise<boolean> {
 /**
  * Stop the background daemon the indexer leaves behind.
  *
- * `codegraph serve --mcp` with its file watcher starts a daemon that OUTLIVES
- * the MCP process: after the agent exits it is still running, holding the
- * index open, with its pid in `.codegraph/daemon.pid`. Verified by hand — and
- * with a worktree per task it would mean one orphan per task, each watching a
- * directory that is about to be deleted.
+ * `codegraph serve --mcp` starts a daemon that OUTLIVES the MCP process: after
+ * the agent exits it is still running, holding the index open, with its pid in
+ * `.codegraph/daemon.pid`. Verified by hand. It does exit by itself — its log
+ * shows a five-minute idle timeout — but with a worktree per task that is five
+ * minutes of one process per finished task, each holding a database open in a
+ * directory the runner is about to delete.
  *
- * So the runner stops it when the agent is done. The pid comes from the tool's
+ * So the runner stops it at once, when the agent is done. The pid comes from the tool's
  * own file, and is only signalled if that process is in fact the indexer: a
  * pid file can outlive its process, and the number can be reused by something
  * else entirely. SIGTERM is enough — the daemon and its watchdog both exit and

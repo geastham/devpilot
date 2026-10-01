@@ -33,7 +33,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 
 // src/utils/statusline-store.ts
 function statuslineDir(home = (0, import_os.homedir)()) {
-  return (0, import_path3.join)(home, ".devpilot", "statusline");
+  return process.env.DEVPILOT_STATUSLINE_DIR?.trim() || (0, import_path3.join)(home, ".devpilot", "statusline");
 }
 function windowOf(raw) {
   const used = n(raw?.used_percentage);
@@ -5052,6 +5052,11 @@ async function runClaudeSession(options) {
   const harnessBuild = harness?.build({ hasMcpConfig: Boolean(sessionLink2), codeGraph: options.codeGraph });
   const stamp = harnessBuild?.stamp ?? harness?.stamp;
   if (harnessBuild) args.push(...harnessBuild.args);
+  const allowedTools = [
+    ...sessionLink2 ? ["mcp__devpilot-session"] : [],
+    ...harnessBuild?.allowedTools ?? []
+  ];
+  if (allowedTools.length > 0) args.push("--allowedTools", ...allowedTools);
   const outcome = await new Promise((resolve7) => {
     const child = (0, import_child_process6.spawn)(claudePath, args, {
       cwd: workdir,
@@ -6112,7 +6117,10 @@ var TECHNIQUES = [
       (0, import_node_fs7.writeFileSync)(file, JSON.stringify({ mcpServers: { codegraph: ctx.codeGraph } }), { mode: 384 });
       return ["--mcp-config", file];
     },
-    applies: (ctx) => Boolean(ctx.codeGraph)
+    applies: (ctx) => Boolean(ctx.codeGraph),
+    // The one tool, by its full name — not the whole server — so a later
+    // version of the indexer that adds tools does not have them granted here.
+    allowedTools: (ctx) => ctx.codeGraph ? ["mcp__codegraph__codegraph_explore"] : []
   }
 ];
 var PROFILES = {
@@ -6155,6 +6163,7 @@ function resolveHarness(spec) {
       const ran = new Set(applied.map((t) => t.id));
       return {
         args,
+        allowedTools: applied.flatMap((t) => t.allowedTools?.(ctx) ?? []),
         cleanupDir: dir,
         stamp: `${[profile, ...new Set(added.filter((id) => ran.has(id)))].join("+")}@${HARNESS_VERSION}`
       };

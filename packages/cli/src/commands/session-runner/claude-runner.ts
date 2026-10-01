@@ -366,6 +366,27 @@ export async function runClaudeSession(
   const stamp = harnessBuild?.stamp ?? harness?.stamp;
   if (harnessBuild) args.push(...harnessBuild.args);
 
+  /**
+   * Grant the MCP tools this run was given — last, and exactly once.
+   *
+   * A headless agent cannot be prompted, so an MCP tool it has not been granted
+   * is refused, and `acceptEdits` covers file edits only. Without this, the
+   * shared-session server and the code graph were both configured and both
+   * unusable: the agent was told to call `devpilot_session_join` first, was
+   * refused, and carried on without the session it was dispatched into.
+   *
+   * These are the servers the runner itself put in the config, on the
+   * operator's instruction (a dispatch into a shared session; a harness that
+   * names a technique) — not tools the dispatch asked for. `--allowedTools`
+   * takes a list, so it goes at the end where nothing can be read as part of
+   * it.
+   */
+  const allowedTools = [
+    ...(sessionLink ? ['mcp__devpilot-session'] : []),
+    ...(harnessBuild?.allowedTools ?? []),
+  ];
+  if (allowedTools.length > 0) args.push('--allowedTools', ...allowedTools);
+
   const outcome = await new Promise<{
     code: number | null;
     stdout: string;
