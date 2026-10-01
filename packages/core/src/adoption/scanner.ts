@@ -202,11 +202,26 @@ export function condenseTitle(text: string, max: number): string {
  * carries `"DevPilot: Claude Code Bootstrap"` — which is why the heuristic tier
  * is a floor rather than a degraded mode (TRD 21 §6.4).
  */
+/**
+ * What Claude Code writes as the first "human" turn of a session that was
+ * compacted and carried on: not something a person typed, and no kind of
+ * title. Two sessions on a real fleet were named "This session is being
+ * continued from a previous conversation that ran out of context. The summary
+ * below covers the…" — and what follows that sentence is a summary of the
+ * earlier conversation, which is more of the session than a title should send.
+ */
+const CONTINUATION_PREAMBLE = /^\s*this session is being continued from a previous conversation/i;
+
+/** True when a "first prompt" is Claude Code's own continuation note. */
+export function isContinuationPreamble(prompt: string | null | undefined): boolean {
+  return Boolean(prompt && CONTINUATION_PREAMBLE.test(prompt));
+}
+
 export function heuristicTitle(observation: SessionObservation): string {
   if (observation.customTitle) {
     return condenseTitle(observation.customTitle, ADOPTION_LIMITS.MAX_TITLE_CHARS);
   }
-  if (observation.firstHumanPrompt) {
+  if (observation.firstHumanPrompt && !isContinuationPreamble(observation.firstHumanPrompt)) {
     return condenseTitle(observation.firstHumanPrompt, ADOPTION_LIMITS.MAX_TITLE_CHARS);
   }
   return `Agent session ${observation.sessionUuid.slice(0, 8)}`;

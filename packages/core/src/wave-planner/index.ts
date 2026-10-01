@@ -47,6 +47,9 @@ export * from './generator';
 // Plan projection (deterministic wave-plan → plans/workstreams/tasks projection)
 export * from './plan-projection';
 
+// Ticket description (bounding + escaping the untrusted ticket body)
+export * from './ticket-description';
+
 // Prompt templates
 export * from './prompt-templates';
 

@@ -39,6 +39,8 @@ export const {
   // Score tables
   conductorScores,
   scoreHistory,
+  runwaySamples,
+  scoreReadings,
   // Event tables
   activityEvents,
   // Wave planner tables

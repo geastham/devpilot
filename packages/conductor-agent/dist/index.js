@@ -83,6 +83,21 @@ var ConductorState = import_langgraph.Annotation.Root({
     reducer: (_prev, next) => next,
     default: () => null
   }),
+  /**
+   * The current wave's most recent answer, and what the branch after a wave
+   * reads.
+   *
+   * `dispatch` writes it: the outcome when the wave was already over as
+   * dispatch returned, otherwise null ("ask"). `awaitWave` then writes whatever
+   * it was told. A channel rather than a local because the two are separate
+   * nodes with a checkpoint between them, and because `in-flight` has to
+   * survive from `awaitWave` to the next `dispatch` for that pass to know it is
+   * a backfill.
+   */
+  waveSignal: (0, import_langgraph.Annotation)({
+    reducer: (_prev, next) => next,
+    default: () => null
+  }),
   completedWaves: (0, import_langgraph.Annotation)({
     reducer: (prev, next) => [...prev, ...next],
     default: () => []
@@ -187,26 +202,38 @@ function makeNodes(ports, config) {
     return { wavePlanId, status: "executing", currentWaveIndex: 0 };
   }
   async function dispatch(state) {
+    const backfill = state.waveSignal?.state === "in-flight";
     const result = await ports.dispatchWave(state.wavePlanId, state.currentWaveIndex);
     emit({
       type: "wave:dispatched",
       waveIndex: state.currentWaveIndex,
       dispatched: result.dispatched,
-      queued: result.queued
+      queued: result.queued,
+      ...backfill ? { backfill: true } : {}
     });
     return {
+      // A run that is dispatching is executing. `persist` says so too, but a run
+      // that ADOPTS an existing plan enters here without passing through it, and
+      // reported `planning` for its whole life — so anything that narrates an
+      // executing run (DevPilot's bridge watcher does) said nothing about it.
+      status: "executing",
       lastDispatch: { dispatched: result.dispatched, queued: result.queued },
+      waveSignal: result.settled ?? null,
       errors: result.errors.map((e) => `wave ${state.currentWaveIndex} ${e.taskCode}: ${e.error}`)
     };
   }
   async function awaitWave(state) {
-    const outcome = ports.waitForWave ? await ports.waitForWave(state.wavePlanId, state.currentWaveIndex) : (0, import_langgraph2.interrupt)({
+    const known = state.waveSignal;
+    const outcome = known && known.state !== "in-flight" ? known : ports.waitForWave ? await ports.waitForWave(state.wavePlanId, state.currentWaveIndex) : (0, import_langgraph2.interrupt)({
       wavePlanId: state.wavePlanId,
       waveIndex: state.currentWaveIndex
     });
+    if (outcome.state === "in-flight") {
+      return { waveSignal: outcome };
+    }
     if (outcome.state === "complete") {
       emit({ type: "wave:complete", waveIndex: state.currentWaveIndex });
-      return { completedWaves: [state.currentWaveIndex] };
+      return { waveSignal: outcome, completedWaves: [state.currentWaveIndex] };
     }
     emit({
       type: "wave:failed",
@@ -214,6 +241,7 @@ function makeNodes(ports, config) {
       failures: outcome.failures.length
     });
     return {
+      waveSignal: outcome,
       errors: outcome.failures.map(
         (f) => `wave ${state.currentWaveIndex} ${f.taskCode}: ${f.error}`
       )
@@ -226,11 +254,17 @@ function makeNodes(ports, config) {
     return { waveRetries: state.waveRetries + 1 };
   }
   async function finish(state) {
+    if (state.wavePlanId) {
+      await ports.endRun?.(state.wavePlanId, { status: "complete" });
+    }
     emit({ type: "run:complete", waves: state.plan?.waves.length ?? 0 });
     return { status: "complete" };
   }
   async function fail(state) {
     const reason = state.errors[state.errors.length - 1] ?? "unknown failure";
+    if (state.wavePlanId) {
+      await ports.endRun?.(state.wavePlanId, { status: "failed", reason });
+    }
     emit({ type: "run:failed", reason });
     return { status: "failed" };
   }
@@ -265,7 +299,8 @@ function createConductorGraph(options) {
     return "persist";
   }
   function afterWave(state) {
-    const failed = !state.completedWaves.includes(state.currentWaveIndex);
+    if (state.waveSignal?.state === "in-flight") return "dispatch";
+    const failed = state.waveSignal?.state !== "complete";
     if (failed) {
       if (state.waveRetries < config.waveRetryLimit) return "retryWave";
       if (config.failurePolicy === "halt") return "fail";
@@ -277,7 +312,13 @@ function createConductorGraph(options) {
     const total = state.plan?.waves.length ?? 0;
     return state.currentWaveIndex < total ? "dispatch" : "finish";
   }
-  const graph = new import_langgraph3.StateGraph(ConductorState).addNode("generate", n.generate).addNode("refine", n.refine).addNode("review", n.review).addNode("persist", n.persist).addNode("dispatch", n.dispatch).addNode("awaitWave", n.awaitWave).addNode("advance", n.advance).addNode("retryWave", n.retryWave).addNode("finish", n.finish).addNode("fail", n.fail).addConditionalEdges(import_langgraph3.START, entry, ["generate", "dispatch"]).addConditionalEdges("generate", afterPlanning, ["refine", "review", "persist"]).addConditionalEdges("refine", afterPlanning, ["refine", "review", "persist"]).addConditionalEdges("review", afterReview, ["persist", "refine", "fail"]).addEdge("persist", "dispatch").addEdge("dispatch", "awaitWave").addConditionalEdges("awaitWave", afterWave, ["advance", "retryWave", "fail", "finish"]).addEdge("retryWave", "dispatch").addConditionalEdges("advance", afterAdvance, ["dispatch", "finish"]).addEdge("finish", import_langgraph3.END).addEdge("fail", import_langgraph3.END);
+  const graph = new import_langgraph3.StateGraph(ConductorState).addNode("generate", n.generate).addNode("refine", n.refine).addNode("review", n.review).addNode("persist", n.persist).addNode("dispatch", n.dispatch).addNode("awaitWave", n.awaitWave).addNode("advance", n.advance).addNode("retryWave", n.retryWave).addNode("finish", n.finish).addNode("fail", n.fail).addConditionalEdges(import_langgraph3.START, entry, ["generate", "dispatch"]).addConditionalEdges("generate", afterPlanning, ["refine", "review", "persist"]).addConditionalEdges("refine", afterPlanning, ["refine", "review", "persist"]).addConditionalEdges("review", afterReview, ["persist", "refine", "fail"]).addEdge("persist", "dispatch").addEdge("dispatch", "awaitWave").addConditionalEdges("awaitWave", afterWave, [
+    "dispatch",
+    "advance",
+    "retryWave",
+    "fail",
+    "finish"
+  ]).addEdge("retryWave", "dispatch").addConditionalEdges("advance", afterAdvance, ["dispatch", "finish"]).addEdge("finish", import_langgraph3.END).addEdge("fail", import_langgraph3.END);
   return graph.compile({ checkpointer: options.checkpointer });
 }
 

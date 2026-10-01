@@ -708,4 +708,29 @@ describe('heuristicTitle', () => {
       } as never),
     ).toBe('Agent session deadbeef');
   });
+
+  /**
+   * Seen on a real fleet: two sessions titled with the first words of Claude
+   * Code's own compaction note, which nobody typed and which is followed by a
+   * digest of the conversation so far.
+   */
+  it('does not take Claude Code’s continuation note for a title', () => {
+    const observation = {
+      sessionUuid: 'cafef00d-2222',
+      customTitle: null,
+      firstHumanPrompt:
+        'This session is being continued from a previous conversation that ran out of context. ' +
+        'The summary below covers the earlier portion of the conversation. …',
+    } as never;
+    expect(heuristicTitle(observation)).toBe('Agent session cafef00d');
+  });
+
+  it('still prefers a real title on a continued session', () => {
+    const observation = {
+      sessionUuid: 'cafef00d-2222',
+      customTitle: 'Checkout retries',
+      firstHumanPrompt: 'This session is being continued from a previous conversation …',
+    } as never;
+    expect(heuristicTitle(observation)).toBe('Checkout retries');
+  });
 });

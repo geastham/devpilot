@@ -32,6 +32,7 @@ const createTableStatements = `
 CREATE TABLE IF NOT EXISTS horizon_items (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
+  description TEXT,
   zone TEXT NOT NULL CHECK(zone IN ('READY', 'REFINING', 'SHAPING', 'DIRECTIONAL')),
   repo TEXT NOT NULL,
   complexity TEXT CHECK(complexity IN ('S', 'M', 'L', 'XL')),
@@ -171,6 +172,28 @@ CREATE TABLE IF NOT EXISTS score_history (
   recorded_at INTEGER NOT NULL
 );
 
+-- Runway Samples: runway as it was read, about once a minute
+CREATE TABLE IF NOT EXISTS runway_samples (
+  id TEXT PRIMARY KEY,
+  at INTEGER NOT NULL,
+  runway_hours REAL NOT NULL,
+  capacity INTEGER
+);
+CREATE INDEX IF NOT EXISTS runway_samples_at ON runway_samples(at);
+
+-- Score Readings: a computed Conductor Score with the numbers behind it
+CREATE TABLE IF NOT EXISTS score_readings (
+  id TEXT PRIMARY KEY,
+  at INTEGER NOT NULL,
+  model_version INTEGER NOT NULL,
+  window_hours REAL NOT NULL,
+  total INTEGER NOT NULL,
+  measured_max INTEGER NOT NULL,
+  complete INTEGER NOT NULL,
+  result TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS score_readings_at ON score_readings(at);
+
 -- Activity Events
 CREATE TABLE IF NOT EXISTS activity_events (
   id TEXT PRIMARY KEY,
@@ -198,6 +221,12 @@ CREATE TABLE IF NOT EXISTS wave_plans (
   version INTEGER NOT NULL DEFAULT 1,
   previous_wave_plan_id TEXT REFERENCES wave_plans(id),
   raw_markdown TEXT,
+  failure_reason TEXT,
+  run_id TEXT,
+  isolated INTEGER,
+  isolation_note TEXT,
+  run_branch TEXT,
+  run_head_sha TEXT,
   started_at INTEGER,
   completed_at INTEGER,
   created_at INTEGER NOT NULL,
@@ -235,10 +264,16 @@ CREATE TABLE IF NOT EXISTS wave_tasks (
   status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'dispatched', 'running', 'completed', 'failed', 'retrying', 'skipped')),
   assigned_session_id TEXT,
   started_at INTEGER,
+  last_attempt_at INTEGER,
   completed_at INTEGER,
   error_message TEXT,
   completion_summary TEXT,
-  retry_count INTEGER NOT NULL DEFAULT 0
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  branch TEXT,
+  base_sha TEXT,
+  commit_sha TEXT,
+  files_changed TEXT,
+  merged_at INTEGER
 );
 
 -- Dependency Edges
@@ -322,6 +357,37 @@ export function createSQLiteAdapter(path: string): SQLiteDatabase {
   );
   ensureColumn(sqliteConnection, 'ruflo_sessions', 'tokens_used', 'tokens_used INTEGER');
   ensureColumn(sqliteConnection, 'ruflo_sessions', 'cost_usd', 'cost_usd INTEGER');
+  // The ticket body. Nullable with no default, so every existing row reads as
+  // "no description" and behaves exactly as it did before the column existed.
+  ensureColumn(sqliteConnection, 'horizon_items', 'description', 'description TEXT');
+  // Declared in the drizzle schema but never added here, so a database created
+  // by this bootstrap rather than by `drizzle-kit push` had neither column and
+  // every read of these two tables failed with "no such column".
+  ensureColumn(sqliteConnection, 'horizon_items', 'archived_at', 'archived_at INTEGER');
+  ensureColumn(sqliteConnection, 'ruflo_sessions', 'telemetry', 'telemetry TEXT');
+  // Both nullable with no default. An existing task row reads as "no attempt
+  // time recorded" (the reconciler falls back to `started_at`), and an existing
+  // failed plan reads as "no reason recorded" — which is the truth about rows
+  // written before either column existed.
+  ensureColumn(sqliteConnection, 'wave_tasks', 'last_attempt_at', 'last_attempt_at INTEGER');
+  ensureColumn(sqliteConnection, 'wave_plans', 'failure_reason', 'failure_reason TEXT');
+  // A branch per task and a merge per wave. All ten nullable with no default,
+  // and for each of them NULL already means something true about a row written
+  // before the column existed: a plan with `isolated` NULL has not had the
+  // question asked (it predates it, or has never dispatched), so it runs in the
+  // shared checkout as it always did and nothing is merged for it; a task with
+  // no `branch` was not isolated; `files_changed` NULL is "not recorded", which
+  // is not the same as `[]`; `merged_at` NULL is "not merged".
+  ensureColumn(sqliteConnection, 'wave_plans', 'run_id', 'run_id TEXT');
+  ensureColumn(sqliteConnection, 'wave_plans', 'isolated', 'isolated INTEGER');
+  ensureColumn(sqliteConnection, 'wave_plans', 'isolation_note', 'isolation_note TEXT');
+  ensureColumn(sqliteConnection, 'wave_plans', 'run_branch', 'run_branch TEXT');
+  ensureColumn(sqliteConnection, 'wave_plans', 'run_head_sha', 'run_head_sha TEXT');
+  ensureColumn(sqliteConnection, 'wave_tasks', 'branch', 'branch TEXT');
+  ensureColumn(sqliteConnection, 'wave_tasks', 'base_sha', 'base_sha TEXT');
+  ensureColumn(sqliteConnection, 'wave_tasks', 'commit_sha', 'commit_sha TEXT');
+  ensureColumn(sqliteConnection, 'wave_tasks', 'files_changed', 'files_changed TEXT');
+  ensureColumn(sqliteConnection, 'wave_tasks', 'merged_at', 'merged_at INTEGER');
 
   // Create Drizzle instance
   sqliteDb = drizzle(sqliteConnection, { schema });

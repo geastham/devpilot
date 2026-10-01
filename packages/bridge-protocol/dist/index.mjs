@@ -515,6 +515,31 @@ var RotateSessionKeyRequestSchema = z4.object({
 var RotateSessionKeyResponseSchema = z4.object({
   keyVersion: z4.number().int().positive()
 });
+function buildSessionHandoff(input) {
+  const budget = input.autoBudget ?? SESSION_LIMITS.autoDefaultBudget;
+  const ttl = input.autoTtlMinutes ?? SESSION_LIMITS.autoDefaultTtlMinutes;
+  const modeLine = input.mode === "auto" ? `This session is in auto mode for up to ${budget} agent messages or ${ttl} minutes: you may reply to the other agent with devpilot_session_post and wait for answers with devpilot_session_wait. Stop when the session says the budget is spent.` : input.mode === "relay" ? "This session is in relay mode: you may wait for new messages with devpilot_session_wait, but ask me before replying." : "This session is in observe mode: post only when I ask you to.";
+  return [
+    `Join my DevPilot shared session: "${input.title}"`,
+    "",
+    input.link,
+    "",
+    "Paste this whole message into Claude Code. It tells your agent what to do:",
+    "",
+    "  Call devpilot_session_join with the link above, then devpilot_session_read,",
+    "  and tell me what the other side has posted before you do anything else.",
+    `  ${modeLine}`,
+    "",
+    "No devpilot_session tools? Run this once in a terminal, then start a new Claude Code session:",
+    "  claude mcp add devpilot-session -- npx -y @devpilot.sh/mcp-session",
+    "",
+    "This link is the key to the session. Anyone holding it can read all of it, so send it in a DM, not a channel."
+  ].join("\n");
+}
+function findJoinLink(text) {
+  const match = /(?:https?:\/\/)?[A-Za-z0-9.-]+(?::\d+)?\/s\/[A-Za-z0-9_%-]+#k=[A-Za-z0-9_-]+/.exec(text);
+  return match ? match[0] : null;
+}
 function parseSessionMessage(input) {
   return SessionMessageSchema.parse(input);
 }
@@ -712,7 +737,21 @@ var ObservationResponseSchema = z5.object({
   updated: z5.number().int().nonnegative(),
   ended: z5.number().int().nonnegative(),
   /** Projects auto-created for repos this org had not seen before. */
-  projectsCreated: z5.number().int().nonnegative()
+  projectsCreated: z5.number().int().nonnegative(),
+  /**
+   * `adoptionKey → dispatch_sessions.id`, for the rows this machine may write
+   * instrument readings to.
+   *
+   * An observed session had no way to report what it was doing: the telemetry
+   * and stream routes are addressed by session id, and observation never told
+   * the machine which id its sessions had been given. Only sessions placed on a
+   * board learned theirs, so the default path — observe everything, place
+   * nothing — produced a cockpit full of sessions with dark instruments.
+   *
+   * Optional so a machine talking to a bridge that predates it simply sends no
+   * readings, which is what it did before.
+   */
+  sessionIds: z5.record(z5.string().regex(/^[0-9a-f]{64}$/), z5.string().min(1)).optional()
 });
 var DiscoveredRepoSchema = z5.object({
   repo: RepoSlugSchema,
@@ -886,7 +925,9 @@ export {
   buildCompletionComment,
   buildJoinLink,
   buildProgressComment,
+  buildSessionHandoff,
   escapeLinearMarkdown,
+  findJoinLink,
   formatApiError,
   isTerminal,
   linearIdentifierFromBranch,

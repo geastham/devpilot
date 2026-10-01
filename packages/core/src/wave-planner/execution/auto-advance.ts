@@ -1,73 +1,27 @@
-import { eq, and, sql } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
 import { getDatabase } from '../../db';
-import { wavePlans, waves, waveTasks, wavePlanMetrics, activityEvents, type WaveTask, type WavePlan } from '../../db/schema';
-import { sleep } from '../utils';
-import { toActivityEventType } from './types';
-import type { WaveExecutionConfig, WaveSSEEvent } from './types';
+import { wavePlans, waves, waveTasks, wavePlanMetrics, type WaveTask } from '../../db/schema';
 
 /**
- * Auto-advance to the next wave after completing the current wave.
- * Handles final metrics collection if this is the last wave.
+ * What is left of the third wave-advancement path.
+ *
+ * This file used to hold `autoAdvanceWave`, `markWavePlanComplete` and
+ * `advanceToNextWave`: a complete, exported implementation of "a wave finished,
+ * start the next one" that nothing called. The live implementations were
+ * `WaveExecutionController.handleWaveComplete` and the conductor graph, which
+ * between them were already one driver too many; a third, waiting to be wired
+ * up by whoever found it first, was removed rather than left as a trap.
+ *
+ * `collectFinalMetrics` is the part that was worth keeping, and it had no
+ * caller either. `WaveExecutionController.completePlan` calls it now — the one
+ * place a plan becomes `completed`, on both the conductor and the legacy path.
  */
-export async function autoAdvanceWave(
-  wavePlanId: string,
-  completedWaveIndex: number,
-  config: WaveExecutionConfig
-): Promise<void> {
-  const db = getDatabase();
-
-  // Get the wave plan to check if this was the last wave
-  const wavePlan = await db.query.wavePlans.findFirst({
-    where: eq(wavePlans.id, wavePlanId),
-  });
-
-  if (!wavePlan) {
-    throw new Error(`Wave plan ${wavePlanId} not found`);
-  }
-
-  const isLastWave = completedWaveIndex >= wavePlan.totalWaves - 1;
-
-  if (isLastWave) {
-    // This was the last wave - mark plan complete and collect metrics
-    await markWavePlanComplete(wavePlanId);
-    await collectFinalMetrics(wavePlanId);
-  } else {
-    // Wait before advancing to next wave
-    await sleep(config.waveAdvanceDelayMs);
-
-    // Advance to next wave
-    const nextWaveIndex = completedWaveIndex + 1;
-    await advanceToNextWave(wavePlanId, nextWaveIndex);
-  }
-}
-
-/**
- * Mark the wave plan as completed.
- * Updates status and sets completion timestamp.
- */
-export async function markWavePlanComplete(wavePlanId: string): Promise<void> {
-  const db = getDatabase();
-
-  await (db as any)
-    .update(wavePlans)
-    .set({
-      status: 'completed',
-      completedAt: new Date(),
-      updatedAt: new Date(),
-    })
-    .where(eq(wavePlans.id, wavePlanId));
-
-  // Emit completion event
-  await emitEvent({
-    type: 'wave_plan_complete',
-    wavePlanId,
-    metrics: {},
-  });
-}
 
 /**
  * Collect final metrics for the completed wave plan.
  * Calculates performance statistics and stores them in wave_plan_metrics.
+ *
+ * One row per plan. A second call for the same plan changes nothing.
  */
 export async function collectFinalMetrics(wavePlanId: string): Promise<void> {
   const db = getDatabase();
@@ -96,7 +50,9 @@ export async function collectFinalMetrics(wavePlanId: string): Promise<void> {
     ? wavePlan.completedAt.getTime() - wavePlan.startedAt.getTime()
     : null;
 
-  // Calculate average task duration
+  // Calculate average task duration. `startedAt` is the start of a task's
+  // FIRST attempt, so a retried task's duration includes the attempt that
+  // failed — which is what it cost the plan.
   const completedTasks = tasks.filter(
     (t: WaveTask) => t.status === 'completed' && t.startedAt && t.completedAt
   );
@@ -134,86 +90,23 @@ export async function collectFinalMetrics(wavePlanId: string): Promise<void> {
 
   const wavesExecutedCount = completedWaves.length;
 
-  // Insert metrics
-  await (db as any).insert(wavePlanMetrics).values({
-    wavePlanId,
-    totalWallClockMs,
-    theoreticalMinMs,
-    parallelizationEfficiency,
-    wavesExecuted: wavesExecutedCount,
-    tasksCompleted,
-    tasksFailed,
-    tasksRetried,
-    avgTaskDurationMs,
-    maxWaveWaitMs: null, // TODO: Calculate from wave timings
-    fileConflictsAvoided: 0, // TODO: Track during execution
-    reOptimizationCount: wavePlan.version - 1,
-  });
-}
-
-/**
- * Advance to the next wave.
- * Updates the wave plan's current wave index and marks the next wave as pending.
- */
-export async function advanceToNextWave(
-  wavePlanId: string,
-  nextWaveIndex: number
-): Promise<void> {
-  const db = getDatabase();
-
-  // Update wave plan to point to next wave
+  // Insert metrics. `wave_plan_id` is UNIQUE, and a duplicate must be a no-op
+  // rather than a constraint error surfacing from a plan's completion.
   await (db as any)
-    .update(wavePlans)
-    .set({
-      currentWaveIndex: nextWaveIndex,
-      updatedAt: new Date(),
+    .insert(wavePlanMetrics)
+    .values({
+      wavePlanId,
+      totalWallClockMs,
+      theoreticalMinMs,
+      parallelizationEfficiency,
+      wavesExecuted: wavesExecutedCount,
+      tasksCompleted,
+      tasksFailed,
+      tasksRetried,
+      avgTaskDurationMs,
+      maxWaveWaitMs: null, // TODO: Calculate from wave timings
+      fileConflictsAvoided: 0, // TODO: Track during execution
+      reOptimizationCount: wavePlan.version - 1,
     })
-    .where(eq(wavePlans.id, wavePlanId));
-
-  // Update the next wave status to pending (ready to be dispatched)
-  await (db as any)
-    .update(waves)
-    .set({
-      status: 'pending',
-    })
-    .where(
-      and(
-        eq(waves.wavePlanId, wavePlanId),
-        eq(waves.waveIndex, nextWaveIndex)
-      )
-    );
-
-  // Emit advance event
-  await emitEvent({
-    type: 'wave_advance',
-    wavePlanId,
-    fromWave: nextWaveIndex - 1,
-    toWave: nextWaveIndex,
-  });
-}
-
-/**
- * Emit a wave execution event to the activity_events table.
- */
-async function emitEvent(event: WaveSSEEvent): Promise<void> {
-  const db = getDatabase();
-
-  let message = '';
-  switch (event.type) {
-    case 'wave_plan_complete':
-      message = `Wave plan ${event.wavePlanId} completed`;
-      break;
-    case 'wave_advance':
-      message = `Advanced from wave ${event.fromWave} to wave ${event.toWave}`;
-      break;
-    default:
-      message = `Wave event: ${event.type}`;
-  }
-
-  await db.insert(activityEvents).values({
-    // Uppercase enum value required by the activity_events CHECK constraint.
-    type: toActivityEventType(event.type),
-    message,
-    metadata: event as unknown as Record<string, unknown>,
-  });
+    .onConflictDoNothing({ target: wavePlanMetrics.wavePlanId });
 }

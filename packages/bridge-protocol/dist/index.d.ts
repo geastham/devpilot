@@ -1070,6 +1070,47 @@ declare const RotateSessionKeyResponseSchema: z.ZodObject<{
     keyVersion: number;
 }>;
 type RotateSessionKeyResponse = z.infer<typeof RotateSessionKeyResponseSchema>;
+interface SessionHandoffInput {
+    title: string;
+    /** The full join link, fragment included. This text IS a credential. */
+    link: string;
+    mode: SessionMode;
+    autoBudget?: number;
+    autoTtlMinutes?: number;
+}
+/**
+ * The message one person sends another to bring their agent into a session.
+ *
+ * Starting a session produced a bare link and "others join with: devpilot
+ * session join". The person receiving it had to already know that an MCP server
+ * existed, how to add it, and what to ask their agent to do with a URL — so in
+ * practice a shared session started with a second conversation explaining how
+ * to have the first one.
+ *
+ * This is written to be pasted whole into the recipient's Claude Code. Half of
+ * it addresses the person (how to get the tools, how to treat the link) and
+ * half addresses their agent (join, read, report back before acting). The
+ * agent's half ends with what the session's mode permits, because that is the
+ * instruction most likely to be got wrong: an agent told only to "join" does
+ * not know whether replying on its own is expected.
+ *
+ * It carries the link and therefore the key. Whoever renders it is responsible
+ * for where it goes — the MCP server puts it on the clipboard rather than into
+ * a tool result for exactly that reason.
+ *
+ * ONE builder, here, so the CLI, the MCP server and the portal cannot each say
+ * it slightly differently.
+ */
+declare function buildSessionHandoff(input: SessionHandoffInput): string;
+/**
+ * Find a join link inside arbitrary text — a pasted handoff, a clipboard.
+ *
+ * Returns the link or null. Deliberately strict about the shape (`/s/<id>` and
+ * a `#k=` fragment) so that a clipboard holding something else is not mistaken
+ * for one, and never throws: the caller is usually deciding what to tell a
+ * person, and "there is no link here" is an answer.
+ */
+declare function findJoinLink(text: string): string | null;
 declare function parseSessionMessage(input: unknown): SessionMessage;
 declare function safeParseSessionMessage(input: unknown): z.SafeParseReturnType<{
     sessionId: string;
@@ -1626,18 +1667,34 @@ declare const ObservationResponseSchema: z.ZodObject<{
     ended: z.ZodNumber;
     /** Projects auto-created for repos this org had not seen before. */
     projectsCreated: z.ZodNumber;
+    /**
+     * `adoptionKey → dispatch_sessions.id`, for the rows this machine may write
+     * instrument readings to.
+     *
+     * An observed session had no way to report what it was doing: the telemetry
+     * and stream routes are addressed by session id, and observation never told
+     * the machine which id its sessions had been given. Only sessions placed on a
+     * board learned theirs, so the default path — observe everything, place
+     * nothing — produced a cockpit full of sessions with dark instruments.
+     *
+     * Optional so a machine talking to a bridge that predates it simply sends no
+     * readings, which is what it did before.
+     */
+    sessionIds: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
 }, "strip", z.ZodTypeAny, {
     created: number;
     observed: number;
     updated: number;
     ended: number;
     projectsCreated: number;
+    sessionIds?: Record<string, string> | undefined;
 }, {
     created: number;
     observed: number;
     updated: number;
     ended: number;
     projectsCreated: number;
+    sessionIds?: Record<string, string> | undefined;
 }>;
 type ObservationResponse = z.infer<typeof ObservationResponseSchema>;
 declare const DiscoveredRepoSchema: z.ZodObject<{
@@ -1797,4 +1854,4 @@ declare function buildAdoptionIssueDescription(input: {
 }): string;
 declare function linearIdentifierFromBranch(branch: string): string | null;
 
-export { ADOPTION_AGENTS, ADOPTION_LIMITS, ADOPTION_MATCH_KINDS, ADOPTION_OUTCOME_STATUSES, AGENT_KINDS, type AdoptionAgent, AdoptionAgentSchema, type AdoptionCandidate, AdoptionCandidateSchema, type AdoptionCommentInput, type AdoptionMatchKind, AdoptionMatchKindSchema, type AdoptionOutcome, AdoptionOutcomeSchema, type AdoptionOutcomeStatus, AdoptionOutcomeStatusSchema, type AdoptionRequest, AdoptionRequestSchema, type AdoptionResponse, AdoptionResponseSchema, type AgentKind, AgentKindSchema, type ApiErrorBody, ApiErrorSchema, type CompletionCommentInput, type CreateSharedSessionRequest, CreateSharedSessionRequestSchema, type CreateSharedSessionResponse, CreateSharedSessionResponseSchema, type DiscoveredRepo, DiscoveredRepoSchema, type DiscoveryRequest, DiscoveryRequestSchema, type DiscoveryResponse, DiscoveryResponseSchema, DispatchPollResponseSchema, ERROR_CODES, type HeartbeatRequest, HeartbeatRequestSchema, JOIN_PROOF_HEADER, type JoinCredentials, type JoinSessionRequest, JoinSessionRequestSchema, type JoinSessionResponse, JoinSessionResponseSchema, type ObservationRequest, ObservationRequestSchema, type ObservationResponse, ObservationResponseSchema, PARTICIPANT_KINDS, type ParticipantKind, ParticipantKindSchema, type PostSessionMessageRequest, PostSessionMessageRequestSchema, type PostSessionMessageResponse, PostSessionMessageResponseSchema, type ProgressCommentInput, RealtimeCredentialsSchema, type RegisterRequest, RegisterRequestSchema, type RegisterResponse, RegisterResponseSchema, RepoSlugSchema, type RotateSessionKeyRequest, RotateSessionKeyRequestSchema, type RotateSessionKeyResponse, RotateSessionKeyResponseSchema, SESSION_EVENT_TYPES, SESSION_LIMITS, SESSION_MESSAGE_KINDS, SESSION_MODES, SESSION_STATUSES, type SessionCipher, type SessionComplete, SessionCompleteResponseSchema, SessionCompleteSchema, SessionCryptoError, SessionDecryptionError, type SessionEventType, SessionEventTypeSchema, SessionKeyError, type SessionMessage, type SessionMessageKind, SessionMessageKindSchema, type SessionMessagePage, SessionMessagePageSchema, SessionMessageSchema, type SessionMode, SessionModeSchema, type SessionParticipant, SessionParticipantSchema, type SessionStatus, SessionStatusSchema, type SessionStatusUpdate, SessionStatusUpdateSchema, type SetSessionModeRequest, SetSessionModeRequestSchema, type SharedSession, SharedSessionSchema, TERMINAL_STATUSES, type TaskDispatchMessage, TaskDispatchMessageSchema, type TerminalStatus, buildAdoptionComment, buildAdoptionIssueDescription, buildBridgeCompletionComment, buildCompletionComment, buildJoinLink, buildProgressComment, escapeLinearMarkdown, formatApiError, isTerminal, linearIdentifierFromBranch, parseJoinLink, parseSessionMessage, parseSessionMessagePage, parseTaskDispatchMessage, safeParseSessionMessage, safeParseTaskDispatchMessage, sessionCrypto };
+export { ADOPTION_AGENTS, ADOPTION_LIMITS, ADOPTION_MATCH_KINDS, ADOPTION_OUTCOME_STATUSES, AGENT_KINDS, type AdoptionAgent, AdoptionAgentSchema, type AdoptionCandidate, AdoptionCandidateSchema, type AdoptionCommentInput, type AdoptionMatchKind, AdoptionMatchKindSchema, type AdoptionOutcome, AdoptionOutcomeSchema, type AdoptionOutcomeStatus, AdoptionOutcomeStatusSchema, type AdoptionRequest, AdoptionRequestSchema, type AdoptionResponse, AdoptionResponseSchema, type AgentKind, AgentKindSchema, type ApiErrorBody, ApiErrorSchema, type CompletionCommentInput, type CreateSharedSessionRequest, CreateSharedSessionRequestSchema, type CreateSharedSessionResponse, CreateSharedSessionResponseSchema, type DiscoveredRepo, DiscoveredRepoSchema, type DiscoveryRequest, DiscoveryRequestSchema, type DiscoveryResponse, DiscoveryResponseSchema, DispatchPollResponseSchema, ERROR_CODES, type HeartbeatRequest, HeartbeatRequestSchema, JOIN_PROOF_HEADER, type JoinCredentials, type JoinSessionRequest, JoinSessionRequestSchema, type JoinSessionResponse, JoinSessionResponseSchema, type ObservationRequest, ObservationRequestSchema, type ObservationResponse, ObservationResponseSchema, PARTICIPANT_KINDS, type ParticipantKind, ParticipantKindSchema, type PostSessionMessageRequest, PostSessionMessageRequestSchema, type PostSessionMessageResponse, PostSessionMessageResponseSchema, type ProgressCommentInput, RealtimeCredentialsSchema, type RegisterRequest, RegisterRequestSchema, type RegisterResponse, RegisterResponseSchema, RepoSlugSchema, type RotateSessionKeyRequest, RotateSessionKeyRequestSchema, type RotateSessionKeyResponse, RotateSessionKeyResponseSchema, SESSION_EVENT_TYPES, SESSION_LIMITS, SESSION_MESSAGE_KINDS, SESSION_MODES, SESSION_STATUSES, type SessionCipher, type SessionComplete, SessionCompleteResponseSchema, SessionCompleteSchema, SessionCryptoError, SessionDecryptionError, type SessionEventType, SessionEventTypeSchema, type SessionHandoffInput, SessionKeyError, type SessionMessage, type SessionMessageKind, SessionMessageKindSchema, type SessionMessagePage, SessionMessagePageSchema, SessionMessageSchema, type SessionMode, SessionModeSchema, type SessionParticipant, SessionParticipantSchema, type SessionStatus, SessionStatusSchema, type SessionStatusUpdate, SessionStatusUpdateSchema, type SetSessionModeRequest, SetSessionModeRequestSchema, type SharedSession, SharedSessionSchema, TERMINAL_STATUSES, type TaskDispatchMessage, TaskDispatchMessageSchema, type TerminalStatus, buildAdoptionComment, buildAdoptionIssueDescription, buildBridgeCompletionComment, buildCompletionComment, buildJoinLink, buildProgressComment, buildSessionHandoff, escapeLinearMarkdown, findJoinLink, formatApiError, isTerminal, linearIdentifierFromBranch, parseJoinLink, parseSessionMessage, parseSessionMessagePage, parseTaskDispatchMessage, safeParseSessionMessage, safeParseTaskDispatchMessage, sessionCrypto };

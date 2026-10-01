@@ -39,7 +39,7 @@ var import_commander18 = require("commander");
 var import_update_notifier = __toESM(require("update-notifier"));
 
 // src/version.ts
-var VERSION = "0.5.14";
+var VERSION = "0.6.0";
 
 // src/commands/init.ts
 var import_commander = require("commander");
@@ -211,33 +211,103 @@ var serveCommand = new import_commander2.Command("serve").description("Start the
 // src/commands/status.ts
 var import_commander3 = require("commander");
 var import_chalk3 = __toESM(require("chalk"));
-var statusCommand = new import_commander3.Command("status").description("Show current fleet and runway status").option("-v, --verbose", "Show detailed information").action(async (options) => {
-  console.log(import_chalk3.default.cyan("\u{1F4CA} DevPilot Status"));
-  console.log("");
-  console.log(import_chalk3.default.white("Fleet Status:"));
-  console.log(import_chalk3.default.gray("  Active Sessions: ") + import_chalk3.default.green("3"));
-  console.log(import_chalk3.default.gray("  Needs Spec: ") + import_chalk3.default.yellow("1"));
-  console.log(import_chalk3.default.gray("  Fleet Utilization: ") + import_chalk3.default.cyan("75%"));
-  console.log("");
-  console.log(import_chalk3.default.white("Runway:"));
-  console.log(import_chalk3.default.gray("  Ready Items: ") + import_chalk3.default.green("2"));
-  console.log(import_chalk3.default.gray("  Refining: ") + import_chalk3.default.blue("1"));
-  console.log(import_chalk3.default.gray("  Shaping: ") + import_chalk3.default.magenta("2"));
-  console.log(import_chalk3.default.gray("  Directional: ") + import_chalk3.default.gray("3"));
-  console.log(import_chalk3.default.gray("  Runway Hours: ") + import_chalk3.default.green("4.2h"));
-  console.log("");
-  console.log(import_chalk3.default.white("Conductor Score:"));
-  console.log(import_chalk3.default.gray("  Total: ") + import_chalk3.default.magenta("742") + import_chalk3.default.gray("/1000"));
-  console.log(import_chalk3.default.gray("  Rank: ") + import_chalk3.default.cyan("#23"));
-  if (options.verbose) {
-    console.log("");
-    console.log(import_chalk3.default.white("Score Breakdown:"));
-    console.log(import_chalk3.default.gray("  Fleet Utilization: ") + import_chalk3.default.white("156/200"));
-    console.log(import_chalk3.default.gray("  Runway Health: ") + import_chalk3.default.white("148/200"));
-    console.log(import_chalk3.default.gray("  Plan Accuracy: ") + import_chalk3.default.white("162/200"));
-    console.log(import_chalk3.default.gray("  Cost Efficiency: ") + import_chalk3.default.white("138/200"));
-    console.log(import_chalk3.default.gray("  Velocity Trend: ") + import_chalk3.default.white("138/200"));
+var import_bridge_client = require("@devpilot.sh/bridge-client");
+function asComputedScore(value) {
+  if (!value || typeof value !== "object") return null;
+  const s = value;
+  if (typeof s.total !== "number" || typeof s.measuredMax !== "number" || typeof s.complete !== "boolean" || !Array.isArray(s.dimensions)) {
+    return null;
   }
+  return s;
+}
+function formatScore(value) {
+  const score = asComputedScore(value);
+  if (!score) return [];
+  const lines = [];
+  const measured = score.dimensions.filter((d) => d.value !== null);
+  const days = score.windowHours / 24;
+  const period = score.windowHours <= 0 ? "" : Number.isInteger(days) ? ` (last ${days === 1 ? "24 hours" : `${days} days`})` : ` (last ${score.windowHours} hours)`;
+  if (measured.length === 0) {
+    lines.push(`Conductor Score: nothing measured yet${period}`);
+  } else if (score.complete) {
+    lines.push(`Conductor Score: ${score.total} of ${score.max}${period}`);
+  } else {
+    lines.push(
+      `Conductor Score: ${score.total} of ${score.measuredMax} measured${period} \u2014 ${measured.length} of ${score.dimensions.length} dimensions`
+    );
+  }
+  const width = Math.max(0, ...score.dimensions.map((d) => d.label.length));
+  for (const d of score.dimensions) {
+    const label = d.label.padEnd(width);
+    lines.push(
+      d.value === null ? `  ${label}  not measured \u2014 ${d.unmeasured ?? "no data"}` : `  ${label}  ${String(d.value).padStart(3)} / ${d.max}`
+    );
+  }
+  if (measured.length > 0 && !score.complete) {
+    lines.push("  A partial score is a personal reading; it is not comparable with another.");
+  }
+  return lines;
+}
+async function getJson(url) {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(2500) });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+var statusCommand = new import_commander3.Command("status").description("Show what the local cockpit and the bridge connection report").option(
+  "--cockpit-url <url>",
+  "Local cockpit base URL",
+  process.env.DEVPILOT_COCKPIT_URL || "http://127.0.0.1:3847"
+).action(async (options) => {
+  console.log(import_chalk3.default.cyan("DevPilot status"));
+  console.log("");
+  const saved = (0, import_bridge_client.loadBridgeCredentials)();
+  console.log(import_chalk3.default.white("Bridge"));
+  if (saved) {
+    console.log(import_chalk3.default.gray("  Connected to: ") + saved.url);
+    console.log(import_chalk3.default.gray("  Run `devpilot bridge connect` to report this machine's sessions."));
+  } else {
+    console.log(import_chalk3.default.gray("  No bridge saved on this machine."));
+    console.log(import_chalk3.default.gray("  `devpilot bridge connect --token <token>` connects it; mint a token in"));
+    console.log(import_chalk3.default.gray("  the dashboard under Settings \u2192 Tokens."));
+  }
+  console.log("");
+  const base = options.cockpitUrl.replace(/\/+$/, "");
+  const fleet = await getJson(`${base}/api/fleet/state`);
+  console.log(import_chalk3.default.white("Local cockpit"));
+  if (!fleet) {
+    console.log(import_chalk3.default.gray(`  Not reachable at ${base}.`));
+    console.log(import_chalk3.default.gray("  Start it with `devpilot serve`. Fleet, runway and score are read from"));
+    console.log(import_chalk3.default.gray("  it \u2014 this command does not report them from anywhere else."));
+    console.log("");
+    return;
+  }
+  const sessions = fleet.sessions ?? [];
+  const active = sessions.filter((s) => (s.status ?? "").toUpperCase() === "ACTIVE").length;
+  const capacity = fleet.fleet?.maxSessions;
+  console.log(
+    import_chalk3.default.gray("  Sessions: ") + `${sessions.length}` + import_chalk3.default.gray(
+      `  (${active} active` + (typeof capacity === "number" ? ` of ${capacity} the fleet can run` : "") + ")"
+    )
+  );
+  const runwayHours = fleet.runway?.hours ?? fleet.runwayHours;
+  if (typeof runwayHours === "number") {
+    const state = fleet.runway?.status ?? fleet.runwayStatus;
+    console.log(
+      import_chalk3.default.gray("  Runway: ") + `${runwayHours.toFixed(1)}h` + (state ? import_chalk3.default.gray(`  (${state})`) : "")
+    );
+    console.log(import_chalk3.default.gray("          an estimate from queue length, not a measured rate"));
+  }
+  const scoreLines = formatScore(fleet.conductorScore);
+  if (scoreLines.length > 0) {
+    console.log("");
+    console.log(import_chalk3.default.gray("  ") + scoreLines[0]);
+    for (const line of scoreLines.slice(1)) console.log(import_chalk3.default.gray(`  ${line}`));
+  }
+  console.log("");
 });
 
 // src/commands/config.ts
@@ -357,7 +427,6 @@ var import_core2 = require("@devpilot.sh/core");
 var import_child_process2 = require("child_process");
 var import_fs4 = require("fs");
 var import_path4 = require("path");
-var import_os = require("os");
 var import_chalk5 = __toESM(require("chalk"));
 function checkCommand(cmd, versionArg = "--version") {
   try {
@@ -387,8 +456,8 @@ function versionMeetsMinimum(version, minimum) {
 function checkSystemRequirements() {
   const node = checkCommand("node");
   const nodeMeetsMin = versionMeetsMinimum(node.version, "20.0.0");
-  const git2 = checkCommand("git");
-  const gitMeetsMin = versionMeetsMinimum(git2.version, "2.25.0");
+  const git3 = checkCommand("git");
+  const gitMeetsMin = versionMeetsMinimum(git3.version, "2.25.0");
   const tmux = checkCommand("tmux", "-V");
   const gh = checkCommand("gh");
   let ghAuthenticated = false;
@@ -400,15 +469,11 @@ function checkSystemRequirements() {
       ghAuthenticated = false;
     }
   }
-  const rtk = checkCommand("rtk");
-  const cavemanInstalled = isCavemanInstalled();
   return {
     node: { ...node, meetsMinimum: nodeMeetsMin },
-    git: { ...git2, meetsMinimum: gitMeetsMin },
+    git: { ...git3, meetsMinimum: gitMeetsMin },
     tmux: { installed: tmux.installed },
-    gh: { installed: gh.installed, authenticated: ghAuthenticated },
-    rtk: { installed: rtk.installed, version: rtk.version },
-    caveman: { installed: cavemanInstalled }
+    gh: { installed: gh.installed, authenticated: ghAuthenticated }
   };
 }
 function printRequirementsStatus(reqs) {
@@ -440,16 +505,6 @@ function printRequirementsStatus(reqs) {
   } else {
     console.log(import_chalk5.default.yellow("  \u26A0 GitHub CLI not found (optional, for PR creation)"));
   }
-  if (reqs.rtk.installed) {
-    console.log(import_chalk5.default.green(`  \u2713 RTK ${reqs.rtk.version || ""} (token optimization)`));
-  } else {
-    console.log(import_chalk5.default.yellow("  \u26A0 RTK not found (recommended, for 60-90% token savings)"));
-  }
-  if (reqs.caveman.installed) {
-    console.log(import_chalk5.default.green("  \u2713 Caveman plugin (output token compression)"));
-  } else {
-    console.log(import_chalk5.default.yellow("  \u26A0 Caveman not found (optional, for ~65-75% output token savings)"));
-  }
 }
 function isOrchestratorInstalled() {
   try {
@@ -472,94 +527,6 @@ function installOrchestrator() {
     console.log(import_chalk5.default.red("\u2717 Failed to install @composio/ao-cli"));
     console.log(import_chalk5.default.gray("  Try manually: npm install -g @composio/ao-cli"));
     return false;
-  }
-}
-function isRtkInstalled() {
-  try {
-    const result = (0, import_child_process2.spawnSync)("rtk", ["--version"], { encoding: "utf-8", stdio: "pipe" });
-    return result.status === 0;
-  } catch {
-    return false;
-  }
-}
-function installRtk() {
-  const hasCargo = (0, import_child_process2.spawnSync)("cargo", ["--version"], { encoding: "utf-8", stdio: "pipe" }).status === 0;
-  if (hasCargo) {
-    console.log(import_chalk5.default.cyan("\n  Installing RTK via cargo (this may take a few minutes)..."));
-    try {
-      (0, import_child_process2.execSync)("cargo install --git https://github.com/rtk-ai/rtk", { stdio: "inherit" });
-      console.log(import_chalk5.default.green("  \u2713 RTK installed successfully"));
-      return true;
-    } catch {
-      console.log(import_chalk5.default.red("  \u2717 Failed to install RTK via cargo"));
-    }
-  }
-  console.log(import_chalk5.default.cyan("\n  Installing RTK via install script..."));
-  try {
-    (0, import_child_process2.execSync)("curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh", {
-      stdio: "inherit"
-    });
-    console.log(import_chalk5.default.green("  \u2713 RTK installed successfully"));
-    return true;
-  } catch {
-    console.log(import_chalk5.default.red("  \u2717 Failed to install RTK"));
-    console.log(import_chalk5.default.gray("  Install manually: cargo install --git https://github.com/rtk-ai/rtk"));
-    console.log(import_chalk5.default.gray("  Or: brew install rtk"));
-    return false;
-  }
-}
-function initRtkHook() {
-  console.log(import_chalk5.default.cyan("\n  Initializing RTK hook for Claude Code..."));
-  try {
-    (0, import_child_process2.execSync)("rtk init -g", { encoding: "utf-8", stdio: "pipe" });
-    console.log(import_chalk5.default.green("  \u2713 RTK hook initialized"));
-    return true;
-  } catch {
-    console.log(import_chalk5.default.yellow("  \u26A0 RTK hook init requires manual step: rtk init -g"));
-    return false;
-  }
-}
-function isCavemanInstalled() {
-  const claudeDir = (0, import_path4.join)((0, import_os.homedir)(), ".claude");
-  if ((0, import_fs4.existsSync)((0, import_path4.join)(claudeDir, "hooks", "caveman-activate.js"))) {
-    return true;
-  }
-  const settingsPath = (0, import_path4.join)(claudeDir, "settings.json");
-  if ((0, import_fs4.existsSync)(settingsPath)) {
-    try {
-      const settings = JSON.parse((0, import_fs4.readFileSync)(settingsPath, "utf-8"));
-      const settingsStr = JSON.stringify(settings);
-      if (settingsStr.includes("caveman")) {
-        return true;
-      }
-    } catch {
-    }
-  }
-  return false;
-}
-function installCaveman() {
-  console.log(import_chalk5.default.cyan("\n  Installing Caveman plugin for Claude Code..."));
-  try {
-    (0, import_child_process2.execSync)("npx -y skills add JuliusBrussee/caveman", {
-      stdio: "inherit",
-      timeout: 12e4
-    });
-    console.log(import_chalk5.default.green("  \u2713 Caveman plugin installed successfully"));
-    return true;
-  } catch {
-    console.log(import_chalk5.default.yellow("  npx skills add failed, trying hook install script..."));
-    try {
-      (0, import_child_process2.execSync)(
-        "bash <(curl -fsSL https://raw.githubusercontent.com/JuliusBrussee/caveman/main/hooks/install.sh)",
-        { stdio: "inherit", shell: "/bin/bash", timeout: 6e4 }
-      );
-      console.log(import_chalk5.default.green("  \u2713 Caveman hooks installed successfully"));
-      return true;
-    } catch {
-      console.log(import_chalk5.default.red("  \u2717 Failed to install Caveman plugin"));
-      console.log(import_chalk5.default.gray("  Install manually: npx skills add JuliusBrussee/caveman"));
-      return false;
-    }
   }
 }
 function detectRepoInfo(cwd) {
@@ -647,12 +614,6 @@ function getInstallInstructions(reqs) {
     instructions.push("GitHub CLI: brew install gh (macOS) or https://cli.github.com");
   } else if (!reqs.gh.authenticated) {
     instructions.push("GitHub CLI auth: gh auth login");
-  }
-  if (!reqs.rtk.installed) {
-    instructions.push("RTK (token savings): cargo install --git https://github.com/rtk-ai/rtk");
-  }
-  if (!reqs.caveman.installed) {
-    instructions.push("Caveman (output compression): npx skills add JuliusBrussee/caveman");
   }
   return instructions;
 }
@@ -778,63 +739,14 @@ var setupCommand = new import_commander5.Command("setup").description("Interacti
       }
     }
   }
-  if (!options.linearOnly && !options.orchestratorOnly) {
-    console.log(import_chalk6.default.bold("Step 4: RTK Token Optimization"));
-    console.log(import_chalk6.default.gray("RTK reduces LLM token consumption by 60-90% across fleet agents.\n"));
-    const rtkInstalled = isRtkInstalled();
-    if (rtkInstalled) {
-      console.log(import_chalk6.default.green("  RTK is already installed."));
-      console.log(import_chalk6.default.gray("  Ensuring Claude Code hook is configured..."));
-      initRtkHook();
-    } else if (nonInteractive) {
-      console.log(import_chalk6.default.gray("  Installing RTK (non-interactive mode)..."));
-      const success = installRtk();
-      if (success) {
-        initRtkHook();
-      }
-    } else {
-      const install = await confirm("  Install RTK for token-optimized agent sessions?");
-      if (install) {
-        const success = installRtk();
-        if (success) {
-          initRtkHook();
-        }
-      } else {
-        console.log(import_chalk6.default.gray("  Skipping RTK installation. Install later with:"));
-        console.log(import_chalk6.default.cyan("    cargo install --git https://github.com/rtk-ai/rtk"));
-        console.log(import_chalk6.default.cyan("    rtk init -g\n"));
-      }
-    }
-    console.log("");
-  }
-  if (!options.linearOnly && !options.orchestratorOnly) {
-    console.log(import_chalk6.default.bold("Step 5: Caveman Output Compression"));
-    console.log(import_chalk6.default.gray("Caveman reduces output token usage by ~65-75% across fleet agents.\n"));
-    const cavemanInstalled = isCavemanInstalled();
-    if (cavemanInstalled) {
-      console.log(import_chalk6.default.green("  Caveman plugin is already installed."));
-      console.log(import_chalk6.default.gray("  Activate in any session with /caveman (modes: lite, full, ultra)"));
-    } else if (nonInteractive) {
-      console.log(import_chalk6.default.gray("  Installing Caveman plugin (non-interactive mode)..."));
-      installCaveman();
-    } else {
-      const install = await confirm("  Install Caveman plugin for compressed agent output?");
-      if (install) {
-        installCaveman();
-      } else {
-        console.log(import_chalk6.default.gray("  Skipping Caveman installation. Install later with:"));
-        console.log(import_chalk6.default.cyan("    npx skills add JuliusBrussee/caveman\n"));
-      }
-    }
-    console.log("");
-  }
   console.log(import_chalk6.default.bold.green("\nSetup Complete!\n"));
   console.log(import_chalk6.default.white("Next steps:"));
   console.log(import_chalk6.default.gray("  1. Run ") + import_chalk6.default.cyan("devpilot serve") + import_chalk6.default.gray(" to start the UI"));
   console.log(import_chalk6.default.gray("  2. Run ") + import_chalk6.default.cyan("ao start") + import_chalk6.default.gray(" to start agent orchestrator"));
   console.log(import_chalk6.default.gray("  3. Use the UI to create items and dispatch to the fleet"));
-  console.log(import_chalk6.default.gray("  4. Run ") + import_chalk6.default.cyan("rtk gain") + import_chalk6.default.gray(" to monitor token savings"));
-  console.log(import_chalk6.default.gray("  5. Use ") + import_chalk6.default.cyan("/caveman") + import_chalk6.default.gray(" in sessions for compressed output\n"));
+  console.log(
+    import_chalk6.default.gray("  4. Connect this machine with ") + import_chalk6.default.cyan("devpilot bridge connect") + import_chalk6.default.gray(" to see what each session spends\n")
+  );
 });
 async function configureLinear(configPath, config) {
   console.log("");
@@ -920,10 +832,10 @@ async function configureOrchestrator(cwd, configPath, nonInteractive = false) {
 var import_commander9 = require("commander");
 
 // src/commands/bridge/connect.ts
-var import_os2 = __toESM(require("os"));
+var import_os = __toESM(require("os"));
 var import_commander6 = require("commander");
 var import_chalk10 = __toESM(require("chalk"));
-var import_bridge_client = require("@devpilot.sh/bridge-client");
+var import_bridge_client2 = require("@devpilot.sh/bridge-client");
 
 // src/commands/bridge/dispatch-handler.ts
 var import_core3 = require("@devpilot.sh/core");
@@ -1323,12 +1235,20 @@ async function say(o, progressPercent, message) {
 
 // src/commands/bridge/connect.ts
 var import_node_os2 = require("os");
-var import_node_path4 = require("path");
-var import_node_fs4 = require("fs");
+var import_node_path5 = require("path");
+var import_node_fs5 = require("fs");
 
 // src/commands/bridge/conductor-watcher.ts
 var import_node_fs = require("fs");
 var import_node_path = require("path");
+function whereTheWorkIs(state) {
+  const isolation = state.outcome?.isolation;
+  if (!isolation) return "";
+  if (isolation.isolated) return isolation.summary ? `
+
+${isolation.summary}` : "";
+  return "\n\nThis run was not given a branch per task" + (isolation.reason ? ` (${isolation.reason})` : "") + ", so its changes are uncommitted edits in the checkout on the machine that ran it.";
+}
 function progressReport(state, links) {
   if (state.awaiting === "review") {
     const waves = state.review?.plan?.waves?.length ?? 0;
@@ -1338,6 +1258,15 @@ function progressReport(state, links) {
       signature: "review",
       message: `Plan ready \u2014 ${waves} wave${waves === 1 ? "" : "s"}, ${tasks} task${tasks === 1 ? "" : "s"}, ${pct}% parallel. ` + (links.hosted ? `[Review it in the cockpit](${links.hosted}/sessions/${links.sessionId}) to dispatch` : "Review it in the cockpit to dispatch") + `, or reply here with constraints to re-plan. Awaiting review.`,
       percent: 40
+    };
+  }
+  const pausedReason = state.outcome?.pausedReason;
+  if (pausedReason) {
+    const done = state.completedWaves?.length ?? 0;
+    return {
+      signature: `paused:${pausedReason}`,
+      message: `Run paused \u2014 ${pausedReason}`,
+      percent: Math.min(60 + done * 15, 95)
     };
   }
   if (state.status === "executing") {
@@ -1369,9 +1298,9 @@ function successSummary(state) {
   const files = o.filesChanged ?? [];
   const head = `DevPilot finished ${tasks} task${tasks === 1 ? "" : "s"} across ${waves} wave${waves === 1 ? "" : "s"}` + (typeof o.costUsd === "number" && o.costUsd > 0 ? ` for $${o.costUsd.toFixed(2)}` : "") + ".";
   if (files.length === 0) {
-    return o.filesChanged ? `${head}
+    return (o.filesChanged ? `${head}
 
-**No files were changed.** Worth checking whether the plan matched the intent.` : head;
+**No files were changed.** Worth checking whether the plan matched the intent.` : head) + whereTheWorkIs(state);
   }
   const shown = files.slice(0, MAX_LISTED_FILES).map((f) => `- \`${f}\``);
   const more = files.length > MAX_LISTED_FILES ? `
@@ -1379,7 +1308,7 @@ function successSummary(state) {
   return `${head}
 
 **${files.length} file${files.length === 1 ? "" : "s"} changed**
-${shown.join("\n")}${more}`;
+${shown.join("\n")}${more}` + whereTheWorkIs(state);
 }
 function failureSummary(state) {
   const o = state.outcome ?? {};
@@ -1391,11 +1320,11 @@ function failureSummary(state) {
     return `${head}
 
 **Failed tasks**
-${lines.join("\n")}`;
+${lines.join("\n")}` + whereTheWorkIs(state);
   }
-  return last ? `${head}
+  return (last ? `${head}
 
-${last}` : head;
+${last}` : head) + whereTheWorkIs(state);
 }
 var ConductorWatcher = class {
   constructor(opts) {
@@ -1478,7 +1407,12 @@ var ConductorWatcher = class {
       if (sessions.length === 0) return;
       const files = /* @__PURE__ */ new Set();
       let toolCalls = 0;
+      let writeCalls = 0;
       let costUsd = 0;
+      const tokens = { in: 0, out: 0, cacheRead: 0, cacheWrite: 0, turns: 0 };
+      let sawTokens = false;
+      let harness;
+      const modelTokens = /* @__PURE__ */ new Map();
       let estimated = false;
       let elapsedMs = 0;
       let idleMs = Number.MAX_SAFE_INTEGER;
@@ -1487,23 +1421,45 @@ var ConductorWatcher = class {
         const t = s.telemetry;
         if (!t) continue;
         toolCalls += t.toolCalls ?? 0;
+        writeCalls += t.writeCalls ?? 0;
         costUsd += t.costUsd ?? 0;
+        if (typeof t.tokensIn === "number" || typeof t.tokensOut === "number") sawTokens = true;
+        tokens.in += t.tokensIn ?? 0;
+        tokens.out += t.tokensOut ?? 0;
+        tokens.cacheRead += t.tokensCacheRead ?? 0;
+        tokens.cacheWrite += t.tokensCacheWrite ?? 0;
+        tokens.turns += t.turns ?? 0;
+        harness ?? (harness = t.harness);
+        if (t.model) {
+          const size = (t.tokensIn ?? 0) + (t.tokensOut ?? 0) + (t.tokensCacheRead ?? 0) + (t.tokensCacheWrite ?? 0);
+          modelTokens.set(t.model, (modelTokens.get(t.model) ?? 0) + size);
+        }
         estimated = estimated || Boolean(t.costIsEstimate);
         elapsedMs = Math.max(elapsedMs, t.elapsedMs ?? 0);
         idleMs = Math.min(idleMs, t.idleMs ?? Number.MAX_SAFE_INTEGER);
         for (const f of t.filesTouched ?? []) files.add(f);
         if (!action && t.lastAction) {
           const file = t.lastAction.path?.split("/").slice(-1)[0];
-          action = t.lastAction.tool === "Bash" ? (t.commands?.at(-1) ?? "shell").split(/\s+/).slice(0, 3).join(" ") : `${t.lastAction.tool.toLowerCase()}${file ? ` ${file}` : ""}`;
+          action = t.lastAction.tool === "Bash" ? programOf(t.commands?.at(-1)) : `${t.lastAction.tool.toLowerCase()}${file ? ` ${file}` : ""}`;
         }
       }
       if (toolCalls === 0 && files.size === 0) return;
       await this.opts.client.reportTelemetry(run.sessionId, {
         toolCalls,
+        writeCalls,
         filesTouched: [...files],
         currentAction: action,
         costUsd: costUsd > 0 ? costUsd : void 0,
         costEstimated: estimated,
+        ...sawTokens ? {
+          tokensIn: tokens.in,
+          tokensOut: tokens.out,
+          tokensCacheRead: tokens.cacheRead,
+          tokensCacheWrite: tokens.cacheWrite,
+          turns: tokens.turns || void 0
+        } : {},
+        ...harness ? { harness } : {},
+        ...modelTokens.size > 0 ? { model: [...modelTokens.entries()].sort((a, b) => b[1] - a[1])[0][0] } : {},
         elapsedMs: elapsedMs || void 0,
         idleMs: idleMs === Number.MAX_SAFE_INTEGER ? void 0 : idleMs
       });
@@ -1653,6 +1609,15 @@ var ConductorWatcher = class {
     return this.runs.size;
   }
 };
+function programOf(command) {
+  const words = (command ?? "").trim().split(/\s+/).filter(Boolean);
+  const program = words.find(
+    (w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) && w !== "export" && w !== "env" && /^[\w.@+/-]+$/.test(w)
+  );
+  if (!program) return "shell";
+  const name = program.split("/").pop() ?? program;
+  return /^[\w.@+-]{1,40}$/.test(name) ? name : "shell";
+}
 
 // src/commands/bridge/command-applier.ts
 var CommandApplier = class {
@@ -1732,15 +1697,193 @@ var import_node_path2 = require("path");
 
 // src/commands/bridge/transcript-tail.ts
 var import_node_fs2 = require("fs");
+
+// src/utils/usage-meter.ts
+function emptyUsage() {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 };
+}
+function initialUsageMeter() {
+  return { totals: emptyUsage(), turns: 0, last: null };
+}
+function toTotals(usage) {
+  const n = (v) => typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
+  const cacheWrite = n(usage.cache_creation_input_tokens);
+  return {
+    input: n(usage.input_tokens),
+    output: n(usage.output_tokens),
+    cacheRead: n(usage.cache_read_input_tokens),
+    cacheWrite,
+    // Never more than the write it is part of, whatever the client reports.
+    cacheWrite1h: Math.min(n(usage.cache_creation?.ephemeral_1h_input_tokens), cacheWrite)
+  };
+}
+function apply(into, add, subtract) {
+  into.input += add.input - (subtract?.input ?? 0);
+  into.output += add.output - (subtract?.output ?? 0);
+  into.cacheRead += add.cacheRead - (subtract?.cacheRead ?? 0);
+  into.cacheWrite += add.cacheWrite - (subtract?.cacheWrite ?? 0);
+  into.cacheWrite1h = (into.cacheWrite1h ?? 0) + (add.cacheWrite1h ?? 0) - (subtract?.cacheWrite1h ?? 0);
+}
+function modelKey(model) {
+  if (!model || model.startsWith("<")) return null;
+  return model.slice(0, 80);
+}
+function countUsage(state, messageId, usage, model) {
+  var _a;
+  if (!usage) return;
+  const next = toTotals(usage);
+  const key = modelKey(model);
+  const bucket = key ? (_a = state.byModel ?? (state.byModel = {}))[key] ?? (_a[key] = emptyUsage()) : null;
+  if (messageId && state.last?.id === messageId) {
+    const prev = state.last.counted;
+    apply(state.totals, next, prev);
+    const earlier = state.last.model ? state.byModel?.[state.last.model] : null;
+    if (earlier) apply(earlier, next, prev);
+    state.last.counted = next;
+    return;
+  }
+  apply(state.totals, next);
+  if (bucket) apply(bucket, next);
+  state.turns += 1;
+  state.last = messageId ? { id: messageId, model: key ?? void 0, counted: next } : null;
+}
+function totalTokens(t) {
+  return t.input + t.output + t.cacheRead + t.cacheWrite;
+}
+function standard(input, output, cacheRead = input * 0.1) {
+  return { input, output, cacheRead, cacheWrite: input * 1.25 };
+}
+var PRICES = [
+  ["claude-fable-5-1", standard(10, 50, 0.25)],
+  ["claude-mythos-5-1", standard(10, 50, 0.25)],
+  ["claude-fable-5", standard(10, 50)],
+  ["claude-mythos-5", standard(10, 50)],
+  ["claude-opus-5-5", standard(4, 20, 0.2)],
+  ["claude-opus-5", standard(5, 25)],
+  ["claude-opus-4", standard(5, 25)],
+  ["claude-sonnet-5-5", standard(2, 10)],
+  ["claude-sonnet-5", standard(2, 10)],
+  ["claude-sonnet-4", standard(3, 15)],
+  ["claude-haiku-4-5", standard(1, 5)]
+];
+var DEFAULT_PRICE = standard(5, 25);
+function priceFor(model) {
+  if (!model) return DEFAULT_PRICE;
+  for (const [prefix, price] of PRICES) if (model.startsWith(prefix)) return price;
+  return DEFAULT_PRICE;
+}
+function priceUsage(t, model) {
+  const p = priceFor(model);
+  const m = 1e6;
+  const write1h = Math.min(t.cacheWrite1h ?? 0, t.cacheWrite);
+  return t.input * p.input / m + t.output * p.output / m + t.cacheRead * p.cacheRead / m + (t.cacheWrite - write1h) * p.cacheWrite / m + write1h * p.input * 2 / m;
+}
+function priceMeter(state) {
+  const models = Object.entries(state.byModel ?? {});
+  if (models.length === 0) return priceUsage(state.totals);
+  let cost = 0;
+  const attributed = emptyUsage();
+  for (const [model, totals] of models) {
+    cost += priceUsage(totals, model);
+    apply(attributed, totals);
+  }
+  const rest = {
+    input: Math.max(0, state.totals.input - attributed.input),
+    output: Math.max(0, state.totals.output - attributed.output),
+    cacheRead: Math.max(0, state.totals.cacheRead - attributed.cacheRead),
+    cacheWrite: Math.max(0, state.totals.cacheWrite - attributed.cacheWrite),
+    cacheWrite1h: Math.max(0, (state.totals.cacheWrite1h ?? 0) - (attributed.cacheWrite1h ?? 0))
+  };
+  return cost + priceUsage(rest);
+}
+function priceAtReference(t) {
+  if (totalTokens(t) <= 0) return null;
+  let best = null;
+  for (const [model] of PRICES) {
+    const costUsd = priceUsage(t, model);
+    if (!best || costUsd > best.costUsd) best = { costUsd, model };
+  }
+  return best;
+}
+function dominantModel(state) {
+  let best = null;
+  let most = -1;
+  for (const [model, totals] of Object.entries(state.byModel ?? {})) {
+    const size = totalTokens(totals);
+    if (size > most) {
+      most = size;
+      best = model;
+    }
+  }
+  return best ? best.replace(/\[[^\]]*\]$/, "") : null;
+}
+
+// src/commands/bridge/transcript-tail.ts
 var IDLE_MS = 5 * 60 * 1e3;
 var PAUSE_BEAT_MS = 30 * 1e3;
+var WRITE_TOOLS = /* @__PURE__ */ new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+var MAX_WRITTEN = 500;
+var MAX_PATH_LENGTH = 500;
+var MAX_TOOL_LENGTH = 64;
 function initialTailState() {
-  return { byteOffset: 0, remainder: "", seq: 0, lastEventMs: null, activeMs: 0 };
+  return {
+    byteOffset: 0,
+    remainder: "",
+    seq: 0,
+    lastEventMs: null,
+    activeMs: 0,
+    usage: initialUsageMeter(),
+    written: [],
+    writeCalls: 0
+  };
 }
 function pathFromCommand(command) {
   if (typeof command !== "string") return null;
   const m = command.match(/[\w./-]+\.(?:ts|tsx|js|jsx|py|sql|md|json|css|sh|mjs|go|rs)\b/);
   return m ? m[0] : null;
+}
+function parse(line) {
+  if (!line) return null;
+  try {
+    return JSON.parse(line);
+  } catch {
+    return null;
+  }
+}
+function relativePath(tool, input, cwd) {
+  let path = typeof input.file_path === "string" && input.file_path || typeof input.path === "string" && input.path || typeof input.notebook_path === "string" && input.notebook_path || null;
+  if (!path && tool === "Bash") path = pathFromCommand(input.command);
+  if (path && cwd && path.startsWith(cwd)) path = path.slice(cwd.length + 1);
+  if (path && path.startsWith("/")) path = null;
+  return path;
+}
+function noteWritten(state, tool, path) {
+  if (!WRITE_TOOLS.has(tool)) return;
+  state.writeCalls = (state.writeCalls ?? 0) + 1;
+  if (!path) return;
+  if (path.length > MAX_PATH_LENGTH) return;
+  const written = state.written ?? (state.written = []);
+  if (written.length >= MAX_WRITTEN || written.includes(path)) return;
+  written.push(path);
+}
+function backfill(fd, state, cwd) {
+  state.usage = initialUsageMeter();
+  state.written = [];
+  state.writeCalls = 0;
+  if (state.byteOffset === 0) return;
+  const buf = Buffer.alloc(state.byteOffset);
+  (0, import_node_fs2.readSync)(fd, buf, 0, buf.length, 0);
+  const lines = buf.toString("utf8").split("\n");
+  lines.pop();
+  for (const line of lines) {
+    const o = parse(line);
+    if (!o || o.type !== "assistant") continue;
+    countUsage(state.usage, o.message?.id, o.message?.usage, o.message?.model);
+    for (const block of o.message?.content ?? []) {
+      if (block.type !== "tool_use" || !block.name) continue;
+      noteWritten(state, block.name, relativePath(block.name, block.input ?? {}, cwd));
+    }
+  }
 }
 function tailTranscript(transcriptPath, state, cwd) {
   let fd;
@@ -1755,7 +1898,11 @@ function tailTranscript(transcriptPath, state, cwd) {
     if (size < state.byteOffset) {
       state.byteOffset = 0;
       state.remainder = "";
+      state.usage = initialUsageMeter();
+      state.written = [];
+      state.writeCalls = 0;
     }
+    if (state.usage === void 0) backfill(fd, state, cwd);
     if (size === state.byteOffset) {
       return [];
     }
@@ -1768,25 +1915,19 @@ function tailTranscript(transcriptPath, state, cwd) {
   }
   const lines = chunk.split("\n");
   state.remainder = lines.pop() ?? "";
+  const usage = state.usage ?? (state.usage = initialUsageMeter());
   const events = [];
   for (const line of lines) {
-    if (!line) continue;
-    let o;
-    try {
-      o = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (o.type !== "assistant") continue;
+    const o = parse(line);
+    if (!o || o.type !== "assistant") continue;
+    countUsage(usage, o.message?.id, o.message?.usage, o.message?.model);
     const ms = o.timestamp ? Date.parse(o.timestamp) : NaN;
     if (!Number.isFinite(ms)) continue;
     for (const block of o.message?.content ?? []) {
       if (block.type !== "tool_use" || !block.name) continue;
-      const input = block.input ?? {};
-      let path = typeof input.file_path === "string" && input.file_path || typeof input.path === "string" && input.path || typeof input.notebook_path === "string" && input.notebook_path || null;
-      if (!path && block.name === "Bash") path = pathFromCommand(input.command);
-      if (path && cwd && path.startsWith(cwd)) path = path.slice(cwd.length + 1);
-      if (path && path.startsWith("/")) path = null;
+      let path = relativePath(block.name, block.input ?? {}, cwd);
+      noteWritten(state, block.name, path);
+      if (path && path.length > MAX_PATH_LENGTH) path = null;
       if (state.lastEventMs !== null) {
         const gap = ms - state.lastEventMs;
         state.activeMs += gap >= IDLE_MS ? PAUSE_BEAT_MS : Math.max(gap, 0);
@@ -1795,12 +1936,70 @@ function tailTranscript(transcriptPath, state, cwd) {
       events.push({
         seq: state.seq++,
         t: Math.round(state.activeMs / 1e3),
-        tool: block.name,
+        tool: block.name.slice(0, MAX_TOOL_LENGTH),
         path
       });
     }
   }
   return events;
+}
+
+// src/commands/bridge/transcript-reading.ts
+function canSendReadings(client2) {
+  return typeof client2.streamEvents === "function" && typeof client2.reportTelemetry === "function";
+}
+async function sendTranscriptReading(client2, target, at, onLog) {
+  const before = target.tail ? structuredClone(target.tail) : void 0;
+  target.tail ?? (target.tail = initialTailState());
+  const tokensBefore = before?.usage ? totalTokens(before.usage.totals) : -1;
+  const derived = tailTranscript(target.transcriptPath, target.tail, target.cwd);
+  if (derived.length > 0) {
+    const sent = await client2.streamEvents(target.sessionId, derived);
+    if (!sent) {
+      target.tail = before;
+      onLog?.(`stream for ${target.label} did not land; will catch up next tick`);
+      return "failed";
+    }
+  }
+  const usage = target.tail.usage?.totals;
+  const tokensNow = usage ? totalTokens(usage) : -1;
+  if (derived.length === 0 && tokensNow === tokensBefore && !target.readingOwed) return "nothing";
+  const latest = derived[derived.length - 1];
+  if (latest) {
+    target.lastAction = latest.path ? `${latest.tool} \xB7 ${latest.path.split("/").slice(-2).join("/")}` : latest.tool;
+  }
+  const landed = await client2.reportTelemetry(target.sessionId, {
+    toolCalls: target.tail.seq,
+    writeCalls: target.tail.writeCalls ?? 0,
+    filesTouched: target.tail.written ?? [],
+    // Remembered, not re-derived: the hosted row is replaced whole, so a
+    // tokens-only update that omitted this would blank the line that says what
+    // the session is doing.
+    ...target.lastAction ? { currentAction: target.lastAction } : {},
+    ...usage ? {
+      tokensIn: usage.input,
+      tokensOut: usage.output,
+      tokensCacheRead: usage.cacheRead,
+      tokensCacheWrite: usage.cacheWrite,
+      turns: target.tail.usage?.turns,
+      // Our arithmetic at API list prices, each model's tokens at its own
+      // rate. Not a bill: a subscription was not charged this, and the
+      // hosted plane labels it so.
+      costUsd: Math.min(Number(priceMeter(target.tail.usage).toFixed(4)), 1e4),
+      costEstimated: true,
+      ...dominantModel(target.tail.usage) ? { model: dominantModel(target.tail.usage) } : {}
+    } : {},
+    elapsedMs: Math.round(target.tail.activeMs),
+    // mtimeMs is fractional on macOS; the schema's int() refuses a float and
+    // the client swallows the 400 — a silently empty table.
+    idleMs: Math.round(Math.max(0, at.now - at.mtimeMs))
+  });
+  target.readingOwed = !landed;
+  if (!landed) {
+    onLog?.(`reading for ${target.label} did not land; will send it again next tick`);
+    return "failed";
+  }
+  return "sent";
 }
 
 // src/commands/bridge/adoption-watcher.ts
@@ -1844,6 +2043,11 @@ var AdoptionWatcher = class {
       return 0;
     }
   }
+  /** Whether this watcher is already sending readings for a session. */
+  isTracking(adoptionKey) {
+    const entry = this.entries.get(adoptionKey);
+    return entry !== void 0 && !entry.settled;
+  }
   size() {
     return [...this.entries.values()].filter((e) => !e.settled).length;
   }
@@ -1870,33 +2074,32 @@ var AdoptionWatcher = class {
         continue;
       }
       const neverDerived = entry.tail === void 0;
-      if (mtimeMs > entry.lastMtimeMs || neverDerived) {
+      if (mtimeMs > entry.lastMtimeMs || neverDerived || entry.retryReading) {
         const grew = mtimeMs > entry.lastMtimeMs;
         entry.lastMtimeMs = mtimeMs;
         entry.lastReportedAt = new Date(now).toISOString();
-        const canStream = typeof this.config.client.streamEvents === "function";
-        entry.tail ?? (entry.tail = initialTailState());
-        const derived = canStream ? tailTranscript(entry.transcriptPath, entry.tail, entry.cwd) : [];
-        this.persist();
-        if (derived.length > 0) {
-          const sent = await this.config.client.streamEvents(entry.sessionId, derived);
-          if (!sent) {
-            this.config.onLog?.(`stream for ${entry.identifier} did not land; will catch up next tick`);
-          }
-          const latest = derived[derived.length - 1];
-          const files = /* @__PURE__ */ new Set();
-          for (const e of derived) if (e.path) files.add(e.path);
-          if (typeof this.config.client.reportTelemetry === "function")
-            await this.config.client.reportTelemetry(entry.sessionId, {
-              toolCalls: entry.tail.seq,
-              filesTouched: [...files].slice(0, 500),
-              currentAction: latest.path ? `${latest.tool} \xB7 ${latest.path.split("/").slice(-2).join("/")}` : latest.tool,
-              elapsedMs: Math.round(entry.tail.activeMs),
-              // mtimeMs is fractional on macOS; the schema's int() refuses a
-              // float and the client swallows the 400 — a silently empty table.
-              idleMs: Math.round(Math.max(0, now - mtimeMs))
-            });
+        if (canSendReadings(this.config.client)) {
+          const target = {
+            sessionId: entry.sessionId,
+            label: entry.identifier,
+            transcriptPath: entry.transcriptPath,
+            cwd: entry.cwd,
+            tail: entry.tail,
+            lastAction: entry.lastAction,
+            readingOwed: entry.readingOwed
+          };
+          const outcome = await sendTranscriptReading(
+            this.config.client,
+            target,
+            { now, mtimeMs },
+            this.config.onLog
+          );
+          entry.tail = target.tail;
+          entry.lastAction = target.lastAction;
+          entry.readingOwed = target.readingOwed;
+          entry.retryReading = outcome === "failed";
         }
+        this.persist();
         if (grew) {
           try {
             await this.config.client.reportSessionStatus(entry.sessionId, {
@@ -1951,6 +2154,8 @@ function elapsed(startedAt, endMs) {
 
 // src/commands/bridge/observer.ts
 var import_chalk8 = __toESM(require("chalk"));
+var import_node_fs4 = require("fs");
+var import_node_path4 = require("path");
 
 // src/commands/sessions/scan-pipeline.ts
 var import_node_os = require("os");
@@ -2087,6 +2292,7 @@ function renderPreview(rows, result) {
 var DEFAULT_INTERVAL_MS = 6e4;
 var DEFAULT_SINCE_MS = 24 * 60 * 60 * 1e3;
 var DEFAULT_SUMMARISE_BUDGET = 10;
+var FIRST_READINGS_PER_SWEEP = 8;
 var SessionObserver = class {
   constructor(config) {
     this.config = config;
@@ -2112,9 +2318,13 @@ var SessionObserver = class {
      * and it never leaves the process.
      */
     this.targets = /* @__PURE__ */ new Map();
+    /** `adoptionKey → read position and meter` for the instrument readings. */
+    this.readings = /* @__PURE__ */ new Map();
+    this.sendingReadings = false;
     this.intervalMs = config.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.sinceMs = config.sinceMs ?? DEFAULT_SINCE_MS;
     this.summariseBudget = config.summariseBudget ?? DEFAULT_SUMMARISE_BUDGET;
+    this.restoreReadings();
   }
   /**
    * Where a conversation lives on this machine, by adoption key.
@@ -2201,6 +2411,13 @@ var SessionObserver = class {
       });
       this.lastLive = live;
       if (response) {
+        if (response.sessionIds) {
+          void this.sendReadings(
+            result.candidates.map((c) => ({ key: c.adoptionKey, label: c.repo, live: c.live })),
+            response.sessionIds,
+            result.transcriptPaths
+          );
+        }
         return { observed: response.observed, ended: response.ended };
       }
       return null;
@@ -2211,6 +2428,93 @@ var SessionObserver = class {
       return null;
     } finally {
       this.running = false;
+    }
+  }
+  /**
+   * Send an instrument reading for each observed session that has something
+   * new to say.
+   *
+   * Live sessions first, and first-time readings capped per pass — see
+   * FIRST_READINGS_PER_SWEEP. A session that ended before this bridge started
+   * is still read once: what it cost is as much a fact about last week as what
+   * a running one costs is about now.
+   *
+   * Exposed for tests; never throws and never overlaps itself.
+   */
+  async sendReadings(candidates, sessionIds, locations, now = Date.now()) {
+    const client2 = this.config.client;
+    if (this.sendingReadings || !canSendReadings(client2)) return 0;
+    this.sendingReadings = true;
+    let sent = 0;
+    let first = 0;
+    try {
+      const ordered = [...candidates].sort((a, b) => Number(b.live) - Number(a.live));
+      for (const candidate of ordered) {
+        const sessionId = sessionIds[candidate.key];
+        const location = locations.get(candidate.key);
+        if (!sessionId || !location) continue;
+        if (this.config.isWatched?.(candidate.key)) continue;
+        let mtimeMs;
+        try {
+          mtimeMs = (0, import_node_fs4.statSync)(location.transcriptPath).mtimeMs;
+        } catch {
+          this.readings.delete(candidate.key);
+          continue;
+        }
+        const known = this.readings.get(candidate.key);
+        if (known && mtimeMs <= known.lastMtimeMs && !known.retry) continue;
+        if (!known) {
+          if (first >= FIRST_READINGS_PER_SWEEP) continue;
+          first++;
+        }
+        const reading = known ?? {
+          sessionId,
+          label: candidate.label,
+          transcriptPath: location.transcriptPath,
+          cwd: location.cwd,
+          lastMtimeMs: 0
+        };
+        reading.sessionId = sessionId;
+        const outcome = await sendTranscriptReading(client2, reading, { now, mtimeMs }, this.config.onLog);
+        reading.retry = outcome === "failed";
+        if (outcome !== "failed") reading.lastMtimeMs = mtimeMs;
+        this.readings.set(candidate.key, reading);
+        if (outcome === "sent") sent++;
+      }
+      const current = new Set(candidates.map((c) => c.key));
+      for (const key of this.readings.keys()) if (!current.has(key)) this.readings.delete(key);
+      this.persistReadings();
+    } catch (err) {
+      this.config.onLog?.(
+        import_chalk8.default.gray(`instrument readings failed: ${err instanceof Error ? err.message : err}`)
+      );
+    } finally {
+      this.sendingReadings = false;
+    }
+    return sent;
+  }
+  restoreReadings() {
+    const path = this.config.readingsStatePath;
+    if (!path) return;
+    try {
+      if (!(0, import_node_fs4.existsSync)(path)) return;
+      const parsed = JSON.parse((0, import_node_fs4.readFileSync)(path, "utf8"));
+      if (parsed?.version !== 1 || !parsed.readings) return;
+      for (const [key, reading] of Object.entries(parsed.readings)) this.readings.set(key, reading);
+    } catch {
+    }
+  }
+  persistReadings() {
+    const path = this.config.readingsStatePath;
+    if (!path) return;
+    try {
+      (0, import_node_fs4.mkdirSync)((0, import_node_path4.dirname)(path), { recursive: true });
+      (0, import_node_fs4.writeFileSync)(
+        path,
+        JSON.stringify({ version: 1, readings: Object.fromEntries(this.readings) }),
+        "utf8"
+      );
+    } catch {
     }
   }
 };
@@ -2479,18 +2783,18 @@ function describe2(err) {
 
 // src/commands/bridge/connect.ts
 function stableMachineName() {
-  const path = (0, import_node_path4.join)((0, import_node_os2.homedir)(), ".devpilot", "machine.json");
+  const path = (0, import_node_path5.join)((0, import_node_os2.homedir)(), ".devpilot", "machine.json");
   try {
-    if ((0, import_node_fs4.existsSync)(path)) {
-      const saved = JSON.parse((0, import_node_fs4.readFileSync)(path, "utf8"));
+    if ((0, import_node_fs5.existsSync)(path)) {
+      const saved = JSON.parse((0, import_node_fs5.readFileSync)(path, "utf8"));
       if (saved.name) return saved.name;
     }
   } catch {
   }
-  const name = import_os2.default.hostname();
+  const name = import_os.default.hostname();
   try {
-    (0, import_node_fs4.mkdirSync)((0, import_node_path4.dirname)(path), { recursive: true });
-    (0, import_node_fs4.writeFileSync)(path, JSON.stringify({ name }, null, 2), "utf8");
+    (0, import_node_fs5.mkdirSync)((0, import_node_path5.dirname)(path), { recursive: true });
+    (0, import_node_fs5.writeFileSync)(path, JSON.stringify({ name }, null, 2), "utf8");
   } catch {
   }
   return name;
@@ -2515,7 +2819,7 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
   "--cockpit-url <url>",
   "Local cockpit base URL for --plan",
   process.env.DEVPILOT_COCKPIT_URL || "http://127.0.0.1:3000"
-).option("--no-discover", "Do not report which repos this machine has agent history for").option(
+).option("--no-save", "Do not remember the bridge URL and token on this machine").option("--no-discover", "Do not report which repos this machine has agent history for").option(
   "--no-observe",
   "Do not report the agent sessions running on this machine to the cockpit"
 ).option(
@@ -2527,6 +2831,9 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
   "With --adopt, include repos this machine does not route (names them first)",
   false
 ).action(async (options) => {
+  const credentials = (0, import_bridge_client2.resolveBridgeCredentials)({ url: options.url, token: options.token });
+  options.url = credentials.url ?? (credentials.token ? import_bridge_client2.DEFAULT_BRIDGE_URL : void 0);
+  options.token = credentials.token;
   if (!options.url) {
     console.error(import_chalk10.default.red("\u2717 Bridge URL required (--url or DEVPILOT_BRIDGE_URL)"));
     process.exit(1);
@@ -2561,7 +2868,7 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
     console.error(import_chalk10.default.gray("    \u2026 --session-api-url http://127.0.0.1:3900 --session-api-key <t>"));
     process.exit(1);
   }
-  const client2 = new import_bridge_client.BridgeClient({ bridgeUrl: options.url, token: options.token });
+  const client2 = new import_bridge_client2.BridgeClient({ bridgeUrl: options.url, token: options.token });
   let registration;
   try {
     const machineName = options.name ?? stableMachineName();
@@ -2573,6 +2880,12 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
   }
   console.log(import_chalk10.default.green("\u2713 Registered"));
   console.log(import_chalk10.default.gray(`   orchestrator: ${registration.orchestratorId}`));
+  if (options.save !== false && credentials.source !== "saved") {
+    const saved = (0, import_bridge_client2.saveBridgeCredentials)({ url: options.url, token: options.token });
+    if (saved) {
+      console.log(import_chalk10.default.gray(`   remembered in ${(0, import_bridge_client2.bridgeCredentialsPath)()} \u2014 reconnect with no flags`));
+    }
+  }
   console.log(import_chalk10.default.gray(`   repos: ${repos.join(", ") || "(none)"}`));
   if (repos.length === 0) {
     console.log(import_chalk10.default.yellow("   \u26A0 No repos specified \u2014 nothing can route to this machine."));
@@ -2589,7 +2902,7 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
     // Survives a restart. Without this, upgrading the CLI or closing a
     // laptop lid orphaned every in-flight run: the cockpit kept working
     // and Linear was never told how any of it ended.
-    statePath: (0, import_node_path4.join)((0, import_node_os2.homedir)(), ".devpilot", "conductor-watch.json"),
+    statePath: (0, import_node_path5.join)((0, import_node_os2.homedir)(), ".devpilot", "conductor-watch.json"),
     onLog: (line) => console.log(import_chalk10.default.blue(`   ${line}`)),
     onLost: (run) => console.log(
       import_chalk10.default.yellow(
@@ -2613,7 +2926,7 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
   }
   const adoptionWatcher = new AdoptionWatcher({
     client: client2,
-    statePath: (0, import_node_path4.join)((0, import_node_os2.homedir)(), ".devpilot", "adoption-watch.json"),
+    statePath: (0, import_node_path5.join)((0, import_node_os2.homedir)(), ".devpilot", "adoption-watch.json"),
     onLog: (line) => console.log(import_chalk10.default.blue(`   ${line}`))
   });
   const resumedAdoptions = adoptionWatcher.restore();
@@ -2628,6 +2941,10 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
     client: client2,
     machineName: options.name ?? stableMachineName(),
     repos,
+    // A session placed on a board is already followed by the adoption
+    // watcher; everything else gets its instruments from the observer.
+    isWatched: (key) => adoptionWatcher.isTracking(key),
+    readingsStatePath: (0, import_node_path5.join)((0, import_node_os2.homedir)(), ".devpilot", "observed-readings.json"),
     onLog: (line) => console.log(import_chalk10.default.gray(`   ${line}`))
   }) : null;
   if (observer) {
@@ -2704,7 +3021,7 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
       watcher: adoptionWatcher
     });
   }
-  const loop = new import_bridge_client.DispatchLoop({
+  const loop = new import_bridge_client2.DispatchLoop({
     client: client2,
     orchestratorId: registration.orchestratorId,
     realtime: useRealtime && registration.realtime ? {
@@ -2731,7 +3048,7 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
     onLog: (line) => console.log(import_chalk10.default.gray(`   ${line}`)),
     onError: (e) => console.log(import_chalk10.default.yellow(`   ${e.message}`))
   });
-  const heartbeat = new import_bridge_client.HeartbeatService({
+  const heartbeat = new import_bridge_client2.HeartbeatService({
     client: client2,
     activeJobs: () => loop.activeJobs,
     onError: (e) => console.log(import_chalk10.default.gray(`   heartbeat: ${e.message}`))
@@ -2763,40 +3080,21 @@ var connectCommand = new import_commander6.Command("connect").description("Conne
 // src/commands/bridge/disconnect.ts
 var import_commander7 = require("commander");
 var import_chalk11 = __toESM(require("chalk"));
-var disconnectCommand = new import_commander7.Command("disconnect").description("Disconnect from DevPilot cloud bridge").option("-u, --bridge-url <url>", "Bridge service URL", process.env.DEVPILOT_BRIDGE_URL).option("-k, --api-key <key>", "API key", process.env.DEVPILOT_BRIDGE_API_KEY).option("-i, --orchestrator-id <id>", "Orchestrator ID to disconnect").action(async (options) => {
-  if (!options.bridgeUrl || !options.orchestratorId) {
-    console.error(import_chalk11.default.red("\u2717 Error: Bridge URL and orchestrator ID required"));
-    console.error(import_chalk11.default.gray("   Use: devpilot bridge disconnect -u <url> -i <orchestrator-id>"));
-    process.exit(1);
+var import_bridge_client3 = require("@devpilot.sh/bridge-client");
+var disconnectCommand = new import_commander7.Command("disconnect").description("Forget the bridge URL and token saved on this machine").action(async () => {
+  const saved = (0, import_bridge_client3.loadBridgeCredentials)();
+  (0, import_bridge_client3.clearBridgeCredentials)();
+  if (saved) {
+    console.log(import_chalk11.default.green("\u2713 Forgot the saved token for ") + import_chalk11.default.gray(saved.url));
+  } else {
+    console.log(import_chalk11.default.gray(`Nothing was saved at ${(0, import_bridge_client3.bridgeCredentialsPath)()}.`));
   }
-  console.log(import_chalk11.default.cyan("\u{1F309} Disconnecting from DevPilot Bridge"));
   console.log("");
-  console.log(import_chalk11.default.gray(`   Bridge URL: ${options.bridgeUrl}`));
-  console.log(import_chalk11.default.gray(`   Orchestrator ID: ${options.orchestratorId}`));
+  console.log(import_chalk11.default.gray("  The token still works for anyone who has a copy of it. To end that,"));
+  console.log(import_chalk11.default.gray("  revoke it in the dashboard under Settings \u2192 Tokens \u2014 it stops being"));
+  console.log(import_chalk11.default.gray("  accepted on the very next request."));
+  console.log(import_chalk11.default.gray("  A bridge that is running now keeps running until you stop it (Ctrl+C)."));
   console.log("");
-  try {
-    const response = await fetch(
-      `${options.bridgeUrl}/api/orchestrators/${options.orchestratorId}`,
-      {
-        method: "DELETE",
-        headers: {
-          "Authorization": `Bearer ${options.apiKey}`
-        }
-      }
-    );
-    if (response.ok) {
-      console.log(import_chalk11.default.green("\u2713 Successfully disconnected from bridge"));
-    } else {
-      const errorText = await response.text();
-      console.error(import_chalk11.default.red("\u2717 Failed to disconnect:"));
-      console.error(import_chalk11.default.red(`   ${errorText}`));
-      process.exit(1);
-    }
-  } catch (error) {
-    console.error(import_chalk11.default.red("\u2717 Error disconnecting:"));
-    console.error(import_chalk11.default.red(`   ${error instanceof Error ? error.message : error}`));
-    process.exit(1);
-  }
 });
 
 // src/commands/bridge/status.ts
@@ -2861,52 +3159,76 @@ var bridgeCommand = new import_commander9.Command("bridge").description("Manage 
 var import_commander13 = require("commander");
 
 // src/commands/session/new.ts
+var import_os2 = __toESM(require("os"));
 var import_commander10 = require("commander");
 var import_chalk13 = __toESM(require("chalk"));
 var import_bridge_protocol = require("@devpilot.sh/bridge-protocol");
-var newCommand = new import_commander10.Command("new").description("Create a shared session and print its join link").argument("<title>", "What this session is about (stored in plaintext \u2014 no secrets)").option("-u, --url <url>", "Bridge URL", process.env.DEVPILOT_BRIDGE_URL).option("-t, --token <token>", "Orchestrator token (dp_orch_\u2026)", process.env.DEVPILOT_BRIDGE_TOKEN).option("-o, --org <orgId>", "Organization id that will own the session").option("--issue <identifier>", "Linear issue identifier to attach, e.g. ENG-394").action(async (title, options) => {
-  if (!options.url || !options.token) {
-    console.error(import_chalk13.default.red("\u2717 Bridge URL and token required"));
-    console.error(import_chalk13.default.gray("  --url / DEVPILOT_BRIDGE_URL, --token / DEVPILOT_BRIDGE_TOKEN"));
+var import_bridge_client4 = require("@devpilot.sh/bridge-client");
+var MODES = ["observe", "relay", "auto"];
+var newCommand = new import_commander10.Command("new").description("Create a shared session and print the message to send your teammate").argument("<title>", "What this session is about (stored in plaintext \u2014 no secrets)").option("-u, --url <url>", "Bridge URL (defaults to the one this machine is connected to)").option("-t, --token <token>", "Machine token (defaults to the one this machine is connected with)").option("--issue <identifier>", "Linear issue identifier to attach, e.g. ENG-394").option(
+  "--mode <mode>",
+  "observe (agents post only when asked) | relay | auto (agents may reply, bounded)",
+  "observe"
+).option("--budget <n>", `Agent messages allowed in auto mode (default ${import_bridge_protocol.SESSION_LIMITS.autoDefaultBudget})`).option("--minutes <n>", `Minutes auto mode lasts (default ${import_bridge_protocol.SESSION_LIMITS.autoDefaultTtlMinutes})`).option("-n, --name <name>", "Your display name in the transcript", import_os2.default.hostname()).option("-m, --message <text>", "Post this as the first message (encrypted)").option("--link-only", "Print just the join link, for scripts").action(async (title, options) => {
+  const credentials = (0, import_bridge_client4.resolveBridgeCredentials)({ url: options.url, token: options.token });
+  if (!credentials.token) {
+    console.error(import_chalk13.default.red("\u2717 No machine token"));
+    console.error(
+      import_chalk13.default.gray("  Connect this machine once with `devpilot bridge connect --token <token>` and it")
+    );
+    console.error(import_chalk13.default.gray("  is remembered, or pass --token / set DEVPILOT_BRIDGE_TOKEN."));
     process.exit(1);
   }
-  if (!options.org) {
-    console.error(import_chalk13.default.red("\u2717 --org <orgId> is required"));
-    console.error(import_chalk13.default.gray("  The token is bound to one org; this must be that org."));
+  if (!MODES.includes(options.mode)) {
+    console.error(import_chalk13.default.red(`\u2717 Unknown mode "${options.mode}" \u2014 use observe, relay or auto`));
     process.exit(1);
   }
-  const key = import_bridge_protocol.sessionCrypto.generateKey();
-  const { joinKeyHash } = await import_bridge_protocol.sessionCrypto.deriveJoinCredentials(key);
-  const base = options.url.replace(/\/+$/, "");
-  const res = await fetch(`${base}/api/sessions/shared`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${options.token}` },
-    body: JSON.stringify({
-      orgId: options.org,
+  const mode = options.mode;
+  const autoBudget = options.budget ? parseInt(options.budget, 10) : import_bridge_protocol.SESSION_LIMITS.autoDefaultBudget;
+  const autoTtlMinutes = options.minutes ? parseInt(options.minutes, 10) : import_bridge_protocol.SESSION_LIMITS.autoDefaultTtlMinutes;
+  if (mode === "auto" && !(autoBudget > 0 && autoTtlMinutes > 0)) {
+    console.error(import_chalk13.default.red("\u2717 auto mode needs a positive --budget and --minutes"));
+    process.exit(1);
+  }
+  let created;
+  try {
+    created = await import_bridge_client4.SharedSessionClient.create({
+      baseUrl: credentials.url ?? import_bridge_client4.DEFAULT_BRIDGE_URL,
+      token: credentials.token,
       title,
-      joinKeyHash,
-      ...options.issue ? { linearIdentifier: options.issue } : {}
-    })
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => null);
-    console.error(import_chalk13.default.red(`\u2717 Could not create session (${res.status})`));
-    console.error(import_chalk13.default.gray(`  ${(0, import_bridge_protocol.formatApiError)(body, res.statusText)}`));
+      displayName: options.name,
+      kind: "human",
+      linearIdentifier: options.issue,
+      mode,
+      autoBudget,
+      autoTtlMinutes
+    });
+  } catch (err) {
+    console.error(import_chalk13.default.red("\u2717 Could not create the session"));
+    console.error(import_chalk13.default.gray(`  ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
   }
-  const { session } = await res.json();
-  const link = (0, import_bridge_protocol.buildJoinLink)(base, session.id, key);
+  const { client: client2, link } = created;
+  if (options.message) await client2.post(options.message);
+  if (options.linkOnly) {
+    console.log(link);
+    return;
+  }
   console.log("");
-  console.log(import_chalk13.default.cyan(`  ${session.title}`));
-  console.log(import_chalk13.default.bold(`  ${link}`));
+  console.log(import_chalk13.default.cyan(`  ${title}`) + import_chalk13.default.gray(`  \xB7  ${mode}`));
   console.log("");
-  console.log(import_chalk13.default.yellow("  Anyone with this link can read the whole transcript."));
-  console.log(import_chalk13.default.gray("  It carries the encryption key after the #, which never reaches"));
-  console.log(import_chalk13.default.gray("  devpilot.sh. Send it the way you would send a password \u2014 not to"));
-  console.log(import_chalk13.default.gray("  a public channel. To revoke it, re-key the session; that ends"));
-  console.log(import_chalk13.default.gray("  access for this link but cannot un-send what was already read."));
+  console.log(import_chalk13.default.gray("  Send this to your teammate:"));
   console.log("");
-  console.log(import_chalk13.default.gray(`  Others join with:  devpilot session join "${import_chalk13.default.italic("<link>")}"`));
+  for (const line of (0, import_bridge_protocol.buildSessionHandoff)({ title, link, mode, autoBudget, autoTtlMinutes }).split("\n")) {
+    console.log(`  ${line}`);
+  }
+  console.log("");
+  console.log(import_chalk13.default.yellow("  Anyone with that link can read the whole transcript."));
+  console.log(import_chalk13.default.gray("  The key is after the #, and never reaches the bridge. To revoke the"));
+  console.log(import_chalk13.default.gray("  link, re-key the session from the dashboard; that ends access for it"));
+  console.log(import_chalk13.default.gray("  but cannot un-send what was already read."));
+  console.log("");
+  console.log(import_chalk13.default.gray(`  Follow it here with:  devpilot session tail "${import_chalk13.default.italic("<link>")}"`));
   console.log("");
 });
 
@@ -2914,10 +3236,10 @@ var newCommand = new import_commander10.Command("new").description("Create a sha
 var import_os3 = __toESM(require("os"));
 var import_commander11 = require("commander");
 var import_chalk14 = __toESM(require("chalk"));
-var import_bridge_client2 = require("@devpilot.sh/bridge-client");
+var import_bridge_client5 = require("@devpilot.sh/bridge-client");
 var joinCommand = new import_commander11.Command("join").description("Join a shared session by link and post a message").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", import_os3.default.hostname()).option("-m, --message <text>", "Post this message after joining").action(async (url, options) => {
   try {
-    const client2 = await import_bridge_client2.SharedSessionClient.join({ link: url, displayName: options.name });
+    const client2 = await import_bridge_client5.SharedSessionClient.join({ link: url, displayName: options.name });
     const s = client2.session;
     console.log(import_chalk14.default.cyan(`
   ${s.title}`));
@@ -2944,12 +3266,12 @@ var joinCommand = new import_commander11.Command("join").description("Join a sha
 var import_os4 = __toESM(require("os"));
 var import_commander12 = require("commander");
 var import_chalk15 = __toESM(require("chalk"));
-var import_bridge_client3 = require("@devpilot.sh/bridge-client");
+var import_bridge_client6 = require("@devpilot.sh/bridge-client");
 var tailCommand = new import_commander12.Command("tail").description("Follow a shared session transcript in the terminal").argument("<url>", "Join link, including the #k=\u2026 fragment").option("-n, --name <name>", "Display name in the transcript", import_os4.default.hostname()).option("-i, --interval <seconds>", "Poll interval", "3").action(async (url, options) => {
   const intervalMs = Math.max(1, parseInt(options.interval, 10) || 3) * 1e3;
   let client2;
   try {
-    client2 = await import_bridge_client3.SharedSessionClient.join({ link: url, displayName: options.name });
+    client2 = await import_bridge_client6.SharedSessionClient.join({ link: url, displayName: options.name });
   } catch (err) {
     console.error(import_chalk15.default.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
@@ -3003,25 +3325,25 @@ var sessionCommand = new import_commander13.Command("session").description("Shar
 // src/commands/sessions/index.ts
 var import_os5 = __toESM(require("os"));
 var import_node_os3 = require("os");
-var import_node_path5 = require("path");
-var import_node_fs5 = require("fs");
+var import_node_path6 = require("path");
+var import_node_fs6 = require("fs");
 var import_commander14 = require("commander");
 var import_chalk16 = __toESM(require("chalk"));
 var import_inquirer = __toESM(require("inquirer"));
-var import_bridge_client4 = require("@devpilot.sh/bridge-client");
+var import_bridge_client7 = require("@devpilot.sh/bridge-client");
 function stableMachineName2() {
-  const path = (0, import_node_path5.join)((0, import_node_os3.homedir)(), ".devpilot", "machine.json");
+  const path = (0, import_node_path6.join)((0, import_node_os3.homedir)(), ".devpilot", "machine.json");
   try {
-    if ((0, import_node_fs5.existsSync)(path)) {
-      const saved = JSON.parse((0, import_node_fs5.readFileSync)(path, "utf8"));
+    if ((0, import_node_fs6.existsSync)(path)) {
+      const saved = JSON.parse((0, import_node_fs6.readFileSync)(path, "utf8"));
       if (saved.name) return saved.name;
     }
   } catch {
   }
   const name = import_os5.default.hostname();
   try {
-    (0, import_node_fs5.mkdirSync)((0, import_node_path5.dirname)(path), { recursive: true });
-    (0, import_node_fs5.writeFileSync)(path, JSON.stringify({ name }, null, 2), "utf8");
+    (0, import_node_fs6.mkdirSync)((0, import_node_path6.dirname)(path), { recursive: true });
+    (0, import_node_fs6.writeFileSync)(path, JSON.stringify({ name }, null, 2), "utf8");
   } catch {
   }
   return name;
@@ -3075,7 +3397,7 @@ function rowsFrom(result, outcomes) {
 }
 function client(options) {
   if (!options.url || !options.token) return null;
-  return new import_bridge_client4.BridgeClient({ bridgeUrl: options.url, token: options.token });
+  return new import_bridge_client7.BridgeClient({ bridgeUrl: options.url, token: options.token });
 }
 var scanCommand = withCommonOptions(
   new import_commander14.Command("scan").description(
@@ -3230,13 +3552,13 @@ var sessionsCommand = new import_commander14.Command("sessions").description("Ag
 // src/commands/session-runner/index.ts
 var import_commander15 = require("commander");
 var import_chalk17 = __toESM(require("chalk"));
-var import_path8 = require("path");
+var import_path9 = require("path");
 
 // src/commands/session-runner/server.ts
 var import_http = require("http");
-var import_crypto = require("crypto");
-var import_fs7 = require("fs");
-var import_path7 = require("path");
+var import_crypto2 = require("crypto");
+var import_fs8 = require("fs");
+var import_path8 = require("path");
 
 // src/commands/session-runner/claude-runner.ts
 var import_child_process3 = require("child_process");
@@ -3246,18 +3568,8 @@ var import_os6 = require("os");
 var import_path6 = require("path");
 
 // src/commands/session-runner/stream-events.ts
-var PRICE_PER_MTOK = {
-  input: 5,
-  output: 25,
-  cacheWrite: 6.25,
-  cacheRead: 0.5
-};
-function priceUsage(usage) {
-  const m = 1e6;
-  return (usage.input_tokens ?? 0) * PRICE_PER_MTOK.input / m + (usage.output_tokens ?? 0) * PRICE_PER_MTOK.output / m + (usage.cache_creation_input_tokens ?? 0) * PRICE_PER_MTOK.cacheWrite / m + (usage.cache_read_input_tokens ?? 0) * PRICE_PER_MTOK.cacheRead / m;
-}
 var MAX_ACTIONS = 200;
-var WRITE_TOOLS = /* @__PURE__ */ new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+var WRITE_TOOLS2 = /* @__PURE__ */ new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 var READ_TOOLS = /* @__PURE__ */ new Set(["Read", "Glob", "Grep"]);
 function relativize(path, workdir) {
   if (!workdir) return path;
@@ -3274,10 +3586,15 @@ var TelemetryCollector = class {
     this.commands = [];
     this.actions = [];
     this.toolCalls = 0;
+    this.writeCalls = 0;
     this.costUsd = 0;
     this.costIsEstimate = true;
-    this.tokensIn = 0;
-    this.tokensOut = 0;
+    /**
+     * Counted once per response. The stream repeats a response's usage on every
+     * content block it emits, exactly as the transcript does, so adding each
+     * event's usage inflated the running estimate by the number of blocks.
+     */
+    this.meter = initialUsageMeter();
     this.turns = 0;
     this.now = now;
     this.workdir = workdir;
@@ -3304,9 +3621,9 @@ var TelemetryCollector = class {
     if (event.type === "assistant") {
       const usage = event.message?.usage;
       if (usage && this.costIsEstimate) {
-        this.costUsd += priceUsage(usage);
-        this.tokensIn += usage.input_tokens ?? 0;
-        this.tokensOut += usage.output_tokens ?? 0;
+        countUsage(this.meter, event.message?.id, usage, event.message?.model);
+        this.costUsd = priceMeter(this.meter);
+        this.turns = this.meter.turns;
       }
       for (const block of event.message?.content ?? []) {
         if (block.type === "tool_use" && block.name) {
@@ -3320,16 +3637,108 @@ var TelemetryCollector = class {
       if (typeof event.total_cost_usd === "number") this.costIsEstimate = false;
       this.costUsd = event.total_cost_usd ?? this.costUsd;
       this.turns = event.num_turns ?? this.turns;
-      this.tokensIn = event.usage?.input_tokens ?? this.tokensIn;
-      this.tokensOut = event.usage?.output_tokens ?? this.tokensOut;
+      if (event.usage) {
+        const t = this.meter.totals;
+        t.input = event.usage.input_tokens ?? t.input;
+        t.output = event.usage.output_tokens ?? t.output;
+        t.cacheRead = event.usage.cache_read_input_tokens ?? t.cacheRead;
+        t.cacheWrite = event.usage.cache_creation_input_tokens ?? t.cacheWrite;
+        const hour = event.usage.cache_creation?.ephemeral_1h_input_tokens;
+        if (typeof hour === "number") t.cacheWrite1h = Math.min(hour, t.cacheWrite);
+      }
+      this.reconcileModels(event.modelUsage);
     }
+  }
+  /**
+   * Replace the per-model split with the one in the final result.
+   *
+   * WHY IT CANNOT BE LEFT AS COUNTED. While a run is in flight the stream
+   * reports each response's usage as it BEGINS: the input side is right, and
+   * the output count is a placeholder of a few tokens. The real output arrives
+   * only in the final result. Measured on a live run: 11 output tokens counted
+   * from the stream against 567 in the result.
+   *
+   * The totals above are corrected from the result, but the per-model buckets
+   * were not, so a finished session's tokens no longer added up to its total —
+   * and the difference, which is nearly all of the output, was priced as
+   * "tokens no model was named for", at the default rate. A Haiku run's output
+   * was being priced as Opus: $0.033 reported against Claude's own $0.018.
+   *
+   * The result names every model and what it used, so the buckets are rebuilt
+   * from it, and the totals with them when more than one model ran — the
+   * top-level usage can omit a model that only did background work.
+   *
+   * The one thing the per-model figures do not carry is how a cache write
+   * splits by lifetime. That is known for the run as a whole, so it is shared
+   * out in proportion to each model's cache writes.
+   */
+  reconcileModels(modelUsage) {
+    const entries = Object.entries(modelUsage ?? {});
+    if (entries.length === 0) {
+      this.attributeRemainder();
+      return;
+    }
+    const n = (v) => typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
+    const byModel = {};
+    const sum = emptyUsage();
+    for (const [model, usage] of entries) {
+      const bucket = {
+        input: n(usage.inputTokens),
+        output: n(usage.outputTokens),
+        cacheRead: n(usage.cacheReadInputTokens),
+        cacheWrite: n(usage.cacheCreationInputTokens),
+        cacheWrite1h: 0
+      };
+      byModel[model.slice(0, 80)] = bucket;
+      sum.input += bucket.input;
+      sum.output += bucket.output;
+      sum.cacheRead += bucket.cacheRead;
+      sum.cacheWrite += bucket.cacheWrite;
+    }
+    const hourShare = sum.cacheWrite > 0 ? Math.min(1, (this.meter.totals.cacheWrite1h ?? 0) / Math.max(1, this.meter.totals.cacheWrite)) : 0;
+    for (const bucket of Object.values(byModel)) bucket.cacheWrite1h = bucket.cacheWrite * hourShare;
+    sum.cacheWrite1h = sum.cacheWrite * hourShare;
+    this.meter.byModel = byModel;
+    this.meter.totals = sum;
+  }
+  /**
+   * The same repair for a result that names no models — an older Claude Code.
+   *
+   * There is no authoritative split to rebuild from, so whatever the corrected
+   * totals hold beyond what was counted per model is given to the model that
+   * did most of the work, rather than left unattributed and priced at the
+   * default. For a run on one model, which is nearly all of them, that is
+   * exact.
+   */
+  attributeRemainder() {
+    const model = dominantModel(this.meter);
+    const buckets = this.meter.byModel;
+    if (!model || !buckets) return;
+    const key = Object.keys(buckets).find((k) => k === model || k.replace(/\[[^\]]*\]$/, "") === model);
+    if (!key) return;
+    const counted = emptyUsage();
+    for (const b of Object.values(buckets)) {
+      counted.input += b.input;
+      counted.output += b.output;
+      counted.cacheRead += b.cacheRead;
+      counted.cacheWrite += b.cacheWrite;
+      counted.cacheWrite1h = (counted.cacheWrite1h ?? 0) + (b.cacheWrite1h ?? 0);
+    }
+    const t = this.meter.totals;
+    const bucket = buckets[key];
+    bucket.input += Math.max(0, t.input - counted.input);
+    bucket.output += Math.max(0, t.output - counted.output);
+    bucket.cacheRead += Math.max(0, t.cacheRead - counted.cacheRead);
+    bucket.cacheWrite += Math.max(0, t.cacheWrite - counted.cacheWrite);
+    bucket.cacheWrite1h = (bucket.cacheWrite1h ?? 0) + Math.max(0, (t.cacheWrite1h ?? 0) - (counted.cacheWrite1h ?? 0));
   }
   recordTool(tool, input) {
     this.toolCalls++;
+    if (WRITE_TOOLS2.has(tool)) this.writeCalls++;
     const raw = typeof input.file_path === "string" ? input.file_path : typeof input.path === "string" ? input.path : void 0;
     const path = raw ? relativize(raw, this.workdir) : void 0;
     if (path) {
-      const list = WRITE_TOOLS.has(tool) ? this.touched : READ_TOOLS.has(tool) ? this.read : null;
+      const list = WRITE_TOOLS2.has(tool) ? this.touched : READ_TOOLS.has(tool) ? this.read : null;
       if (list && !list.includes(path)) list.push(path);
     }
     if (tool === "Bash" && typeof input.command === "string") {
@@ -3340,10 +3749,20 @@ var TelemetryCollector = class {
     this.actions.push(action);
     if (this.actions.length > MAX_ACTIONS) this.actions.shift();
   }
+  referencePricing() {
+    const reference = priceAtReference(this.meter.totals);
+    if (!reference) return {};
+    return {
+      listCostUsd: priceMeter(this.meter),
+      referenceCostUsd: reference.costUsd,
+      referenceModel: reference.model
+    };
+  }
   snapshot() {
     const now = this.now();
     return {
       toolCalls: this.toolCalls,
+      writeCalls: this.writeCalls,
       filesTouched: [...this.touched],
       filesRead: [...this.read],
       commands: [...this.commands],
@@ -3352,9 +3771,13 @@ var TelemetryCollector = class {
       actions: [...this.actions],
       costUsd: this.costUsd,
       costIsEstimate: this.costIsEstimate,
-      tokensIn: this.tokensIn,
-      tokensOut: this.tokensOut,
+      ...this.referencePricing(),
+      tokensIn: this.meter.totals.input,
+      tokensOut: this.meter.totals.output,
+      tokensCacheRead: this.meter.totals.cacheRead,
+      tokensCacheWrite: this.meter.totals.cacheWrite,
       turns: this.turns,
+      model: dominantModel(this.meter) ?? void 0,
       elapsedMs: now - this.startedAt,
       idleMs: now - this.lastEventAt
     };
@@ -3515,7 +3938,7 @@ function sessionPreamble() {
   ].join("\n");
 }
 async function runClaudeSession(options) {
-  const { workdir, prompt: prompt2, sessionLink: sessionLink2, model, claudePath, permissionMode, timeoutMs, resumeSessionId, onLog, onSpawn } = options;
+  const { workdir, prompt: prompt2, sessionLink: sessionLink2, model, claudePath, permissionMode, timeoutMs, resumeSessionId, harness, onLog, onSpawn } = options;
   const before = await snapshot(workdir);
   const startedAt = Date.now();
   const args = [
@@ -3536,6 +3959,8 @@ async function runClaudeSession(options) {
     args.push("--mcp-config", cfg.file, "--strict-mcp-config");
     effectivePrompt = sessionPreamble() + prompt2;
   }
+  const harnessBuild = harness?.build({ hasMcpConfig: Boolean(sessionLink2) });
+  if (harnessBuild) args.push(...harnessBuild.args);
   const outcome = await new Promise((resolve4) => {
     const child = (0, import_child_process3.spawn)(claudePath, args, {
       cwd: workdir,
@@ -3566,7 +3991,9 @@ async function runClaudeSession(options) {
       const lines = pending.split("\n");
       pending = lines.pop() ?? "";
       for (const line of lines) collector.ingestLine(line);
-      if (lines.length > 0) options.onTelemetry?.(collector.snapshot());
+      if (lines.length > 0) {
+        options.onTelemetry?.({ ...collector.snapshot(), harness: harness?.stamp });
+      }
     });
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString();
@@ -3586,6 +4013,7 @@ ${error2.message}`, timedOut, killed });
     child.stdin.end();
   }).finally(() => {
     if (mcpDir) (0, import_fs6.rmSync)(mcpDir, { recursive: true, force: true });
+    if (harnessBuild?.cleanupDir) (0, import_fs6.rmSync)(harnessBuild.cleanupDir, { recursive: true, force: true });
   });
   const after = await snapshot(workdir);
   const files = classify(before, after);
@@ -3653,8 +4081,366 @@ function sendCompletion(callbackUrl, report, token, log) {
   return post(`${callbackUrl.replace(/\/$/, "")}/complete`, report, token, log);
 }
 
+// src/commands/session-runner/isolation.ts
+var import_child_process4 = require("child_process");
+var import_crypto = require("crypto");
+var import_fs7 = require("fs");
+var import_os7 = require("os");
+var import_path7 = require("path");
+var import_util2 = require("util");
+var execFileAsync2 = (0, import_util2.promisify)(import_child_process4.execFile);
+var IsolationError = class extends Error {
+  constructor(message, code) {
+    super(message);
+    this.code = code;
+    this.name = "IsolationError";
+  }
+};
+var GIT_TIMEOUT_MS = 12e4;
+var DEFAULT_SETUP_TIMEOUT_MS = 10 * 6e4;
+var FALLBACK_IDENTITY = ["-c", "user.name=DevPilot", "-c", "user.email=devpilot@localhost"];
+async function git2(cwd, args) {
+  const { stdout } = await execFileAsync2("git", args, {
+    cwd,
+    maxBuffer: 32 * 1024 * 1024,
+    timeout: GIT_TIMEOUT_MS,
+    // A hook or credential helper that prompts would hang a process with no
+    // terminal. Nothing here should ever need to ask.
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
+  });
+  return stdout;
+}
+async function gitOk(cwd, args) {
+  try {
+    await git2(cwd, args);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function gitMessage(error) {
+  const e = error;
+  return (e.stderr || e.message || String(error)).trim().slice(-1500);
+}
+function refSafe(value) {
+  const cleaned = String(value).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-{2,}/g, "-").replace(/\.{2,}/g, ".").replace(/^[-.]+|[-.]+$/g, "").slice(0, 80).replace(/[-.]+$/g, "");
+  if (!cleaned || cleaned.toLowerCase().endsWith(".lock")) {
+    throw new IsolationError(`'${value}' cannot be used in a branch name`, "INVALID_NAME");
+  }
+  return cleaned;
+}
+function runBranchName(runId) {
+  return `devpilot/${refSafe(runId)}/run`;
+}
+function taskBranchName(runId, taskCode) {
+  return `devpilot/${refSafe(runId)}/task-${refSafe(taskCode)}`;
+}
+function worktreeRoot(config) {
+  return config.worktreeRoot ?? (0, import_path7.join)((0, import_os7.homedir)(), ".devpilot", "worktrees");
+}
+function repoKey(repoDir) {
+  let real = repoDir;
+  try {
+    real = (0, import_fs7.realpathSync)(repoDir);
+  } catch {
+  }
+  const hash = (0, import_crypto.createHash)("sha1").update(real).digest("hex").slice(0, 8);
+  return `${refSafe((0, import_path7.basename)(real) || "repo")}-${hash}`;
+}
+var repoLocks = /* @__PURE__ */ new Map();
+function withRepoLock(repoDir, fn) {
+  const previous = repoLocks.get(repoDir) ?? Promise.resolve();
+  const next = previous.then(fn, fn);
+  repoLocks.set(
+    repoDir,
+    next.catch(() => void 0)
+  );
+  return next;
+}
+async function revParse(cwd, ref) {
+  try {
+    return (await git2(cwd, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])).trim() || null;
+  } catch {
+    return null;
+  }
+}
+async function identityArgs(cwd) {
+  const hasName = await gitOk(cwd, ["config", "user.name"]);
+  const hasEmail = await gitOk(cwd, ["config", "user.email"]);
+  return hasName && hasEmail ? [] : FALLBACK_IDENTITY;
+}
+async function removeWorktree(repoDir, dir) {
+  await git2(repoDir, ["worktree", "remove", "--force", dir]).catch(() => void 0);
+  (0, import_fs7.rmSync)(dir, { recursive: true, force: true });
+  await git2(repoDir, ["worktree", "prune"]).catch(() => void 0);
+}
+async function checkIsolatable(repoDir) {
+  if (!await gitOk(repoDir, ["rev-parse", "--git-dir"])) {
+    throw new IsolationError(
+      `${repoDir} is not a git repository, so a task cannot be given its own branch there.`,
+      "NOT_A_REPOSITORY"
+    );
+  }
+  if (!await revParse(repoDir, "HEAD")) {
+    throw new IsolationError(
+      `${repoDir} has no commits yet. A task branch needs a commit to start from.`,
+      "NO_COMMITS"
+    );
+  }
+}
+async function prepareTaskWorkspace(repoDir, request, config = {}) {
+  const runBranch = runBranchName(request.runId);
+  const branch = taskBranchName(request.runId, request.taskCode);
+  const dir = (0, import_path7.join)(
+    worktreeRoot(config),
+    repoKey(repoDir),
+    refSafe(request.runId),
+    `task-${refSafe(request.taskCode)}`
+  );
+  const workspace = await withRepoLock(repoDir, async () => {
+    await checkIsolatable(repoDir);
+    try {
+      if (!await revParse(repoDir, `refs/heads/${runBranch}`)) {
+        await git2(repoDir, ["branch", runBranch, "HEAD"]);
+      }
+      const baseSha = await revParse(repoDir, `refs/heads/${runBranch}`);
+      if ((0, import_fs7.existsSync)(dir)) await removeWorktree(repoDir, dir);
+      const previous = await revParse(repoDir, `refs/heads/${branch}`);
+      if (previous) {
+        let kept = `${branch}-attempt-${previous.slice(0, 8)}`;
+        for (let n = 2; await revParse(repoDir, `refs/heads/${kept}`); n++) {
+          kept = `${branch}-attempt-${previous.slice(0, 8)}-${n}`;
+        }
+        await git2(repoDir, ["branch", "-m", branch, kept]);
+      }
+      (0, import_fs7.mkdirSync)((0, import_path7.dirname)(dir), { recursive: true });
+      await git2(repoDir, ["worktree", "add", "-b", branch, dir, runBranch]);
+      return { repoDir, dir, branch, runBranch, baseSha, taskCode: request.taskCode };
+    } catch (error) {
+      if (error instanceof IsolationError) throw error;
+      throw new IsolationError(
+        `Could not create a working tree for task ${request.taskCode}: ${gitMessage(error)}`,
+        "GIT_FAILED"
+      );
+    }
+  });
+  if (config.setupCommand) {
+    try {
+      await execFileAsync2("/bin/sh", ["-c", config.setupCommand], {
+        cwd: workspace.dir,
+        timeout: config.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS,
+        maxBuffer: 32 * 1024 * 1024
+      });
+    } catch (error) {
+      await withRepoLock(repoDir, async () => {
+        await removeWorktree(repoDir, workspace.dir);
+        await git2(repoDir, ["branch", "-D", workspace.branch]).catch(() => void 0);
+      });
+      throw new IsolationError(
+        `The worktree setup command failed for task ${request.taskCode}: ${gitMessage(error)}`,
+        "SETUP_FAILED"
+      );
+    }
+  }
+  return workspace;
+}
+async function finishTaskWorkspace(workspace, options) {
+  const { repoDir, dir, branch, baseSha } = workspace;
+  return withRepoLock(repoDir, async () => {
+    let commitSha;
+    try {
+      await git2(dir, ["add", "-A"]);
+      if ((await git2(dir, ["status", "--porcelain"])).trim()) {
+        await git2(dir, [
+          ...await identityArgs(dir),
+          "commit",
+          "--no-verify",
+          "--no-gpg-sign",
+          "-m",
+          options.message
+        ]);
+      }
+      commitSha = await revParse(dir, "HEAD");
+      if (await revParse(repoDir, `refs/heads/${branch}`) !== commitSha) {
+        await git2(repoDir, ["update-ref", `refs/heads/${branch}`, commitSha]);
+      }
+    } catch (error) {
+      throw new IsolationError(
+        `Could not commit task ${workspace.taskCode}'s work. It is still in ${dir}: ${gitMessage(error)}`,
+        "GIT_FAILED"
+      );
+    }
+    try {
+      const filesModified = [];
+      const filesCreated = [];
+      const filesDeleted = [];
+      const diff = await git2(repoDir, [
+        "diff",
+        "--name-status",
+        "--no-renames",
+        "-z",
+        baseSha,
+        commitSha
+      ]);
+      const fields = diff.split("\0");
+      for (let i = 0; i + 1 < fields.length; i += 2) {
+        const status = fields[i];
+        const path = fields[i + 1];
+        if (!path) continue;
+        if (status.startsWith("A")) filesCreated.push(path);
+        else if (status.startsWith("D")) filesDeleted.push(path);
+        else filesModified.push(path);
+      }
+      return {
+        commitSha,
+        changed: commitSha !== baseSha,
+        filesModified,
+        filesCreated,
+        filesDeleted
+      };
+    } catch (error) {
+      throw new IsolationError(
+        `Task ${workspace.taskCode}'s work is committed on ${branch}, but its changes could not be read back: ${gitMessage(error)}`,
+        "GIT_FAILED"
+      );
+    } finally {
+      if (await gitOk(repoDir, ["worktree", "remove", dir])) {
+        (0, import_fs7.rmSync)(dir, { recursive: true, force: true });
+      }
+    }
+  });
+}
+async function checkedOutAt(repoDir, branch) {
+  const out = await git2(repoDir, ["worktree", "list", "--porcelain"]);
+  let current = null;
+  for (const line of out.split("\n")) {
+    if (line.startsWith("worktree ")) current = line.slice("worktree ".length);
+    else if (line === `branch refs/heads/${branch}`) return current;
+  }
+  return null;
+}
+async function integrateRun(repoDir, request, config = {}) {
+  const runBranch = runBranchName(request.runId);
+  const dir = (0, import_path7.join)(worktreeRoot(config), repoKey(repoDir), refSafe(request.runId), "_integrate");
+  return withRepoLock(repoDir, async () => {
+    await checkIsolatable(repoDir);
+    const startSha = await revParse(repoDir, `refs/heads/${runBranch}`);
+    if (!startSha) {
+      throw new IsolationError(
+        `There is no run branch ${runBranch} in ${repoDir}. No task of this run was isolated here.`,
+        "RUN_BRANCH_MISSING"
+      );
+    }
+    const heldAt = await checkedOutAt(repoDir, runBranch);
+    if (heldAt) {
+      throw new IsolationError(
+        `${runBranch} is checked out in ${heldAt}. Switch that checkout to another branch so the wave's work can be merged into it.`,
+        "RUN_BRANCH_CHECKED_OUT"
+      );
+    }
+    const result = {
+      runBranch,
+      headSha: startSha,
+      merged: [],
+      conflicts: [],
+      missing: []
+    };
+    if ((0, import_fs7.existsSync)(dir)) await removeWorktree(repoDir, dir);
+    (0, import_fs7.mkdirSync)((0, import_path7.dirname)(dir), { recursive: true });
+    try {
+      await git2(repoDir, ["worktree", "add", "--detach", dir, runBranch]);
+      const identity = await identityArgs(dir);
+      for (const taskCode of request.taskCodes) {
+        const branch = taskBranchName(request.runId, taskCode);
+        const commitSha = await revParse(repoDir, `refs/heads/${branch}`);
+        if (!commitSha) {
+          result.missing.push(taskCode);
+          continue;
+        }
+        if (await gitOk(dir, ["merge-base", "--is-ancestor", commitSha, "HEAD"])) {
+          result.merged.push({ taskCode, branch, commitSha, alreadyMerged: true });
+          continue;
+        }
+        try {
+          await git2(dir, [
+            ...identity,
+            "merge",
+            "--no-ff",
+            "--no-verify",
+            "--no-gpg-sign",
+            "-m",
+            `devpilot: merge task ${taskCode}`,
+            commitSha
+          ]);
+          result.merged.push({ taskCode, branch, commitSha, alreadyMerged: false });
+        } catch (error) {
+          const unmerged = await git2(dir, ["diff", "--name-only", "--diff-filter=U", "-z"]).catch(
+            () => ""
+          );
+          const files = unmerged.split("\0").filter(Boolean);
+          await git2(dir, ["merge", "--abort"]).catch(() => void 0);
+          await git2(dir, ["reset", "--hard", "--quiet"]).catch(() => void 0);
+          if (files.length === 0) {
+            throw new IsolationError(
+              `Merging task ${taskCode} into ${runBranch} failed: ${gitMessage(error)}`,
+              "GIT_FAILED"
+            );
+          }
+          result.conflicts.push({ taskCode, branch, files });
+        }
+      }
+      const headSha2 = await revParse(dir, "HEAD");
+      if (headSha2 !== startSha) {
+        try {
+          await git2(repoDir, ["update-ref", `refs/heads/${runBranch}`, headSha2, startSha]);
+        } catch (error) {
+          throw new IsolationError(
+            `${runBranch} changed while the wave was being merged; nothing was written. ${gitMessage(error)}`,
+            "RUN_BRANCH_MOVED"
+          );
+        }
+      }
+      result.headSha = headSha2;
+      return result;
+    } catch (error) {
+      if (error instanceof IsolationError) throw error;
+      throw new IsolationError(
+        `Could not merge into ${runBranch}: ${gitMessage(error)}`,
+        "GIT_FAILED"
+      );
+    } finally {
+      await removeWorktree(repoDir, dir);
+    }
+  });
+}
+function workspacePreamble(workspace, config = {}) {
+  return [
+    "# Your workspace",
+    "",
+    `You are in a git worktree made for this task, on the branch \`${workspace.branch}\`.`,
+    "Other tasks in this run each have their own. Nothing you do here reaches theirs,",
+    "and nothing they do reaches you, until DevPilot merges the wave.",
+    "",
+    "- Stay on this branch. Do not switch branches, rebase, push, or open a pull request.",
+    "- You do not need to commit. Whatever is in this directory when you finish is",
+    "  committed to the branch for you.",
+    config.setupCommand ? "- This is a fresh checkout that the operator's setup step has prepared. If something" : "- This is a fresh checkout: it has the tracked files only. Installed dependencies,",
+    config.setupCommand ? "  a command needs is still missing, say so in your final message rather than" : "  local env files and build output from the main checkout are not here. If a command",
+    config.setupCommand ? "  working around it." : "  fails because of that, say so in your final message rather than working around it.",
+    "",
+    "---",
+    ""
+  ].join("\n");
+}
+
 // src/commands/session-runner/server.ts
-var VERSION2 = "1.0.0";
+var VERSION2 = "1.1.0";
+var CAPABILITIES = ["isolation"];
+function commitSubject(taskCode, title) {
+  const line = (title ?? "").replace(/\s+/g, " ").trim();
+  const subject = line ? `devpilot(${taskCode}): ${line}` : `devpilot: task ${taskCode}`;
+  return subject.length > 72 ? `${subject.slice(0, 71)}\u2026` : subject;
+}
 function json(res, status, body) {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
@@ -3702,10 +4488,10 @@ var SessionRunner = class {
   resolveWorkdir(repo) {
     const mapped = this.config.repoMap.get(repo);
     if (mapped) {
-      return (0, import_fs7.existsSync)(mapped) ? { workdir: mapped } : { error: `Mapped path for '${repo}' does not exist: ${mapped}` };
+      return (0, import_fs8.existsSync)(mapped) ? { workdir: mapped } : { error: `Mapped path for '${repo}' does not exist: ${mapped}` };
     }
-    const candidate = (0, import_path7.isAbsolute)(repo) ? repo : (0, import_path7.resolve)(this.config.workspace, (0, import_path7.basename)(repo));
-    if (!(0, import_fs7.existsSync)(candidate)) {
+    const candidate = (0, import_path8.isAbsolute)(repo) ? repo : (0, import_path8.resolve)(this.config.workspace, (0, import_path8.basename)(repo));
+    if (!(0, import_fs8.existsSync)(candidate)) {
       return {
         error: `No checkout for '${repo}'. Tried ${candidate}. Pass --repo ${repo}=/path/to/checkout, or set --workspace.`
       };
@@ -3738,11 +4524,20 @@ var SessionRunner = class {
     const { callbackUrl, callbackToken } = request;
     try {
       session.status = "running";
+      let workspace;
+      if (request.isolation) {
+        workspace = await prepareTaskWorkspace(session.workdir, request.isolation, this.config.isolation);
+        session.branch = workspace.branch;
+        this.config.log(
+          `[${session.externalSessionId}] task ${request.isolation.taskCode} on ${workspace.branch} (from ${workspace.baseSha.slice(0, 8)})`
+        );
+      }
+      const rundir = workspace?.dir ?? session.workdir;
       session.progressPercent = 5;
       session.currentStep = "session started";
       this.reportStatus(session, callbackUrl, callbackToken, {
         currentStep: "session started",
-        message: `Claude Code session running in ${session.workdir}`
+        message: workspace ? `Claude Code session running on ${workspace.branch}` : `Claude Code session running in ${session.workdir}`
       });
       const heartbeat = setInterval(() => {
         if (session.terminal) return;
@@ -3755,8 +4550,8 @@ var SessionRunner = class {
       let lastReportAt = 0;
       const REPORT_INTERVAL_MS = 3e3;
       const outcome = await runClaudeSession({
-        workdir: session.workdir,
-        prompt: request.prompt,
+        workdir: rundir,
+        prompt: workspace ? workspacePreamble(workspace, this.config.isolation) + request.prompt : request.prompt,
         sessionLink: request.sessionLink,
         model: request.model,
         claudePath: this.config.claudePath,
@@ -3770,6 +4565,7 @@ var SessionRunner = class {
         permissionMode: this.config.permissionMode,
         resumeSessionId: request.resumeSessionId,
         timeoutMs: this.config.timeoutMs,
+        harness: this.config.harness,
         onLog: (line) => this.config.log(`[${session.externalSessionId}] ${line}`),
         onSpawn: (kill) => {
           session.kill = kill;
@@ -3791,6 +4587,30 @@ var SessionRunner = class {
         }
       });
       clearInterval(heartbeat);
+      if (workspace && request.isolation) {
+        try {
+          const result = await finishTaskWorkspace(workspace, {
+            message: `${commitSubject(request.isolation.taskCode, request.isolation.title)}
+
+Run: ${request.isolation.runId}
+Session: ${session.devpilotSessionId}
+` + (outcome.success ? "" : "The agent did not finish this task; this is what it left.\n")
+          });
+          outcome.filesModified = result.filesModified;
+          outcome.filesCreated = result.filesCreated;
+          outcome.filesDeleted = result.filesDeleted;
+          outcome.commitSha = result.commitSha;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          outcome.success = false;
+          outcome.error = outcome.error ? `${outcome.error}
+${message}` : message;
+          outcome.filesModified = [];
+          outcome.filesCreated = [];
+          outcome.filesDeleted = [];
+          outcome.commitSha = void 0;
+        }
+      }
       session.terminal = true;
       session.status = outcome.success ? "complete" : "error";
       session.progressPercent = outcome.success ? 100 : session.progressPercent;
@@ -3807,6 +4627,8 @@ var SessionRunner = class {
           sessionId: session.devpilotSessionId,
           success: outcome.success,
           commitSha: outcome.commitSha,
+          branch: workspace?.branch,
+          baseSha: workspace?.baseSha,
           filesModified: outcome.filesModified,
           filesCreated: outcome.filesCreated,
           filesDeleted: outcome.filesDeleted,
@@ -3815,6 +4637,7 @@ var SessionRunner = class {
           costUsd: outcome.costUsd,
           durationMinutes: outcome.durationMinutes,
           error: outcome.error,
+          telemetry: session.telemetry,
           metadata: request.metadata
         },
         callbackToken,
@@ -3877,7 +4700,14 @@ var SessionRunner = class {
       this.config.log(`create rejected: ${error}`);
       return json(res, 400, { error: "REPO_NOT_FOUND", message: error });
     }
-    const externalSessionId = `run_${(0, import_crypto.randomUUID)()}`;
+    if (body.isolation !== void 0) {
+      const refusal = await this.isolationRefusal(body, workdir);
+      if (refusal) {
+        this.config.log(`create rejected: ${refusal}`);
+        return json(res, 400, { error: "ISOLATION_UNAVAILABLE", message: refusal });
+      }
+    }
+    const externalSessionId = `run_${(0, import_crypto2.randomUUID)()}`;
     const session = {
       externalSessionId,
       devpilotSessionId: body.sessionId,
@@ -3899,6 +4729,65 @@ var SessionRunner = class {
     json(res, 201, { externalSessionId, status: "queued", createdAt: session.createdAt });
     void this.execute(session, body);
   }
+  /** Why an isolation request cannot be honoured, or null if it can. */
+  async isolationRefusal(body, workdir) {
+    const isolation = body.isolation;
+    if (!isolation || typeof isolation.runId !== "string" || typeof isolation.taskCode !== "string" || !isolation.runId || !isolation.taskCode) {
+      return "isolation needs a runId and a taskCode";
+    }
+    if (body.resumeSessionId) {
+      return "a resumed session runs where its conversation lives and cannot be isolated";
+    }
+    try {
+      refSafe(isolation.runId);
+      refSafe(isolation.taskCode);
+      await checkIsolatable(workdir);
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+    return null;
+  }
+  /**
+   * `POST /v1/integrate` — merge a wave's task branches into the run branch.
+   *
+   * Answers when the merge is done rather than calling back: it is a few ref
+   * updates, and the dispatcher needs the result (the new head, and which
+   * tasks conflicted) before it can decide what the next wave starts from.
+   */
+  async handleIntegrate(req, res) {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (error2) {
+      const message = error2 instanceof Error ? error2.message : "invalid JSON";
+      return json(res, 400, { error: "INVALID_PAYLOAD", message });
+    }
+    if (!body?.repo || typeof body.runId !== "string" || !body.runId || !Array.isArray(body.taskCodes) || body.taskCodes.some((code) => typeof code !== "string" || !code)) {
+      return json(res, 400, {
+        error: "INVALID_PAYLOAD",
+        message: "repo, runId and taskCodes are required"
+      });
+    }
+    const { workdir, error } = this.resolveWorkdir(body.repo);
+    if (!workdir) return json(res, 400, { error: "REPO_NOT_FOUND", message: error });
+    try {
+      const result = await integrateRun(
+        workdir,
+        { runId: body.runId, taskCodes: body.taskCodes },
+        this.config.isolation
+      );
+      this.config.log(
+        `integrate ${result.runBranch}: ${result.merged.length} merged, ${result.conflicts.length} conflicted, ${result.missing.length} missing -> ${result.headSha.slice(0, 8)}`
+      );
+      return json(res, 200, result);
+    } catch (error2) {
+      const message = error2 instanceof Error ? error2.message : String(error2);
+      this.config.log(`integrate failed: ${message}`);
+      if (!(error2 instanceof IsolationError)) return json(res, 500, { error: "INTERNAL", message });
+      const status = error2.code === "RUN_BRANCH_MISSING" ? 404 : error2.code === "RUN_BRANCH_CHECKED_OUT" || error2.code === "RUN_BRANCH_MOVED" ? 409 : error2.code === "GIT_FAILED" ? 500 : 400;
+      return json(res, status, { error: error2.code, message });
+    }
+  }
   handleGet(res, externalSessionId) {
     const session = this.sessions.get(externalSessionId);
     if (!session) return json(res, 404, { error: "NOT_FOUND" });
@@ -3908,7 +4797,8 @@ var SessionRunner = class {
       currentStep: session.currentStep,
       message: session.message,
       filesModified: session.filesModified,
-      tokensUsed: session.tokensUsed
+      tokensUsed: session.tokensUsed,
+      branch: session.branch
     });
   }
   async handleMessages(req, res, externalSessionId) {
@@ -3936,12 +4826,20 @@ var SessionRunner = class {
       return json(res, 200, {
         status: "healthy",
         version: VERSION2,
-        activeSessions: this.activeCount
+        activeSessions: this.activeCount,
+        // How many agents this runner will run at once. It is the fleet's
+        // capacity as a fact rather than a setting somebody typed into the
+        // cockpit, and the score's utilization dimension is a ratio against it.
+        maxConcurrent: this.config.maxConcurrent,
+        capabilities: CAPABILITIES
       });
     }
     if (!this.authorized(req)) return json(res, 401, { error: "UNAUTHORIZED" });
     if (path === "/v1/sessions" && req.method === "POST") {
       return this.handleCreate(req, res);
+    }
+    if (path === "/v1/integrate" && req.method === "POST") {
+      return this.handleIntegrate(req, res);
     }
     const match = path.match(/^\/v1\/sessions\/([^/]+)(\/messages|\/stop)?$/);
     if (match) {
@@ -3977,6 +4875,96 @@ var SessionRunner = class {
   }
 };
 
+// src/commands/session-runner/harness.ts
+var import_node_fs7 = require("fs");
+var import_node_os4 = require("os");
+var import_node_path7 = require("path");
+var HARNESS_VERSION = 1;
+var TECHNIQUES = [
+  {
+    id: "strict-mcp",
+    summary: "Give the agent no MCP servers except the ones the dispatch supplies",
+    bucket: "fixed-overhead",
+    watch: "tool-not-found errors, or a task that needed a project MCP server failing",
+    args: (ctx) => {
+      if (ctx.hasMcpConfig) return [];
+      const file = (0, import_node_path7.join)(ctx.scratchDir(), "mcp-none.json");
+      (0, import_node_fs7.writeFileSync)(file, JSON.stringify({ mcpServers: {} }), { mode: 384 });
+      return ["--mcp-config", file, "--strict-mcp-config"];
+    }
+  },
+  {
+    id: "no-skills",
+    summary: "Do not load skills into a worker \u2014 it has one scoped task",
+    bucket: "fixed-overhead",
+    watch: "a task failing because it relied on a project skill",
+    args: () => ["--disable-slash-commands"]
+  },
+  {
+    id: "stable-prefix",
+    summary: "Keep per-directory details out of the system prompt so worktrees share one cache entry",
+    bucket: "cache-writes",
+    watch: "no fall in first-turn cache writes across parallel tasks, or changed behaviour",
+    args: () => ["--exclude-dynamic-system-prompt-sections"]
+  },
+  {
+    id: "compact-200k",
+    summary: "Summarise history once the context passes 200k tokens, instead of near the window limit",
+    bucket: "context-size",
+    watch: "files being read again after a compaction, more turns, lower task success",
+    args: () => ["--autocompact", "200000"]
+  },
+  {
+    id: "budget-cap",
+    summary: "Stop a run that has spent more than DEVPILOT_HARNESS_MAX_BUDGET_USD at API rates",
+    bucket: "tail-cost",
+    watch: "legitimate long tasks being cut off before they finish",
+    args: () => {
+      const cap = Number(process.env.DEVPILOT_HARNESS_MAX_BUDGET_USD);
+      return Number.isFinite(cap) && cap > 0 ? ["--max-budget-usd", String(cap)] : [];
+    }
+  }
+];
+var PROFILES = {
+  baseline: [],
+  lean: ["strict-mcp", "no-skills", "stable-prefix"]
+};
+function resolveHarness(spec) {
+  const parts = (spec?.trim() || "baseline").split("+").map((p) => p.trim()).filter(Boolean);
+  const [profile, ...extras] = parts;
+  const base = PROFILES[profile];
+  if (!base) {
+    throw new Error(
+      `Unknown harness profile "${profile}". Profiles: ${Object.keys(PROFILES).join(", ")}. Techniques: ${TECHNIQUES.map((t) => t.id).join(", ")}.`
+    );
+  }
+  const ids = [.../* @__PURE__ */ new Set([...base, ...extras])];
+  const techniques = ids.map((id) => {
+    const technique = TECHNIQUES.find((t) => t.id === id);
+    if (!technique) {
+      throw new Error(
+        `Unknown harness technique "${id}". Techniques: ${TECHNIQUES.map((t) => t.id).join(", ")}.`
+      );
+    }
+    return technique;
+  });
+  const added = extras.filter((id) => !base.includes(id)).sort();
+  const stamp = `${[profile, ...new Set(added)].join("+")}@${HARNESS_VERSION}`;
+  return {
+    stamp,
+    techniques,
+    build({ hasMcpConfig }) {
+      let dir;
+      const ctx = {
+        hasMcpConfig,
+        scratchDir: () => dir ?? (dir = (0, import_node_fs7.mkdtempSync)((0, import_node_path7.join)((0, import_node_os4.tmpdir)(), "devpilot-harness-")))
+      };
+      const args = techniques.flatMap((t) => t.args(ctx));
+      return { args, cleanupDir: dir };
+    }
+  };
+}
+
 // src/commands/session-runner/index.ts
 function parseRepoMap(values) {
   const map = /* @__PURE__ */ new Map();
@@ -3985,7 +4973,7 @@ function parseRepoMap(values) {
     if (idx === -1) {
       throw new Error(`--repo expects <repo>=<path>, got '${entry}'`);
     }
-    map.set(entry.slice(0, idx).trim(), (0, import_path8.resolve)(entry.slice(idx + 1).trim()));
+    map.set(entry.slice(0, idx).trim(), (0, import_path9.resolve)(entry.slice(idx + 1).trim()));
   }
   return map;
 }
@@ -3998,10 +4986,30 @@ var sessionRunnerCommand = new import_commander15.Command("session-runner").desc
   "--permission-mode <mode>",
   "claude --permission-mode (acceptEdits | bypassPermissions | plan)",
   "acceptEdits"
-).option("--max-concurrent <n>", "Max simultaneous sessions before answering 429", "3").option("--timeout <minutes>", "Wall-clock cap per session", "30").action(async (options) => {
+).option("--max-concurrent <n>", "Max simultaneous sessions before answering 429", "3").option("--timeout <minutes>", "Wall-clock cap per session", "30").option(
+  "--harness <spec>",
+  "How agents are configured: baseline | lean, optionally +technique (e.g. baseline+compact-200k)",
+  process.env.DEVPILOT_HARNESS || "baseline"
+).option(
+  "--worktree-root <dir>",
+  "Where per-task git worktrees are created (default ~/.devpilot/worktrees)",
+  process.env.DEVPILOT_WORKTREE_ROOT
+).option(
+  "--worktree-setup <command>",
+  'Shell command run in each new task worktree before its agent starts (e.g. "pnpm install --offline")',
+  process.env.DEVPILOT_WORKTREE_SETUP
+).action(async (options) => {
   let repoMap;
   try {
     repoMap = parseRepoMap(options.repo ?? []);
+  } catch (error) {
+    console.error(import_chalk17.default.red(error instanceof Error ? error.message : String(error)));
+    process.exitCode = 1;
+    return;
+  }
+  let harness;
+  try {
+    harness = resolveHarness(options.harness);
   } catch (error) {
     console.error(import_chalk17.default.red(error instanceof Error ? error.message : String(error)));
     process.exitCode = 1;
@@ -4011,12 +5019,17 @@ var sessionRunnerCommand = new import_commander15.Command("session-runner").desc
     port: parseInt(options.port, 10),
     host: options.host,
     apiKey: options.token ?? process.env.DEVPILOT_SESSION_API_KEY,
-    workspace: (0, import_path8.resolve)(options.workspace),
+    workspace: (0, import_path9.resolve)(options.workspace),
     repoMap,
     claudePath: options.claudePath,
     permissionMode: options.permissionMode,
     maxConcurrent: parseInt(options.maxConcurrent, 10),
     timeoutMs: parseInt(options.timeout, 10) * 6e4,
+    harness,
+    isolation: {
+      worktreeRoot: options.worktreeRoot ? (0, import_path9.resolve)(options.worktreeRoot) : void 0,
+      setupCommand: options.worktreeSetup || void 0
+    },
     log: (line) => console.log(import_chalk17.default.dim(`[runner] ${line}`))
   };
   const runner = new SessionRunner(config);
@@ -4034,6 +5047,14 @@ var sessionRunnerCommand = new import_commander15.Command("session-runner").desc
   console.log(`  ${import_chalk17.default.dim("workspace")}   ${config.workspace}`);
   console.log(`  ${import_chalk17.default.dim("claude")}      ${config.claudePath} (${config.permissionMode})`);
   console.log(`  ${import_chalk17.default.dim("concurrency")} ${config.maxConcurrent}`);
+  console.log(`  ${import_chalk17.default.dim("harness")}     ${harness.stamp}`);
+  for (const t of harness.techniques) {
+    console.log(`  ${import_chalk17.default.dim("           ")} ${t.id}: ${t.summary}`);
+    console.log(import_chalk17.default.dim(`               watch for ${t.watch}`));
+  }
+  console.log(
+    `  ${import_chalk17.default.dim("worktrees")}   ${config.isolation?.worktreeRoot ?? "~/.devpilot/worktrees"}` + (config.isolation?.setupCommand ? import_chalk17.default.dim(` (setup: ${config.isolation.setupCommand})`) : import_chalk17.default.dim(" (no --worktree-setup: tracked files only)"))
+  );
   if (repoMap.size > 0) {
     for (const [repo, path] of repoMap) console.log(`  ${import_chalk17.default.dim("repo")}        ${repo} \u2192 ${path}`);
   }
@@ -4058,11 +5079,11 @@ var sessionRunnerCommand = new import_commander15.Command("session-runner").desc
 
 // src/commands/update.ts
 var import_commander16 = require("commander");
-var import_child_process4 = require("child_process");
+var import_child_process5 = require("child_process");
 var import_chalk18 = __toESM(require("chalk"));
 async function getLatestVersion() {
   try {
-    const result = (0, import_child_process4.execSync)("npm view @devpilot.sh/cli version", {
+    const result = (0, import_child_process5.execSync)("npm view @devpilot.sh/cli version", {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"]
     });
@@ -4084,7 +5105,7 @@ function compareVersions(a, b) {
 }
 function detectPackageManager() {
   try {
-    const pnpmList = (0, import_child_process4.execSync)("pnpm list -g @devpilot.sh/cli 2>/dev/null", {
+    const pnpmList = (0, import_child_process5.execSync)("pnpm list -g @devpilot.sh/cli 2>/dev/null", {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"]
     });
@@ -4092,7 +5113,7 @@ function detectPackageManager() {
   } catch {
   }
   try {
-    const yarnList = (0, import_child_process4.execSync)("yarn global list 2>/dev/null", {
+    const yarnList = (0, import_child_process5.execSync)("yarn global list 2>/dev/null", {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"]
     });
@@ -4100,7 +5121,7 @@ function detectPackageManager() {
   } catch {
   }
   try {
-    (0, import_child_process4.execSync)("bun --version", { stdio: ["pipe", "pipe", "pipe"] });
+    (0, import_child_process5.execSync)("bun --version", { stdio: ["pipe", "pipe", "pipe"] });
     return "bun";
   } catch {
   }
@@ -4150,7 +5171,7 @@ var updateCommand = new import_commander16.Command("update").description("Update
   console.log("");
   try {
     const [cmd, ...args] = updateCmd.split(" ");
-    const child = (0, import_child_process4.spawn)(cmd, args, {
+    const child = (0, import_child_process5.spawn)(cmd, args, {
       stdio: "inherit",
       shell: true
     });
@@ -4180,26 +5201,26 @@ var updateCommand = new import_commander16.Command("update").description("Update
 
 // src/commands/wiki.ts
 var import_commander17 = require("commander");
-var import_fs8 = require("fs");
-var import_path9 = require("path");
+var import_fs9 = require("fs");
+var import_path10 = require("path");
 var import_chalk19 = __toESM(require("chalk"));
 var import_wave_planner = require("@devpilot.sh/core/wave-planner");
 var wikiCommand = new import_commander17.Command("wiki").description("LLM-compiled knowledge base \u2014 institutional memory for your codebase");
 wikiCommand.command("init").description("Initialize the wiki system in the current repository").option("--wiki-dir <path>", "Wiki output directory", ".devpilot/wiki").action(async (options) => {
   const cwd = process.cwd();
-  const devpilotDir = (0, import_path9.join)(cwd, ".devpilot");
-  const wikiDir = (0, import_path9.join)(cwd, options.wikiDir);
-  if (!(0, import_fs8.existsSync)(devpilotDir)) {
+  const devpilotDir = (0, import_path10.join)(cwd, ".devpilot");
+  const wikiDir = (0, import_path10.join)(cwd, options.wikiDir);
+  if (!(0, import_fs9.existsSync)(devpilotDir)) {
     console.log(
       import_chalk19.default.yellow("\u26A0\uFE0F  DevPilot not initialized. Run `devpilot init` first.")
     );
     return;
   }
-  if (!(0, import_fs8.existsSync)(wikiDir)) {
-    (0, import_fs8.mkdirSync)(wikiDir, { recursive: true });
+  if (!(0, import_fs9.existsSync)(wikiDir)) {
+    (0, import_fs9.mkdirSync)(wikiDir, { recursive: true });
   }
-  const indexPath = (0, import_path9.join)(wikiDir, "index.md");
-  if (!(0, import_fs8.existsSync)(indexPath)) {
+  const indexPath = (0, import_path10.join)(wikiDir, "index.md");
+  if (!(0, import_fs9.existsSync)(indexPath)) {
     const initialIndex = `# Wiki Index
 
 > Auto-generated wiki \u2014 compiled from session logs, commits, specs, and decisions.
@@ -4214,11 +5235,11 @@ This wiki will grow automatically as you work with DevPilot:
 
 Run \`devpilot wiki ingest\` to manually add sources, or let the session hook capture knowledge automatically.
 `;
-    (0, import_fs8.writeFileSync)(indexPath, initialIndex);
+    (0, import_fs9.writeFileSync)(indexPath, initialIndex);
   }
-  const logPath = (0, import_path9.join)(wikiDir, "log.md");
-  if (!(0, import_fs8.existsSync)(logPath)) {
-    (0, import_fs8.writeFileSync)(
+  const logPath = (0, import_path10.join)(wikiDir, "log.md");
+  if (!(0, import_fs9.existsSync)(logPath)) {
+    (0, import_fs9.writeFileSync)(
       logPath,
       `# Wiki Activity Log
 
@@ -4228,9 +5249,9 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
 `
     );
   }
-  const gitignorePath = (0, import_path9.join)(cwd, ".gitignore");
-  if ((0, import_fs8.existsSync)(gitignorePath)) {
-    const gitignore = (0, import_fs8.readFileSync)(gitignorePath, "utf-8");
+  const gitignorePath = (0, import_path10.join)(cwd, ".gitignore");
+  if ((0, import_fs9.existsSync)(gitignorePath)) {
+    const gitignore = (0, import_fs9.readFileSync)(gitignorePath, "utf-8");
     if (!gitignore.includes(".devpilot/wiki")) {
     }
   }
@@ -4258,13 +5279,13 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
 wikiCommand.command("ingest").description("Ingest a source document into the wiki").requiredOption("--type <type>", "Source type: session_log, commit, spec, decision, manual").requiredOption("--title <title>", "Human-readable title for the source").option("--file <path>", "Path to source file").option("--stdin", "Read source from stdin").option("--origin <origin>", "Origin identifier (e.g. session ID, commit SHA)").action(async (options) => {
   let content;
   if (options.file) {
-    if (!(0, import_fs8.existsSync)(options.file)) {
+    if (!(0, import_fs9.existsSync)(options.file)) {
       console.log(import_chalk19.default.red(`\u274C File not found: ${options.file}`));
       return;
     }
-    content = (0, import_fs8.readFileSync)(options.file, "utf-8");
+    content = (0, import_fs9.readFileSync)(options.file, "utf-8");
   } else if (options.stdin) {
-    content = (0, import_fs8.readFileSync)(0, "utf-8");
+    content = (0, import_fs9.readFileSync)(0, "utf-8");
   } else {
     console.log(
       import_chalk19.default.red("\u274C Provide either --file <path> or --stdin")
@@ -4531,7 +5552,7 @@ function getWikiConfig() {
     model: (0, import_wave_planner.resolveWikiModel)(),
     maxTokens: parseInt(process.env.WIKI_MAX_TOKENS || "8192", 10),
     repo: getRepoName(cwd),
-    wikiDir: (0, import_path9.join)(cwd, ".devpilot", "wiki")
+    wikiDir: (0, import_path10.join)(cwd, ".devpilot", "wiki")
   };
 }
 function getRepoName(cwd) {

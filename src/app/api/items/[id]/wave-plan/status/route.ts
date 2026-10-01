@@ -106,22 +106,33 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
       }
     }
 
-    // If pausing or aborting, update running tasks
-    if (action === 'pause' || action === 'abort') {
+    /**
+     * A PAUSE LEAVES IN-FLIGHT TASKS ALONE.
+     *
+     * This used to reset every `dispatched` and `running` task to `pending`.
+     * Nothing stopped their agents — pausing is a status on a row, and no
+     * request goes to the runner — so the agents carried on, and on resume the
+     * same tasks, now `pending`, were dispatched again: two agents on one
+     * task, the second starting on whatever the first had half written.
+     *
+     * Paused means nothing NEW is dispatched, which the plan's status alone
+     * guarantees (the dispatch claim requires an `executing` plan). The tasks
+     * already with an agent stay as they are and report when they finish;
+     * `WaveExecutionController.pause` has always worked this way.
+     *
+     * An abort still marks them `skipped`, as before.
+     */
+    if (action === 'abort') {
       const runningTaskIds = wavePlan.waves
         .flatMap((w: WaveWithTasks) => w.tasks)
         .filter((t: WaveTask) => t.status === 'running' || t.status === 'dispatched')
         .map((t: WaveTask) => t.id);
 
-      if (runningTaskIds.length > 0) {
-        for (const taskId of runningTaskIds) {
-          await db
-            .update(waveTasks)
-            .set({
-              status: action === 'abort' ? 'skipped' : 'pending',
-            })
-            .where(eq(waveTasks.id, taskId));
-        }
+      for (const taskId of runningTaskIds) {
+        await db
+          .update(waveTasks)
+          .set({ status: 'skipped' })
+          .where(eq(waveTasks.id, taskId));
       }
     }
 
@@ -206,7 +217,9 @@ function getStatusTransition(
       if (currentStatus === 'paused') {
         return {
           newStatus: 'executing',
-          updateData: {},
+          // A plan held at start-up as too old to pick up carries the reason
+          // it was paused; resuming it is the answer to that.
+          updateData: { failureReason: null },
         };
       }
       return null;

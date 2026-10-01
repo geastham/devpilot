@@ -301,13 +301,6 @@ declare function loadOwnedSessionIds(path?: string): Set<string>;
  * rather than shown. Reserve the character before cutting.
  */
 declare function condenseTitle(text: string, max: number): string;
-/**
- * The title used when no model call is made.
- *
- * The client's own `custom-title` is genuinely good — the reference transcript
- * carries `"DevPilot: Claude Code Bootstrap"` — which is why the heuristic tier
- * is a floor rather than a degraded mode (TRD 21 §6.4).
- */
 declare function heuristicTitle(observation: SessionObservation): string;
 /**
  * Walk `~/.claude/projects` and classify everything in it.

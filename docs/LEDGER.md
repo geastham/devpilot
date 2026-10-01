@@ -84,8 +84,19 @@ Compiles, tests pass, nobody has watched it work.
 - **The planning half of the conductor** — `generate` / `refine` / `score` through
   the graph against the real API. No `ANTHROPIC_API_KEY` in this environment;
   every test substitutes the planner. The live run *adopted* an approved plan.
-- **Restart resumption.** Checkpoints persist to `<db>.checkpoints.db`; no run
-  has been interrupted by an actual process restart and resumed.
+- **Restart resumption, and everything about how a run advances, fails and
+  recovers (2026-10-01 entry).** One driver per plan, idempotent dispatch, real
+  caps, fail-twice ending the run, the reconciler. Tests pass and a scripted run
+  across three real process restarts resumed from its checkpoint each time —
+  with a fake session runner. **No live agent has been involved in any of it.**
+- **Isolation through the cockpit (2026-10-01 entry).** A branch per task and a
+  merge per wave, driven by the conductor. A script ran the real routes, graph,
+  HTTP transport and session runner against a real scratch repository — two
+  waves to completion, a conflict retried from the merged head, a second
+  conflict and a checked-out run branch each failing the plan, a pause, a run
+  cut off mid-dispatch, and the stale-plan guard — with a **stub `claude`**.
+  The runner's isolation was run with real agents on its own
+  (`docs/SESSION-RUNNER.md`); the two have not been run together with one.
 - **The review interrupt END TO END.** The panel is wired and its no-key error
   path is verified in a browser, but approve/refine/reject have never driven a
   real plan — that needs the API key (see MVP status).
@@ -164,6 +175,65 @@ stands. Kuzu confirmed archived. GrafeoDB added to the watchlist.
 
 Newest first. One line each — the detail belongs in the docs this points at.
 
+- **2026-10-01** — **A branch per task and a merge per wave, wired into
+  dispatch. Built; run end to end by script with a stub agent; not run with a
+  live one.** The runner could already isolate a task and merge a wave; nothing
+  asked it to. A wave plan now gets a run id and an isolated/not decision at its
+  first dispatch (from the runner's `/v1/health` capabilities, never
+  recomputed, reason recorded when it is no), each task is sent with
+  `isolation`, its branch/base/head/files are written from its completion
+  report, and a wave is merged — through one gate,
+  `WaveExecutionController.signalForDriver` — before any driver is told it is
+  over. A conflict fails that task by the ordinary retry-once rule; a merge that
+  cannot be done fails the plan with the runner's message.
+  `GET …/conductor` says where the work is (`outcome.isolation`).
+  Also: **a plan left `executing` more than 6h is paused at start-up instead of
+  resumed** (`DEVPILOT_RESUME_MAX_AGE_HOURS`); a run cut off mid-dispatch is
+  re-entered; a paused plan's tasks are not declared lost; pausing through
+  `/wave-plan/status` no longer resets in-flight tasks; the wave-plan generate
+  route loads the plan's tasks. **Found by the script, not by a test:** the
+  reconciler's timer inherited the async context of the graph node that first
+  started the orchestrator, so its resumes reported success and moved nothing.
+  Suites: core 27 files / 516, conductor-agent 21/21. Detail in
+  `docs/CONDUCTOR-AGENT.md` § Advancing, failing and recovering.
+  **Not relayed yet:** a successful run's summary to Linear does not name the
+  run branch — the watcher has no field for it.
+- **2026-10-01** — **How a multi-wave run advances, fails and recovers. Built;
+  not verified against a live agent.** Five defects, all found by reading and
+  by a real database, none by a test:
+  1. **Two components advanced waves.** The graph resumed and dispatched the
+     next wave; the `ExecutionBridge` did the same ~2s later, and neither
+     re-checked task status inside its loop. The bridge now takes a `WaveDriver`
+     and, for a plan the graph runs, records and notifies only. The unused third
+     path (`autoAdvanceWave`) is deleted.
+  2. **A task that failed twice hung the run forever.** The resume bridge did
+     not count `skipped` as terminal; where it did resume, the graph's wave
+     retry found nothing to dispatch, the port put the failed plan back to
+     `executing`, and the graph waited. Linear was never told. One terminal set
+     now (`wave-state.ts`); a failed plan ends the run at once with a recorded
+     reason; `GET …/conductor` reports it in the fields the watcher reads.
+  3. **A cockpit restart stranded in-flight tasks.** `markSessionComplete`
+     returned early when its in-memory mapping was gone. Six tasks sat
+     `dispatched` over `COMPLETE` sessions in a real database. Fixed, plus a
+     reconciler (at start and every 60s) for the reports that never arrive.
+  4. **The concurrency caps capped nothing.** The global one counted `running`,
+     a status never set — `job:started` fired before the task was linked to its
+     session; zero `WAVE_TASK_DISPATCHED` across 26 dispatches. The per-plan one
+     was a batch size. Both are now enforced inside the dispatch claim.
+  5. **A wave's start time was reset by every backfill pass**, and a task's by
+     every retry. `startedAt` is now the first attempt's; `last_attempt_at` is
+     the current one's.
+  Dispatch is a conditional `UPDATE` per task, so it is idempotent whoever
+  calls it. Also: critical-path tasks dispatch first, `collectFinalMetrics` is
+  finally called, an adopted run no longer reports `planning` for its whole
+  life, and a refused dispatch now applies the failure policy.
+  Suites: core 24 files green, conductor-agent 21/21. Detail in
+  `docs/CONDUCTOR-AGENT.md` § Advancing, failing and recovering.
+  **Read before the first start after upgrading:** the reconciler acts on rows
+  older builds left behind and can resume a suspended run, dispatching real
+  agents. `DEVPILOT_RECONCILE=false` holds it off. *(Since the entry above: only
+  a plan active in the last six hours is resumed; an older one is paused with
+  the reason and waits for a person.)*
 - **2026-08-16** — Demo-path fixes: built `ConductorReviewPanel` (the Review Plan
   button was dead — a flag nothing rendered), and terminal sessions now show in
   Fleet Status. Surfacing them exposed two more: completed sessions rendered

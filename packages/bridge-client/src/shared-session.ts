@@ -30,7 +30,9 @@
 import {
   sessionCrypto,
   parseJoinLink,
+  buildJoinLink,
   JOIN_PROOF_HEADER,
+  SESSION_LIMITS,
   formatApiError,
   type SessionMessage,
   type SessionParticipant,
@@ -38,6 +40,38 @@ import {
   type SessionMessageKind,
 } from '@devpilot.sh/bridge-protocol';
 import { BridgeError } from './client';
+
+type ParticipantOptions = Pick<
+  SharedSessionJoinOptions,
+  'displayName' | 'kind' | 'agentKind' | 'orchestratorId' | 'fetchImpl'
+>;
+
+export interface SharedSessionCreateOptions extends ParticipantOptions {
+  /** Bridge base URL, e.g. `https://devpilot.sh`. */
+  baseUrl: string;
+  /** Machine token (`dp_orch_…`). The session is created in that token's org. */
+  token: string;
+  /** Stored in plaintext — it is the list label. No secrets. */
+  title: string;
+  linearIdentifier?: string;
+  /**
+   * `observe` unless asked otherwise (TRD 06 §3.3, DECISION A). `auto` is
+   * always bounded: omitted bounds take the protocol defaults, never infinity.
+   */
+  mode?: 'observe' | 'relay' | 'auto';
+  autoBudget?: number;
+  autoTtlMinutes?: number;
+}
+
+/**
+ * `devpilot.sh/s/<id>#k=…` is how a link gets written in a chat message, and
+ * it used to fail: the base URL was whatever preceded `/s/`, which without a
+ * scheme is not something `fetch` will accept.
+ */
+function baseUrlOf(link: string): string {
+  const base = link.slice(0, link.indexOf('/s/')).replace(/\/+$/, '');
+  return /^https?:\/\//i.test(base) ? base : `https://${base}`;
+}
 
 export interface SharedSessionJoinOptions {
   /** `https://devpilot.sh/s/<id>#k=<key>` — the fragment carries the key. */
@@ -100,8 +134,9 @@ export class SharedSessionClient {
 
   /** Joins by link. The key is taken from the fragment and kept in memory. */
   static async join(options: SharedSessionJoinOptions): Promise<SharedSessionClient> {
-    const { sessionId, key } = parseJoinLink(options.link);
-    const baseUrl = options.link.slice(0, options.link.indexOf('/s/')).replace(/\/+$/, '');
+    const link = options.link.trim();
+    const { sessionId, key } = parseJoinLink(link);
+    const baseUrl = baseUrlOf(link);
     const fetchImpl = options.fetchImpl ?? globalThis.fetch;
 
     const joinOptions = {
@@ -129,6 +164,83 @@ export class SharedSessionClient {
       joinOptions,
       fetchImpl,
     });
+  }
+
+  /**
+   * Creates a session, joins it, and returns the link — the path that lets an
+   * agent START a shared session instead of only being handed one.
+   *
+   * The key is generated here. What reaches the bridge is sha256(verifier), a
+   * separate HKDF branch that can neither join nor decrypt, exactly as
+   * `devpilot session new` does it. The returned `link` is the only place the
+   * key appears outside this instance, and the caller is responsible for where
+   * it goes next: it is a credential, not a status string.
+   */
+  static async create(
+    options: SharedSessionCreateOptions,
+  ): Promise<{ client: SharedSessionClient; link: string }> {
+    const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+    const baseUrl = options.baseUrl.replace(/\/+$/, '');
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${options.token}`,
+    };
+
+    const key = sessionCrypto.generateKey();
+    const { joinKeyHash } = await sessionCrypto.deriveJoinCredentials(key);
+
+    const created = await fetchImpl(`${baseUrl}/api/sessions/shared`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        title: options.title,
+        joinKeyHash,
+        ...(options.linearIdentifier ? { linearIdentifier: options.linearIdentifier } : {}),
+      }),
+    });
+    if (!created.ok) {
+      const body = await created.json().catch(() => null);
+      throw new BridgeError(
+        formatApiError(body, `Could not create the session: ${created.status}`),
+        created.status,
+      );
+    }
+    const { session } = (await created.json()) as { session: SharedSession };
+
+    const mode = options.mode ?? 'observe';
+    if (mode !== 'observe') {
+      const res = await fetchImpl(`${baseUrl}/api/sessions/shared/${session.id}/mode`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          mode,
+          ...(mode === 'auto'
+            ? {
+                autoBudget: options.autoBudget ?? SESSION_LIMITS.autoDefaultBudget,
+                autoTtlMinutes: options.autoTtlMinutes ?? SESSION_LIMITS.autoDefaultTtlMinutes,
+              }
+            : {}),
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new BridgeError(
+          formatApiError(body, `Created the session but could not set it to ${mode}: ${res.status}`),
+          res.status,
+        );
+      }
+    }
+
+    const link = buildJoinLink(baseUrl, session.id, key);
+    const client = await SharedSessionClient.join({
+      link,
+      displayName: options.displayName,
+      kind: options.kind,
+      agentKind: options.agentKind,
+      orchestratorId: options.orchestratorId,
+      fetchImpl,
+    });
+    return { client, link };
   }
 
   static async #requestJoin(
@@ -271,6 +383,34 @@ export class SharedSessionClient {
 
     const entries = await Promise.all(page.messages.map((m) => this.#decode(m)));
     return { entries, latestSeq: page.latestSeq, hasMore: page.hasMore };
+  }
+
+  /**
+   * Blocks until something new arrives, or the timeout passes.
+   *
+   * An agent waiting for a reply has two bad options without this: ask its
+   * model to call `read` in a loop, which spends a turn — and the whole
+   * context that rides along with it — on every empty poll, or stop and wait
+   * for a person to nudge it. Waiting here costs HTTP requests and no tokens.
+   *
+   * Resolves with an empty page on timeout; that is an answer, not an error.
+   */
+  async wait(
+    since: number,
+    opts: { timeoutMs?: number; intervalMs?: number; signal?: AbortSignal } = {},
+  ): Promise<{ entries: TranscriptEntry[]; latestSeq: number; hasMore: boolean; timedOut: boolean }> {
+    const timeoutMs = opts.timeoutMs ?? 45_000;
+    const intervalMs = Math.max(250, opts.intervalMs ?? 2_000);
+    const deadline = Date.now() + timeoutMs;
+
+    for (;;) {
+      const page = await this.read(since);
+      if (page.entries.length > 0) return { ...page, timedOut: false };
+      if (opts.signal?.aborted || Date.now() + intervalMs > deadline) {
+        return { ...page, latestSeq: Math.max(page.latestSeq, since), timedOut: true };
+      }
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
   }
 
   async #decode(m: SessionMessage): Promise<TranscriptEntry> {

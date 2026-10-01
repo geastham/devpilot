@@ -34,7 +34,8 @@ generate ─▶ score gate ─┬─(below threshold, budget left)─▶ refine 
                                     ▼
                                 dispatch ─▶ awaitWave ─┬─(ok)─▶ advance ─┬─(more)─▶ dispatch
                                     ▲                  │                 └─(none)─▶ finish
-                                    └──(retry)─────────┴─(failed)─▶ fail
+                                    ├──(retry)─────────┼─(failed)─▶ fail
+                                    └──(in-flight)─────┘
 ```
 
 ---
@@ -54,7 +55,7 @@ const graph = createConductorGraph({
     dispatchWave: async (id, i) => myDispatcher(id, i),
     // waitForWave omitted → the graph interrupts and you resume it
   },
-  config: { minParallelizationScore: 70, maxRefinementIterations: 3 },
+  config: { minParallelizationScore: 0.7, maxRefinementIterations: 3 },
   checkpointer: new MemorySaver(),
 });
 
@@ -97,17 +98,42 @@ A wave is a fleet of coding agents that may run for hours. Two options:
 - **Provide `waitForWave`** for tests or short synchronous runs, where holding a
   promise open is fine.
 
+Either way the answer is one of three:
+
+| Outcome | The graph |
+|---|---|
+| `{ state: 'complete' }` | advances to the next wave, or finishes |
+| `{ state: 'failed', failures }` | retries the wave (`waveRetryLimit`), then applies `failurePolicy` |
+| `{ state: 'in-flight' }` | calls `dispatchWave` for the **same** wave again and goes back to waiting |
+
+`in-flight` is how a wave larger than your concurrency cap gets drained, and how
+a task you have marked for retry gets re-sent, without your host dispatching on
+the side: the graph stays the only thing that starts agents. It consumes no
+retry. Because of it — and because of wave retries — **`dispatchWave` must be
+idempotent**: a task already with an agent must not be sent to a second one.
+
+If a wave is already over when `dispatchWave` returns (nothing was dispatchable,
+or every task was refused), return `settled` with the outcome and the graph acts
+on it instead of waiting for a report that will never come.
+
+## Knowing a run ended
+
+Implement the optional `endRun(wavePlanId, result)` port to be told once when a
+run with a persisted plan reaches `finish` or `fail` —
+`{ status: 'complete' }` or `{ status: 'failed', reason }`. The graph's state
+says the same thing, but your other readers probably do not read checkpoints.
+
 ---
 
 ## Config
 
 | Option | Default | Meaning |
 |---|---|---|
-| `minParallelizationScore` | `70` | Refinement stops once the score reaches this |
+| `minParallelizationScore` | `0.7` | Refinement stops once the score reaches this. A ratio in [0, 1], like the score it is compared with |
 | `maxRefinementIterations` | `3` | Hard cap on refinement passes |
 | `requireReview` | `true` | `false` dispatches a plan no human has seen |
 | `failurePolicy` | `'halt'` | `'continue'` advances past a failed wave |
-| `waveRetryLimit` | `1` | Re-dispatch attempts before the policy applies |
+| `waveRetryLimit` | `1` | Re-dispatch attempts before the policy applies. Set `0` if your host retries failed tasks itself |
 
 ---
 

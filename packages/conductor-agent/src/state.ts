@@ -1,5 +1,5 @@
 import { Annotation } from '@langchain/langgraph';
-import type { PlanScoreShape, WavePlanShape } from './types';
+import type { PlanScoreShape, WaveOutcome, WavePlanShape } from './types';
 
 /**
  * The conductor's state channel.
@@ -63,6 +63,21 @@ export const ConductorState = Annotation.Root({
    * that ambiguity hid a real bug where every task was silently queued.
    */
   lastDispatch: Annotation<{ dispatched: number; queued: number } | null>({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
+  /**
+   * The current wave's most recent answer, and what the branch after a wave
+   * reads.
+   *
+   * `dispatch` writes it: the outcome when the wave was already over as
+   * dispatch returned, otherwise null ("ask"). `awaitWave` then writes whatever
+   * it was told. A channel rather than a local because the two are separate
+   * nodes with a checkpoint between them, and because `in-flight` has to
+   * survive from `awaitWave` to the next `dispatch` for that pass to know it is
+   * a backfill.
+   */
+  waveSignal: Annotation<WaveOutcome | null>({
     reducer: (_prev, next) => next,
     default: () => null,
   }),

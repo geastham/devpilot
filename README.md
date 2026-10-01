@@ -179,8 +179,7 @@ DevPilot dispatches through an orchestrator adapter. Point it at an agent runner
 a local orchestrator — see **[docs/AO-INTEGRATION.md](docs/AO-INTEGRATION.md)** — and mirror
 horizon items into Linear tickets via the hosted bridge in
 **[docs/LINEAR-BRIDGE.md](docs/LINEAR-BRIDGE.md)**. Copy `.env.example` to `.env` for API
-keys. Optional: [RTK](https://github.com/rtk-ai/rtk) proxies agent traffic for large token
-savings.
+keys.
 
 </details>
 

@@ -272,3 +272,240 @@ describe('relativeAge', () => {
     expect(relativeAge('2026-08-22T12:00:00.000Z', now)).toBe('—');
   });
 });
+
+/**
+ * The instrument reading an observed session sends up.
+ *
+ * Nearly every session on a real fleet is an observed one, so what this sends
+ * is what the hosted efficiency readings are made of.
+ */
+describe('AdoptionWatcher telemetry', () => {
+  const CWD = '/home/dev/acme/widget';
+  let telemetry: Record<string, unknown>[] = [];
+  let n = 0;
+
+  function streamingClient() {
+    return {
+      reportSessionStatus: vi.fn(async () => {}),
+      reportSessionComplete: vi.fn(async () => {}),
+      streamEvents: vi.fn(async () => true),
+      reportTelemetry: vi.fn(async (_id: string, body: Record<string, unknown>) => {
+        telemetry.push(body);
+        return true;
+      }),
+    } as never;
+  }
+
+  function reply(id: string, blocks: unknown[], at = 0): string {
+    return (
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: new Date(1_700_000_000_000 + at * 1000).toISOString(),
+        message: {
+          id,
+          usage: {
+            input_tokens: 10,
+            output_tokens: 200,
+            cache_read_input_tokens: 5_000,
+            cache_creation_input_tokens: 300,
+          },
+          content: blocks,
+        },
+      }) + '\n'
+    );
+  }
+
+  const edit = (file: string) => ({ type: 'tool_use', name: 'Edit', input: { file_path: `${CWD}/${file}` } });
+
+  function setup(content: string) {
+    telemetry = [];
+    const path = join(workspace, `tel-${n}.jsonl`);
+    writeFileSync(path, content, 'utf8');
+    const watcher = new AdoptionWatcher({
+      client: streamingClient(),
+      statePath: join(workspace, `tel-state-${n++}.json`),
+    });
+    watcher.track(entry({ transcriptPath: path, cwd: CWD }));
+    return { watcher, path };
+  }
+
+  /** Append and move mtime forward, so the watcher sees growth without waiting. */
+  function grow(path: string, content: string, aheadS: number) {
+    writeFileSync(path, readFileSync(path, 'utf8') + content, 'utf8');
+    const when = Date.now() / 1000 + aheadS;
+    utimesSync(path, when, when);
+  }
+
+  it('reports tokens, counted once per response', async () => {
+    const { watcher } = setup(reply('msg_1', [{ type: 'text', text: 'on it' }]) + reply('msg_1', [edit('a.ts')]));
+    await watcher.sweep();
+    watcher.stop();
+
+    expect(telemetry).toHaveLength(1);
+    expect(telemetry[0]).toMatchObject({
+      tokensIn: 10,
+      tokensOut: 200,
+      tokensCacheRead: 5_000,
+      tokensCacheWrite: 300,
+      turns: 1,
+      // Our arithmetic, never presented as a bill.
+      costEstimated: true,
+    });
+  });
+
+  it('reports every file the session changed, not just the last batch', async () => {
+    const { watcher, path } = setup(reply('msg_1', [edit('a.ts')]));
+    await watcher.sweep();
+    grow(path, reply('msg_2', [edit('b.ts')], 5), 10);
+    await watcher.sweep();
+    watcher.stop();
+
+    expect(telemetry.at(-1)?.filesTouched).toEqual(['a.ts', 'b.ts']);
+  });
+
+  it('keeps saying what the session is doing when a turn only spends tokens', async () => {
+    const { watcher, path } = setup(reply('msg_1', [edit('src/a.ts')]));
+    await watcher.sweep();
+    // A response with no tool call: nothing to stream, tokens still spent.
+    grow(path, reply('msg_2', [{ type: 'text', text: 'thinking' }], 5), 10);
+    await watcher.sweep();
+    watcher.stop();
+
+    expect(telemetry).toHaveLength(2);
+    expect(telemetry[1].tokensOut).toBe(400);
+    // The hosted row is replaced whole; a blank here would erase the line.
+    expect(telemetry[1].currentAction).toBe(telemetry[0].currentAction);
+    expect(telemetry[1].currentAction).toBe('Edit · src/a.ts');
+  });
+
+  /**
+   * The tailer advances its read position as it derives. A batch that failed to
+   * land used to be gone for good, under a log line promising to catch up.
+   */
+  it('sends a batch again when it did not land, even if the file never grows', async () => {
+    telemetry = [];
+    const path = join(workspace, `tel-${n}.jsonl`);
+    writeFileSync(path, reply('msg_1', [edit('a.ts')]), 'utf8');
+
+    const batches: number[][] = [];
+    let fail = true;
+    const flaky = {
+      reportSessionStatus: vi.fn(async () => {}),
+      reportSessionComplete: vi.fn(async () => {}),
+      streamEvents: vi.fn(async (_id: string, events: { seq: number }[]) => {
+        batches.push(events.map((e) => e.seq));
+        const ok = !fail;
+        fail = false;
+        return ok;
+      }),
+      reportTelemetry: vi.fn(async (_id: string, body: Record<string, unknown>) => {
+        telemetry.push(body);
+        return true;
+      }),
+    } as never;
+
+    const watcher = new AdoptionWatcher({
+      client: flaky,
+      statePath: join(workspace, `tel-state-${n++}.json`),
+    });
+    watcher.track(entry({ transcriptPath: path, cwd: CWD }));
+
+    await watcher.sweep();
+    expect(telemetry, 'a reading must not be sent for events that did not land').toHaveLength(0);
+
+    await watcher.sweep();
+    watcher.stop();
+
+    // Same ordinals both times: the hosted side treats the second as a no-op
+    // for anything that did arrive.
+    expect(batches).toEqual([[0], [0]]);
+    expect(telemetry).toHaveLength(1);
+    expect(telemetry[0].toolCalls).toBe(1);
+  });
+
+  /**
+   * Found against a real bridge: the hosted side refused the reading (a column
+   * it had not migrated yet), the events had already landed, and the session
+   * then sat with stale dials until it next did something.
+   */
+  it('sends the reading again when only the reading failed, without re-sending events', async () => {
+    telemetry = [];
+    const path = join(workspace, `tel-${n}.jsonl`);
+    writeFileSync(path, reply('msg_1', [edit('a.ts')]), 'utf8');
+
+    const batches: number[][] = [];
+    let refuse = true;
+    const flaky = {
+      reportSessionStatus: vi.fn(async () => {}),
+      reportSessionComplete: vi.fn(async () => {}),
+      streamEvents: vi.fn(async (_id: string, events: { seq: number }[]) => {
+        batches.push(events.map((e) => e.seq));
+        return true;
+      }),
+      reportTelemetry: vi.fn(async (_id: string, body: Record<string, unknown>) => {
+        if (refuse) {
+          refuse = false;
+          return false;
+        }
+        telemetry.push(body);
+        return true;
+      }),
+    } as never;
+
+    const watcher = new AdoptionWatcher({
+      client: flaky,
+      statePath: join(workspace, `tel-state-${n++}.json`),
+    });
+    watcher.track(entry({ transcriptPath: path, cwd: CWD }));
+
+    await watcher.sweep();
+    await watcher.sweep();
+    watcher.stop();
+
+    // The events went once; only the reading was repeated.
+    expect(batches).toEqual([[0]]);
+    expect(telemetry).toHaveLength(1);
+    expect(telemetry[0]).toMatchObject({ toolCalls: 1, tokensOut: 200 });
+  });
+
+  it('carries no field that could hold content', async () => {
+    const { watcher } = setup(reply('msg_1', [edit('a.ts')]));
+    await watcher.sweep();
+    watcher.stop();
+
+    expect(Object.keys(telemetry[0]).sort()).toEqual([
+      'costEstimated',
+      'costUsd',
+      'currentAction',
+      'elapsedMs',
+      'filesTouched',
+      'idleMs',
+      'tokensCacheRead',
+      'tokensCacheWrite',
+      'tokensIn',
+      'tokensOut',
+      'toolCalls',
+      'turns',
+      'writeCalls',
+    ]);
+  });
+
+  it('names the model, so sessions on different models are not compared as one', async () => {
+    const withModel =
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: new Date(1_700_000_000_000).toISOString(),
+        message: {
+          id: 'msg_1',
+          model: 'claude-opus-5[1m]',
+          usage: { output_tokens: 200, cache_read_input_tokens: 5_000 },
+          content: [edit('a.ts')],
+        },
+      }) + '\n';
+    const { watcher } = setup(withModel);
+    await watcher.sweep();
+    watcher.stop();
+
+    expect(telemetry[0].model).toBe('claude-opus-5');
+  });
+});

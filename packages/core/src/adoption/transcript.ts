@@ -67,12 +67,16 @@ const LARGE_LINE_BYTES = 128 * 1024;
 
 /**
  * Markers identifying a session DevPilot itself started (TRD 21 §4.4,
- * mechanism 2). These strings come from `session-prompt.ts`, which composes the
- * callback instructions; they are stable because changing them would break the
- * callback contract itself.
+ * mechanism 2). These strings come from `session-prompt.ts`.
  *
- * This is the fallback for sessions predating the owned-session ledger. Neither
- * mechanism is load-bearing alone.
+ * The second appears only in the callback instructions, which a prompt carries
+ * only when the agent reports for itself. The first is in every prompt: where
+ * the runner reports instead, `session-prompt.ts` still states the session id
+ * in these words, and `session-prompt.test.ts` holds it to that.
+ *
+ * This is the fallback for sessions predating the owned-session ledger, and
+ * the only mechanism for a session still running — the ledger is written when
+ * a run ends.
  */
 const DEVPILOT_PROMPT_MARKERS = [
   'DevPilot session id is',

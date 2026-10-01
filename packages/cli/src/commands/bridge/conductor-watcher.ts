@@ -72,7 +72,47 @@ export interface ConductorState {
     filesChanged?: string[];
     costUsd?: number;
     failures?: { taskCode: string; error: string }[];
+    /**
+     * Why the plan is paused when nobody paused it — it was left executing and
+     * had been idle too long to pick up when the cockpit restarted. Null, or
+     * absent on an older cockpit, otherwise.
+     */
+    pausedReason?: string | null;
+    /**
+     * Where the run's work is. `summary` is one sentence naming the run branch
+     * and saying it has not been pushed; it is the only part of this relayed
+     * outward, and it carries a branch name and a short sha — nothing else.
+     * Null, or absent, when nothing has been dispatched or the cockpit
+     * predates per-task branches.
+     */
+    isolation?: {
+      isolated?: boolean;
+      summary?: string | null;
+      reason?: string | null;
+    } | null;
   } | null;
+}
+
+/**
+ * One paragraph saying where a finished run's work is, or '' when the cockpit
+ * did not say.
+ *
+ * "DevPilot finished 6 tasks" is the sentence after which a person asks "where
+ * is it?", and until this was added the answer was nowhere in what Linear was
+ * told. There are two answers and they are opposites: an isolated run leaves a
+ * local branch and nothing in the operator's checkout; a run that could not be
+ * isolated leaves uncommitted edits IN the checkout and no branch. Saying
+ * neither would let a reader assume whichever they expected.
+ */
+function whereTheWorkIs(state: ConductorState): string {
+  const isolation = state.outcome?.isolation;
+  if (!isolation) return '';
+  if (isolation.isolated) return isolation.summary ? `\n\n${isolation.summary}` : '';
+  return (
+    '\n\nThis run was not given a branch per task' +
+    (isolation.reason ? ` (${isolation.reason})` : '') +
+    ', so its changes are uncommitted edits in the checkout on the machine that ran it.'
+  );
 }
 
 /**
@@ -99,6 +139,23 @@ function progressReport(
           : 'Review it in the cockpit to dispatch') +
         `, or reply here with constraints to re-plan. Awaiting review.`,
       percent: 40,
+    };
+  }
+
+  /**
+   * A plan the cockpit is holding. Said once, with the reason, because the
+   * alternative is a ticket that reads "Wave 2 — 3/6 tasks done" for ever: the
+   * run is not failing and not finishing, and only this says why. It is not
+   * terminal — resuming it from the cockpit carries on — so it is reported as
+   * progress and the run stays watched.
+   */
+  const pausedReason = state.outcome?.pausedReason;
+  if (pausedReason) {
+    const done = state.completedWaves?.length ?? 0;
+    return {
+      signature: `paused:${pausedReason}`,
+      message: `Run paused — ${pausedReason}`,
+      percent: Math.min(60 + done * 15, 95),
     };
   }
 
@@ -201,9 +258,11 @@ function successSummary(state: ConductorState): string {
     // Only claim "nothing changed" when the cockpit actually told us. Absent
     // data and an empty result are different facts, and reporting the first as
     // the second would send a reviewer hunting a problem that may not exist.
-    return o.filesChanged
-      ? `${head}\n\n**No files were changed.** Worth checking whether the plan matched the intent.`
-      : head;
+    return (
+      (o.filesChanged
+        ? `${head}\n\n**No files were changed.** Worth checking whether the plan matched the intent.`
+        : head) + whereTheWorkIs(state)
+    );
   }
 
   const shown = files.slice(0, MAX_LISTED_FILES).map((f) => `- \`${f}\``);
@@ -212,7 +271,10 @@ function successSummary(state: ConductorState): string {
       ? `\n- …and ${files.length - MAX_LISTED_FILES} more`
       : '';
 
-  return `${head}\n\n**${files.length} file${files.length === 1 ? '' : 's'} changed**\n${shown.join('\n')}${more}`;
+  return (
+    `${head}\n\n**${files.length} file${files.length === 1 ? '' : 's'} changed**\n${shown.join('\n')}${more}` +
+    whereTheWorkIs(state)
+  );
 }
 
 function failureSummary(state: ConductorState): string {
@@ -229,9 +291,11 @@ function failureSummary(state: ConductorState): string {
   // code and its error sends them to the problem.
   if (failures.length > 0) {
     const lines = failures.slice(0, 5).map((f) => `- **${f.taskCode}** — ${f.error}`);
-    return `${head}\n\n**Failed tasks**\n${lines.join('\n')}`;
+    return `${head}\n\n**Failed tasks**\n${lines.join('\n')}` + whereTheWorkIs(state);
   }
-  return last ? `${head}\n\n${last}` : head;
+  // A failed run still did work, and what completed before it failed is
+  // somewhere: the same sentence applies.
+  return (last ? `${head}\n\n${last}` : head) + whereTheWorkIs(state);
 }
 
 export class ConductorWatcher {
@@ -332,6 +396,7 @@ export class ConductorWatcher {
           currentWorkstream?: string;
           telemetry?: {
             toolCalls?: number;
+            writeCalls?: number;
             filesTouched?: string[];
             lastAction?: { tool: string; path?: string };
             commands?: string[];
@@ -339,7 +404,11 @@ export class ConductorWatcher {
             costIsEstimate?: boolean;
             tokensIn?: number;
             tokensOut?: number;
+            tokensCacheRead?: number;
+            tokensCacheWrite?: number;
             turns?: number;
+            model?: string;
+            harness?: string;
             elapsedMs?: number;
             idleMs?: number;
           } | null;
@@ -353,7 +422,18 @@ export class ConductorWatcher {
 
       const files = new Set<string>();
       let toolCalls = 0;
+      let writeCalls = 0;
       let costUsd = 0;
+      // Summed across the run's agents, like cost. These were tracked by every
+      // session runner and dropped here, so a dispatched run reached the hosted
+      // plane with its tokens blank.
+      const tokens = { in: 0, out: 0, cacheRead: 0, cacheWrite: 0, turns: 0 };
+      let sawTokens = false;
+      // One run, one harness: the runner applies the same profile to every
+      // agent it launches. Models can differ per task, so the run is named
+      // for whichever did the most work.
+      let harness: string | undefined;
+      const modelTokens = new Map<string, number>();
       let estimated = false;
       let elapsedMs = 0;
       let idleMs = Number.MAX_SAFE_INTEGER;
@@ -363,7 +443,20 @@ export class ConductorWatcher {
         const t = s.telemetry;
         if (!t) continue;
         toolCalls += t.toolCalls ?? 0;
+        writeCalls += t.writeCalls ?? 0;
         costUsd += t.costUsd ?? 0;
+        if (typeof t.tokensIn === 'number' || typeof t.tokensOut === 'number') sawTokens = true;
+        tokens.in += t.tokensIn ?? 0;
+        tokens.out += t.tokensOut ?? 0;
+        tokens.cacheRead += t.tokensCacheRead ?? 0;
+        tokens.cacheWrite += t.tokensCacheWrite ?? 0;
+        tokens.turns += t.turns ?? 0;
+        harness ??= t.harness;
+        if (t.model) {
+          const size =
+            (t.tokensIn ?? 0) + (t.tokensOut ?? 0) + (t.tokensCacheRead ?? 0) + (t.tokensCacheWrite ?? 0);
+          modelTokens.set(t.model, (modelTokens.get(t.model) ?? 0) + size);
+        }
         estimated = estimated || Boolean(t.costIsEstimate);
         elapsedMs = Math.max(elapsedMs, t.elapsedMs ?? 0);
         // The LEAST idle agent decides: one busy agent means the run is not
@@ -374,7 +467,7 @@ export class ConductorWatcher {
           const file = t.lastAction.path?.split('/').slice(-1)[0];
           action =
             t.lastAction.tool === 'Bash'
-              ? (t.commands?.at(-1) ?? 'shell').split(/\s+/).slice(0, 3).join(' ')
+              ? programOf(t.commands?.at(-1))
               : `${t.lastAction.tool.toLowerCase()}${file ? ` ${file}` : ''}`;
         }
       }
@@ -383,10 +476,24 @@ export class ConductorWatcher {
 
       await this.opts.client.reportTelemetry(run.sessionId, {
         toolCalls,
+        writeCalls,
         filesTouched: [...files],
         currentAction: action,
         costUsd: costUsd > 0 ? costUsd : undefined,
         costEstimated: estimated,
+        ...(sawTokens
+          ? {
+              tokensIn: tokens.in,
+              tokensOut: tokens.out,
+              tokensCacheRead: tokens.cacheRead,
+              tokensCacheWrite: tokens.cacheWrite,
+              turns: tokens.turns || undefined,
+            }
+          : {}),
+        ...(harness ? { harness } : {}),
+        ...(modelTokens.size > 0
+          ? { model: [...modelTokens.entries()].sort((a, b) => b[1] - a[1])[0][0] }
+          : {}),
         elapsedMs: elapsedMs || undefined,
         idleMs: idleMs === Number.MAX_SAFE_INTEGER ? undefined : idleMs,
       });
@@ -644,4 +751,33 @@ export class ConductorWatcher {
   get tracked(): number {
     return this.runs.size;
   }
+}
+
+/**
+ * The program a shell command runs, and nothing after it.
+ *
+ * This sent the first three words of the command, which reads fine for
+ * `pnpm vitest run` and is a leak for `export STRIPE_KEY=sk_live_… &&` or
+ * `curl -H 'Authorization: Bearer …'`. A command's arguments are tool input,
+ * and tool input does not cross: the line the cockpit shows only needs to say
+ * what kind of thing is running.
+ *
+ * Leading `VAR=value` assignments are skipped rather than shown, for the same
+ * reason — they are where a secret on a command line usually sits.
+ */
+export function programOf(command: string | undefined): string {
+  const words = (command ?? '').trim().split(/\s+/).filter(Boolean);
+  // Skip assignments, the keywords that introduce them, and shell operators
+  // (`&&`, `;`), then take the first word that could be a program at all.
+  const program = words.find(
+    (w) =>
+      !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) &&
+      w !== 'export' &&
+      w !== 'env' &&
+      /^[\w.@+/-]+$/.test(w),
+  );
+  if (!program) return 'shell';
+  // A path to a binary is shown by its name; the directory is the machine's.
+  const name = program.split('/').pop() ?? program;
+  return /^[\w.@+-]{1,40}$/.test(name) ? name : 'shell';
 }

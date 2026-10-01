@@ -51,7 +51,32 @@ export interface CreateSessionRequest {
    * would have two processes appending to a single transcript.
    */
   resumeSessionId?: string;
+  /**
+   * Give this task its own git worktree and branch — see ./isolation.
+   *
+   * Asked for by the dispatcher, per task, because only the dispatcher knows
+   * that a session is one task of a run and which run. Absent, the agent runs
+   * in the checkout itself, as it always did: that is right for a single
+   * dispatch, and for a resumed session, which must run where its conversation
+   * lives.
+   */
+  isolation?: {
+    /** Groups the tasks of one run; names the run branch. */
+    runId: string;
+    /** The task within the run, e.g. `2.1`; names the task branch. */
+    taskCode: string;
+    /** One line describing the task, for the commit message. */
+    title?: string;
+  };
   metadata?: Record<string, unknown>;
+}
+
+/** `POST /v1/integrate` request body: merge a wave's task branches. */
+export interface IntegrateRequest {
+  repo: string;
+  runId: string;
+  /** Merged in this order. */
+  taskCodes: string[];
 }
 
 export type RunnerSessionStatus =
@@ -81,10 +106,24 @@ export interface StatusUpdate {
 
 /** §7.2 `POST {callbackUrl}/complete` body — core's `CompletionReport`. */
 export interface CompletionReport {
+  /**
+   * The agent's FINAL telemetry. Status reports are throttled, so the last one
+   * sent while the agent ran can be seconds short of the end — missing the last
+   * files it wrote and the last tokens it spent. This is the complete reading.
+   */
+  telemetry?: SessionTelemetry;
   sessionId: string;
   success: boolean;
   prUrl?: string;
+  /**
+   * For an isolated task, the head of its branch. Otherwise the checkout's HEAD
+   * when the session ended, which the session may or may not have moved.
+   */
   commitSha?: string;
+  /** The task's branch. Only present when the task was isolated. */
+  branch?: string;
+  /** The commit the task's branch was cut from. Only when isolated. */
+  baseSha?: string;
   filesModified: string[];
   filesCreated: string[];
   filesDeleted: string[];
@@ -105,7 +144,10 @@ export interface RunnerSession {
   /** DevPilot session id — the correlation key for every callback. */
   devpilotSessionId: string;
   repo: string;
+  /** The operator's checkout of `repo`. */
   workdir: string;
+  /** The task's branch, once an isolated task has been given one. */
+  branch?: string;
   status: RunnerSessionStatus;
   progressPercent: number;
   currentStep?: string;
@@ -138,6 +180,17 @@ export interface RunnerConfig {
   maxConcurrent: number;
   /** Wall-clock cap on a single session. */
   timeoutMs: number;
+  /**
+   * How agents are configured — see ./harness. The OPERATOR's choice, like the
+   * permission mode and for the same reason: a dispatch must not be able to
+   * change what an agent on someone else's machine is allowed to load.
+   */
+  harness?: import('./harness').Harness;
+  /**
+   * Where task worktrees go and how each is prepared — see ./isolation. The
+   * OPERATOR's, for the same reason again: the setup step is a shell command.
+   */
+  isolation?: import('./isolation').IsolationConfig;
   /** Emit a log line. */
   log: (line: string) => void;
 }

@@ -44,7 +44,22 @@ export const rufloSessions = sqliteTable('ruflo_sessions', {
     costUsd?: number;
     tokensIn?: number;
     tokensOut?: number;
+    /** Input served from, and written to, the prompt cache. */
+    tokensCacheRead?: number;
+    tokensCacheWrite?: number;
+    /** Of `toolCalls`, how many changed a file. */
+    writeCalls?: number;
     turns?: number;
+    /** The model that did most of the work, and the harness that launched it. */
+    model?: string;
+    harness?: string;
+    /**
+     * The tokens at their own models' list prices, and the same tokens at the
+     * most expensive model's. The pair the score's cost dimension is a ratio of.
+     */
+    listCostUsd?: number;
+    referenceCostUsd?: number;
+    referenceModel?: string;
     elapsedMs?: number;
     idleMs?: number;
   }>(),

@@ -6,10 +6,9 @@ import {
   inFlightFiles,
   touchedFiles,
   activityEvents,
-  conductorScores,
   eq,
 } from '@/lib/db';
-import { linear, score as scoreModel } from '@devpilot.sh/core';
+import { linear } from '@devpilot.sh/core';
 import { getServerOrchestrator } from '@/lib/orchestrator';
 
 interface RouteParams {
@@ -195,22 +194,9 @@ export async function POST(_request: NextRequest, { params }: RouteParams) {
       },
     });
 
-    // Update conductor score (dispatching improves velocity).
-    const score = await db.query.conductorScores.findFirst();
-    if (score) {
-      await db.update(conductorScores)
-        .set({
-          velocityTrend: scoreModel.clampDimension('velocityTrend', score.velocityTrend + 5),
-          total: Math.min(1000, score.total + 10),
-        })
-        .where(eq(conductorScores.id, score.id));
-
-      await db.insert(activityEvents).values({
-        type: 'SCORE_UPDATE',
-        message: `Score +10 for dispatching work`,
-        metadata: { delta: 10, reason: 'dispatch' },
-      });
-    }
+    // No score is touched here. Dispatching used to add ten points, which
+    // rewarded pressing the button; the score is now computed from what the
+    // dispatched work goes on to do (src/lib/score.ts).
 
     const sessionWithRelations = await db.query.rufloSessions.findFirst({
       where: eq(rufloSessions.id, session.id),

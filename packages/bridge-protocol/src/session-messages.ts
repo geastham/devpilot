@@ -250,6 +250,85 @@ export const RotateSessionKeyResponseSchema = z.object({
 });
 export type RotateSessionKeyResponse = z.infer<typeof RotateSessionKeyResponseSchema>;
 
+// ── The handoff ─────────────────────────────────────────────────────────────
+
+export interface SessionHandoffInput {
+  title: string;
+  /** The full join link, fragment included. This text IS a credential. */
+  link: string;
+  mode: SessionMode;
+  autoBudget?: number;
+  autoTtlMinutes?: number;
+}
+
+/**
+ * The message one person sends another to bring their agent into a session.
+ *
+ * Starting a session produced a bare link and "others join with: devpilot
+ * session join". The person receiving it had to already know that an MCP server
+ * existed, how to add it, and what to ask their agent to do with a URL — so in
+ * practice a shared session started with a second conversation explaining how
+ * to have the first one.
+ *
+ * This is written to be pasted whole into the recipient's Claude Code. Half of
+ * it addresses the person (how to get the tools, how to treat the link) and
+ * half addresses their agent (join, read, report back before acting). The
+ * agent's half ends with what the session's mode permits, because that is the
+ * instruction most likely to be got wrong: an agent told only to "join" does
+ * not know whether replying on its own is expected.
+ *
+ * It carries the link and therefore the key. Whoever renders it is responsible
+ * for where it goes — the MCP server puts it on the clipboard rather than into
+ * a tool result for exactly that reason.
+ *
+ * ONE builder, here, so the CLI, the MCP server and the portal cannot each say
+ * it slightly differently.
+ */
+export function buildSessionHandoff(input: SessionHandoffInput): string {
+  const budget = input.autoBudget ?? SESSION_LIMITS.autoDefaultBudget;
+  const ttl = input.autoTtlMinutes ?? SESSION_LIMITS.autoDefaultTtlMinutes;
+
+  const modeLine =
+    input.mode === 'auto'
+      ? `This session is in auto mode for up to ${budget} agent messages or ${ttl} minutes: ` +
+        'you may reply to the other agent with devpilot_session_post and wait for answers ' +
+        'with devpilot_session_wait. Stop when the session says the budget is spent.'
+      : input.mode === 'relay'
+        ? 'This session is in relay mode: you may wait for new messages with ' +
+          'devpilot_session_wait, but ask me before replying.'
+        : 'This session is in observe mode: post only when I ask you to.';
+
+  return [
+    `Join my DevPilot shared session: "${input.title}"`,
+    '',
+    input.link,
+    '',
+    'Paste this whole message into Claude Code. It tells your agent what to do:',
+    '',
+    '  Call devpilot_session_join with the link above, then devpilot_session_read,',
+    '  and tell me what the other side has posted before you do anything else.',
+    `  ${modeLine}`,
+    '',
+    'No devpilot_session tools? Run this once in a terminal, then start a new Claude Code session:',
+    '  claude mcp add devpilot-session -- npx -y @devpilot.sh/mcp-session',
+    '',
+    'This link is the key to the session. Anyone holding it can read all of it, so send it in a DM, not a channel.',
+  ].join('\n');
+}
+
+/**
+ * Find a join link inside arbitrary text — a pasted handoff, a clipboard.
+ *
+ * Returns the link or null. Deliberately strict about the shape (`/s/<id>` and
+ * a `#k=` fragment) so that a clipboard holding something else is not mistaken
+ * for one, and never throws: the caller is usually deciding what to tell a
+ * person, and "there is no link here" is an answer.
+ */
+export function findJoinLink(text: string): string | null {
+  const match = /(?:https?:\/\/)?[A-Za-z0-9.-]+(?::\d+)?\/s\/[A-Za-z0-9_%-]+#k=[A-Za-z0-9_-]+/.exec(text);
+  return match ? match[0] : null;
+}
+
 // ── Parse helpers ───────────────────────────────────────────────────────────
 
 export function parseSessionMessage(input: unknown): SessionMessage {

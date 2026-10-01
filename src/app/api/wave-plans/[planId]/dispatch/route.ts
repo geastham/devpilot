@@ -11,6 +11,7 @@ import type { Wave, WaveTask } from '@devpilot.sh/core/db';
 import {
   WaveExecutionController,
   WaveDispatchCoordinator,
+  isTerminalWaveTaskStatus,
 } from '@devpilot.sh/core/wave-planner';
 import { getServerOrchestrator, getWaveExecutionConfig } from '@/lib/orchestrator';
 
@@ -164,8 +165,10 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     );
 
     for (const prevWave of previousWaves) {
+      // The shared definition of "this task will not change again", not a
+      // local list — see wave-state.ts for what happened when they disagreed.
       const incompleteTasks = prevWave.tasks.filter(
-        (t: WaveTask) => t.status !== 'completed' && t.status !== 'skipped' && t.status !== 'failed'
+        (t: WaveTask) => !isTerminalWaveTaskStatus(t.status)
       );
 
       if (incompleteTasks.length > 0) {

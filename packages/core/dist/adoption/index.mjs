@@ -318,11 +318,15 @@ function condenseTitle(text, max) {
   const body = lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut.slice(0, max - 1);
   return `${body.trimEnd()}\u2026`;
 }
+var CONTINUATION_PREAMBLE = /^\s*this session is being continued from a previous conversation/i;
+function isContinuationPreamble(prompt) {
+  return Boolean(prompt && CONTINUATION_PREAMBLE.test(prompt));
+}
 function heuristicTitle(observation) {
   if (observation.customTitle) {
     return condenseTitle(observation.customTitle, ADOPTION_LIMITS.MAX_TITLE_CHARS);
   }
-  if (observation.firstHumanPrompt) {
+  if (observation.firstHumanPrompt && !isContinuationPreamble(observation.firstHumanPrompt)) {
     return condenseTitle(observation.firstHumanPrompt, ADOPTION_LIMITS.MAX_TITLE_CHARS);
   }
   return `Agent session ${observation.sessionUuid.slice(0, 8)}`;
@@ -490,7 +494,7 @@ var MAX_CONCURRENCY = 4;
 function heuristicSummary(observation) {
   const title = heuristicTitle(observation);
   const prompt = observation.firstHumanPrompt?.trim();
-  const summary = prompt && prompt.length > title.length ? condenseTitle(`Session opened with: ${prompt}`, ADOPTION_LIMITS2.MAX_SUMMARY_CHARS) : void 0;
+  const summary = prompt && prompt.length > title.length && !isContinuationPreamble(prompt) ? condenseTitle(`Session opened with: ${prompt}`, ADOPTION_LIMITS2.MAX_SUMMARY_CHARS) : void 0;
   return { title, summary, source: "heuristic" };
 }
 var SYSTEM_PROMPT = [

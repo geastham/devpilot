@@ -112,14 +112,30 @@ export interface SessionCommandMessage {
  */
 export interface MirroredTelemetry {
   toolCalls: number;
-  /** Repo-relative paths. */
+  /** Of those, how many changed a file. */
+  writeCalls?: number;
+  /** Repo-relative paths the session has written or edited. */
   filesTouched: string[];
   currentAction?: string;
   costUsd?: number;
   costEstimated?: boolean;
+  /** Input tokens processed fresh — not served from the prompt cache. */
   tokensIn?: number;
   tokensOut?: number;
+  /** Input tokens served from the prompt cache. */
+  tokensCacheRead?: number;
+  /** Input tokens written to the prompt cache. */
+  tokensCacheWrite?: number;
+  /** Model responses, one per message id. */
   turns?: number;
+  /** The model that processed most of the session's tokens. */
+  model?: string;
+  /**
+   * Which DevPilot harness profile launched the agent, e.g. `lean@1`. Absent
+   * for a session DevPilot did not start — it ran under whatever its owner
+   * configured, and DevPilot does not know what that was.
+   */
+  harness?: string;
   elapsedMs?: number;
   idleMs?: number;
 }

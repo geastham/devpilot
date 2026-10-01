@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, horizonItems, plans, wavePlans, activityEvents, eq } from '@/lib/db';
-import { generateWavePlan } from '@devpilot.sh/core/wave-planner';
+import { generateWavePlan, buildSpecContentForItem } from '@devpilot.sh/core/wave-planner';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -11,12 +11,15 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   try {
     const { id } = await params;
 
-    // Fetch the horizon item with its plan
+    // Fetch the horizon item with its plan — and the plan's workstreams and
+    // their tasks. The spec builder below renders an "Implementation Plan"
+    // section from them; `plan: true` loads the plan row alone, so that section
+    // was empty for every item and the planner was handed the acceptance
+    // criteria with none of the decomposition that already existed. The
+    // conductor route had the same query and the same hole.
     const item = await db.query.horizonItems.findFirst({
       where: eq(horizonItems.id, id),
-      with: {
-        plan: true,
-      },
+      with: { plan: { with: { workstreams: { with: { tasks: true } } } } },
     });
 
     if (!item) {
@@ -42,8 +45,15 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     // Get working directory from environment or use default
     const workingDir = process.env.WORKING_DIR || process.cwd();
 
-    // Build specification content from the item and plan
-    const specContent = buildSpecContent(item);
+    // Build specification content from the item and plan. The shared builder,
+    // not a local copy: this route kept its own after the function was ported
+    // into core, and a copy is how one planner entry point ends up seeing the
+    // ticket description while another still plans from the title.
+    const specContent = buildSpecContentForItem({
+      title: item.title,
+      description: item.description,
+      plan: item.plan as Parameters<typeof buildSpecContentForItem>[0]['plan'],
+    });
 
     // Generate wave plan using the wave planner system
     const result = await generateWavePlan(
@@ -106,41 +116,4 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       { status: 500 }
     );
   }
-}
-
-/**
- * Build specification content from horizon item and plan.
- * This converts the plan into a format suitable for wave plan generation.
- */
-function buildSpecContent(item: any): string {
-  const lines: string[] = [];
-
-  lines.push(`# ${item.title}`);
-  lines.push('');
-
-  if (item.plan?.acceptanceCriteria && item.plan.acceptanceCriteria.length > 0) {
-    lines.push('## Acceptance Criteria');
-    for (const criterion of item.plan.acceptanceCriteria) {
-      lines.push(`- ${criterion}`);
-    }
-    lines.push('');
-  }
-
-  if (item.plan?.workstreams && item.plan.workstreams.length > 0) {
-    lines.push('## Implementation Plan');
-    for (const workstream of item.plan.workstreams) {
-      lines.push(`### ${workstream.label}`);
-      if (workstream.tasks && workstream.tasks.length > 0) {
-        for (const task of workstream.tasks) {
-          lines.push(`- ${task.label}`);
-          if (task.filePaths && task.filePaths.length > 0) {
-            lines.push(`  Files: ${task.filePaths.join(', ')}`);
-          }
-        }
-      }
-      lines.push('');
-    }
-  }
-
-  return lines.join('\n');
 }

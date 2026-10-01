@@ -234,6 +234,20 @@ export const ObservationResponseSchema = z.object({
   ended: z.number().int().nonnegative(),
   /** Projects auto-created for repos this org had not seen before. */
   projectsCreated: z.number().int().nonnegative(),
+  /**
+   * `adoptionKey → dispatch_sessions.id`, for the rows this machine may write
+   * instrument readings to.
+   *
+   * An observed session had no way to report what it was doing: the telemetry
+   * and stream routes are addressed by session id, and observation never told
+   * the machine which id its sessions had been given. Only sessions placed on a
+   * board learned theirs, so the default path — observe everything, place
+   * nothing — produced a cockpit full of sessions with dark instruments.
+   *
+   * Optional so a machine talking to a bridge that predates it simply sends no
+   * readings, which is what it did before.
+   */
+  sessionIds: z.record(z.string().regex(/^[0-9a-f]{64}$/), z.string().min(1)).optional(),
 });
 
 export type ObservationResponse = z.infer<typeof ObservationResponseSchema>;

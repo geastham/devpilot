@@ -56,15 +56,8 @@ interface GeneratePlanOutput {
     tokensUsed?: number;
     costUsd?: number;
 }
-interface DispatchWaveResult {
-    dispatched: number;
-    queued: number;
-    errors: Array<{
-        taskCode: string;
-        error: string;
-    }>;
-}
-type WaveOutcome = {
+/** How a wave that is over ended. */
+type SettledWaveOutcome = {
     state: 'complete';
 } | {
     state: 'failed';
@@ -72,6 +65,47 @@ type WaveOutcome = {
         taskCode: string;
         error: string;
     }>;
+};
+/**
+ * What the graph is told when it asks how a wave is going.
+ *
+ * `in-flight` is the answer that is not an ending: the wave is still running,
+ * but something changed that a dispatch pass could act on — a slot freed with
+ * tasks still queued behind the host's concurrency cap, or a task failed and is
+ * owed its retry. The graph dispatches the same wave again and goes back to
+ * waiting. It consumes no wave retry and marks nothing complete.
+ *
+ * It exists so that the graph is the only thing that dispatches. Without it a
+ * host has to backfill a wave from its own completion callbacks, which is a
+ * second component starting agents for a run the graph believes it is driving.
+ */
+type WaveOutcome = SettledWaveOutcome | {
+    state: 'in-flight';
+};
+interface DispatchWaveResult {
+    dispatched: number;
+    queued: number;
+    errors: Array<{
+        taskCode: string;
+        error: string;
+    }>;
+    /**
+     * Set when the wave is ALREADY over as dispatch returns: every task in it was
+     * terminal before, or became so during, this call.
+     *
+     * The graph then acts on this instead of waiting. Waiting on a wave that
+     * dispatched nothing is waiting on something that will never report — the
+     * hang this field removes was a real one: a retried wave with no task left
+     * to dispatch suspended the run forever.
+     */
+    settled?: SettledWaveOutcome;
+}
+/** How a run ended, as told to `ConductorPorts.endRun`. */
+type RunResult = {
+    status: 'complete';
+} | {
+    status: 'failed';
+    reason: string;
 };
 /** What the conductor asks a human at the review interrupt. */
 interface ReviewRequest {
@@ -104,7 +138,14 @@ interface ConductorPorts {
     persistPlan(plan: WavePlanShape, score: PlanScoreShape, input: GeneratePlanInput): Promise<{
         wavePlanId: string;
     }>;
-    /** Dispatch every task in one wave. DevPilot delegates to its coordinator. */
+    /**
+     * Dispatch what can be dispatched of one wave. DevPilot delegates to its
+     * coordinator.
+     *
+     * MUST be idempotent: the graph calls it again for the same wave on an
+     * `in-flight` outcome and on a wave retry, and a task that is already with an
+     * agent must not be sent to a second one.
+     */
     dispatchWave(wavePlanId: string, waveIndex: number): Promise<DispatchWaveResult>;
     /**
      * Optional. Resolve when the wave reaches a terminal state.
@@ -115,6 +156,17 @@ interface ConductorPorts {
      * afford to hold a promise open (tests, short synchronous runs).
      */
     waitForWave?(wavePlanId: string, waveIndex: number): Promise<WaveOutcome>;
+    /**
+     * Optional. Told once, when a run that has a persisted plan ends.
+     *
+     * The graph's own state says `complete` or `failed`, but a host's other
+     * readers look at the host's records, not at a checkpoint — and with the
+     * graph as the only thing that decides a run is over, nothing else will
+     * write the ending down. If this throws, the run does not reach END: a run
+     * whose ending could not be recorded has not, as far as anyone watching can
+     * tell, ended.
+     */
+    endRun?(wavePlanId: string, result: RunResult): void | Promise<void>;
     /** Optional progress sink. */
     onEvent?(event: ConductorEvent): void;
 }
@@ -138,6 +190,8 @@ type ConductorEvent = {
     waveIndex: number;
     dispatched: number;
     queued: number;
+    /** True when this pass re-entered a wave already in flight (`in-flight`). */
+    backfill?: boolean;
 } | {
     type: 'wave:complete';
     waveIndex: number;
@@ -170,7 +224,15 @@ interface ConductorConfig {
     requireReview: boolean;
     /** `halt` stops the run on a failed wave; `continue` advances anyway. */
     failurePolicy: 'halt' | 'continue';
-    /** Re-dispatch attempts for a failed wave before the policy applies. */
+    /**
+     * Re-dispatch attempts for a failed wave before the policy applies.
+     *
+     * A wave retry re-dispatches whatever the host's `dispatchWave` still
+     * considers dispatchable. A host that retries failed TASKS itself (DevPilot
+     * does, once each) should set this to 0: by the time a wave is reported
+     * failed there, every task in it is terminal and a wave retry has nothing to
+     * send.
+     */
     waveRetryLimit: number;
 }
 declare const DEFAULT_CONFIG: ConductorConfig;
@@ -191,8 +253,14 @@ declare const DEFAULT_CONFIG: ConductorConfig;
  *                                          ▼
  *                                      dispatch ─▶ awaitWave ─┬─(ok)──▶ advance ─┬─(more)─▶ dispatch
  *                                          ▲                  │                  └─(none)─▶ finish
- *                                          │                  └─(failed)─▶ retry? ─┬─▶ dispatch
- *                                          └───────────────────────────────────────┘   └─▶ fail (halt)
+ *                                          │                  ├─(failed)─▶ retry? ─┬─▶ dispatch
+ *                                          ├──────────────────│────────────────────┘   └─▶ fail (halt)
+ *                                          └──(in-flight)─────┘
+ *
+ * `dispatch` is the only node that starts agents, for the first pass over a
+ * wave and for every later one: a wave too large for the host's concurrency cap
+ * is drained by `in-flight` signals sending the run back through it, not by the
+ * host dispatching on the side.
  *
  * Every branch below was previously an `if` somewhere inside a 449-line
  * controller, spread across `approve`, `dispatchWave`, `onTaskComplete`,
@@ -225,6 +293,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
         dispatched: number;
         queued: number;
     } | null;
+    waveSignal: WaveOutcome | null;
     completedWaves: number[];
     tokensUsed: number;
     costUsd: number;
@@ -249,6 +318,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
         dispatched: number;
         queued: number;
     } | null> | null | undefined;
+    waveSignal?: WaveOutcome | _langchain_langgraph.OverwriteValue<WaveOutcome | null> | null | undefined;
     completedWaves?: number[] | _langchain_langgraph.OverwriteValue<number[]> | undefined;
     tokensUsed?: number | _langchain_langgraph.OverwriteValue<number> | undefined;
     costUsd?: number | _langchain_langgraph.OverwriteValue<number> | undefined;
@@ -292,6 +362,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
         dispatched: number;
         queued: number;
     } | null> | null, unknown>;
+    waveSignal: _langchain_langgraph.BaseChannel<WaveOutcome | null, WaveOutcome | _langchain_langgraph.OverwriteValue<WaveOutcome | null> | null, unknown>;
     completedWaves: _langchain_langgraph.BaseChannel<number[], number[] | _langchain_langgraph.OverwriteValue<number[]>, unknown>;
     tokensUsed: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
     costUsd: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
@@ -335,6 +406,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
         dispatched: number;
         queued: number;
     } | null> | null, unknown>;
+    waveSignal: _langchain_langgraph.BaseChannel<WaveOutcome | null, WaveOutcome | _langchain_langgraph.OverwriteValue<WaveOutcome | null> | null, unknown>;
     completedWaves: _langchain_langgraph.BaseChannel<number[], number[] | _langchain_langgraph.OverwriteValue<number[]>, unknown>;
     tokensUsed: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
     costUsd: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
@@ -379,6 +451,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
             dispatched: number;
             queued: number;
         } | null> | null, unknown>;
+        waveSignal: _langchain_langgraph.BaseChannel<WaveOutcome | null, WaveOutcome | _langchain_langgraph.OverwriteValue<WaveOutcome | null> | null, unknown>;
         completedWaves: _langchain_langgraph.BaseChannel<number[], number[] | _langchain_langgraph.OverwriteValue<number[]>, unknown>;
         tokensUsed: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         costUsd: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
@@ -423,6 +496,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
             dispatched: number;
             queued: number;
         } | null> | null, unknown>;
+        waveSignal: _langchain_langgraph.BaseChannel<WaveOutcome | null, WaveOutcome | _langchain_langgraph.OverwriteValue<WaveOutcome | null> | null, unknown>;
         completedWaves: _langchain_langgraph.BaseChannel<number[], number[] | _langchain_langgraph.OverwriteValue<number[]>, unknown>;
         tokensUsed: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         costUsd: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
@@ -467,6 +541,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
             dispatched: number;
             queued: number;
         } | null> | null, unknown>;
+        waveSignal: _langchain_langgraph.BaseChannel<WaveOutcome | null, WaveOutcome | _langchain_langgraph.OverwriteValue<WaveOutcome | null> | null, unknown>;
         completedWaves: _langchain_langgraph.BaseChannel<number[], number[] | _langchain_langgraph.OverwriteValue<number[]>, unknown>;
         tokensUsed: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         costUsd: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
@@ -511,6 +586,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
             dispatched: number;
             queued: number;
         } | null> | null, unknown>;
+        waveSignal: _langchain_langgraph.BaseChannel<WaveOutcome | null, WaveOutcome | _langchain_langgraph.OverwriteValue<WaveOutcome | null> | null, unknown>;
         completedWaves: _langchain_langgraph.BaseChannel<number[], number[] | _langchain_langgraph.OverwriteValue<number[]>, unknown>;
         tokensUsed: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         costUsd: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
@@ -555,6 +631,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
             dispatched: number;
             queued: number;
         } | null> | null, unknown>;
+        waveSignal: _langchain_langgraph.BaseChannel<WaveOutcome | null, WaveOutcome | _langchain_langgraph.OverwriteValue<WaveOutcome | null> | null, unknown>;
         completedWaves: _langchain_langgraph.BaseChannel<number[], number[] | _langchain_langgraph.OverwriteValue<number[]>, unknown>;
         tokensUsed: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         costUsd: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
@@ -599,6 +676,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
             dispatched: number;
             queued: number;
         } | null> | null, unknown>;
+        waveSignal: _langchain_langgraph.BaseChannel<WaveOutcome | null, WaveOutcome | _langchain_langgraph.OverwriteValue<WaveOutcome | null> | null, unknown>;
         completedWaves: _langchain_langgraph.BaseChannel<number[], number[] | _langchain_langgraph.OverwriteValue<number[]>, unknown>;
         tokensUsed: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         costUsd: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
@@ -643,6 +721,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
             dispatched: number;
             queued: number;
         } | null> | null, unknown>;
+        waveSignal: _langchain_langgraph.BaseChannel<WaveOutcome | null, WaveOutcome | _langchain_langgraph.OverwriteValue<WaveOutcome | null> | null, unknown>;
         completedWaves: _langchain_langgraph.BaseChannel<number[], number[] | _langchain_langgraph.OverwriteValue<number[]>, unknown>;
         tokensUsed: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         costUsd: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
@@ -687,6 +766,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
             dispatched: number;
             queued: number;
         } | null> | null, unknown>;
+        waveSignal: _langchain_langgraph.BaseChannel<WaveOutcome | null, WaveOutcome | _langchain_langgraph.OverwriteValue<WaveOutcome | null> | null, unknown>;
         completedWaves: _langchain_langgraph.BaseChannel<number[], number[] | _langchain_langgraph.OverwriteValue<number[]>, unknown>;
         tokensUsed: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         costUsd: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
@@ -731,6 +811,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
             dispatched: number;
             queued: number;
         } | null> | null, unknown>;
+        waveSignal: _langchain_langgraph.BaseChannel<WaveOutcome | null, WaveOutcome | _langchain_langgraph.OverwriteValue<WaveOutcome | null> | null, unknown>;
         completedWaves: _langchain_langgraph.BaseChannel<number[], number[] | _langchain_langgraph.OverwriteValue<number[]>, unknown>;
         tokensUsed: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         costUsd: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
@@ -775,6 +856,7 @@ declare function createConductorGraph(options: ConductorAgentOptions): _langchai
             dispatched: number;
             queued: number;
         } | null> | null, unknown>;
+        waveSignal: _langchain_langgraph.BaseChannel<WaveOutcome | null, WaveOutcome | _langchain_langgraph.OverwriteValue<WaveOutcome | null> | null, unknown>;
         completedWaves: _langchain_langgraph.BaseChannel<number[], number[] | _langchain_langgraph.OverwriteValue<number[]>, unknown>;
         tokensUsed: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
         costUsd: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
@@ -844,6 +926,18 @@ declare const ConductorState: _langchain_langgraph.AnnotationRoot<{
         dispatched: number;
         queued: number;
     } | null> | null, unknown>;
+    /**
+     * The current wave's most recent answer, and what the branch after a wave
+     * reads.
+     *
+     * `dispatch` writes it: the outcome when the wave was already over as
+     * dispatch returned, otherwise null ("ask"). `awaitWave` then writes whatever
+     * it was told. A channel rather than a local because the two are separate
+     * nodes with a checkpoint between them, and because `in-flight` has to
+     * survive from `awaitWave` to the next `dispatch` for that pass to know it is
+     * a backfill.
+     */
+    waveSignal: _langchain_langgraph.BaseChannel<WaveOutcome | null, WaveOutcome | _langchain_langgraph.OverwriteValue<WaveOutcome | null> | null, unknown>;
     completedWaves: _langchain_langgraph.BaseChannel<number[], number[] | _langchain_langgraph.OverwriteValue<number[]>, unknown>;
     tokensUsed: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
     costUsd: _langchain_langgraph.BaseChannel<number, number | _langchain_langgraph.OverwriteValue<number>, unknown>;
@@ -866,4 +960,4 @@ declare function makeNodes(ports: ConductorPorts, config: ConductorConfig): {
     fail: (state: ConductorStateType) => Promise<ConductorUpdate>;
 };
 
-export { type ConductorAgentOptions, type ConductorConfig, type ConductorEvent, type ConductorGraph, type ConductorPorts, ConductorState, type ConductorStateType, type ConductorUpdate, DEFAULT_CONFIG, type DispatchWaveResult, type GeneratePlanInput, type GeneratePlanOutput, type PlanScoreShape, type ReviewDecision, type ReviewRequest, type WaveOutcome, type WavePlanShape, createConductorGraph, makeNodes };
+export { type ConductorAgentOptions, type ConductorConfig, type ConductorEvent, type ConductorGraph, type ConductorPorts, ConductorState, type ConductorStateType, type ConductorUpdate, DEFAULT_CONFIG, type DispatchWaveResult, type GeneratePlanInput, type GeneratePlanOutput, type PlanScoreShape, type ReviewDecision, type ReviewRequest, type RunResult, type SettledWaveOutcome, type WaveOutcome, type WavePlanShape, createConductorGraph, makeNodes };

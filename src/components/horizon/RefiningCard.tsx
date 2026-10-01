@@ -36,15 +36,35 @@ export function RefiningCard({ item }: RefiningCardProps) {
   const awaitingReview = conductor?.awaiting === 'review';
 
   /**
-   * Say which of the three states the run is actually in. "Planning" was shown
-   * for all of them, so an approved run dispatching eight agents still read as
-   * though the planner were thinking about it.
+   * Say which state the run is actually in. "Planning" was shown for all of
+   * them, so an approved run dispatching eight agents still read as though the
+   * planner were thinking about it — and so did one that had finished, failed,
+   * or been held after a restart, because the list stopped at "executing".
+   *
+   * The plan row is asked first: it is what knows how a run ended. A held plan
+   * in particular still has a graph that says "executing".
    */
+  const planStatus = conductor?.planStatus;
+  const finished = planStatus === 'completed' || conductor?.status === 'complete';
+  const failed = planStatus === 'failed' || conductor?.status === 'failed';
+  const held = planStatus === 'paused';
   const phase = awaitingReview
     ? 'Plan ready — your call'
-    : conductor?.status === 'executing'
-      ? `Executing — wave ${(conductor.currentWaveIndex ?? 0) + 1} of ${conductor.waveCount}`
-      : 'Planning';
+    : failed
+      ? 'Failed'
+      : held
+        ? 'Paused'
+        : finished
+          ? 'Done'
+          : conductor?.status === 'executing'
+            ? `Executing — wave ${(conductor.currentWaveIndex ?? 0) + 1} of ${conductor.waveCount}`
+            : 'Planning';
+  /**
+   * Why a run failed or is being held, shown under the summary. Where a
+   * finished run's work is — the first thing anyone asks — is shown beside it:
+   * a local branch that has not been pushed, which was on no screen.
+   */
+  const aftermath = failed || held ? conductor?.planReason : null;
 
   const handleReviewPlan = () => {
     setSelectedItem(item.id);
@@ -88,9 +108,13 @@ export function RefiningCard({ item }: RefiningCardProps) {
             <>
               <span
                 className={
-                  awaitingReview
+                  awaitingReview || finished
                     ? 'font-medium text-accent-green'
-                    : 'font-medium text-text-secondary'
+                    : failed
+                      ? 'font-medium text-accent-red'
+                      : held
+                        ? 'font-medium text-accent-amber'
+                        : 'font-medium text-text-secondary'
                 }
               >
                 {phase}
@@ -116,6 +140,18 @@ export function RefiningCard({ item }: RefiningCardProps) {
             </span>
           )}
         </p>
+
+        {/* Why it stopped, or where the work is. */}
+        {aftermath && (
+          <p className="-mt-1 mb-3 text-xs leading-snug text-text-muted line-clamp-4">{aftermath}</p>
+        )}
+        {(finished || failed) && conductor?.runBranch && (
+          <p className="-mt-1 mb-3 text-xs leading-snug text-text-muted">
+            Work is on the local branch{' '}
+            <code className="break-all font-mono text-text-secondary">{conductor.runBranch}</code>
+            . Not pushed.
+          </p>
+        )}
 
         {/* Actions */}
         <div className="flex justify-end gap-2">

@@ -21,6 +21,9 @@ import type {
   OrchestratorHealth,
   StatusUpdate,
   CompletionReport,
+  IntegrateOutcome,
+  IntegrateRequest,
+  IsolationSupport,
 } from './types';
 import { OrchestratorClient } from './client';
 import { AoCliAdapter } from './ao-cli-adapter';
@@ -394,6 +397,50 @@ export class OrchestratorService {
   }
 
   /**
+   * Whether a task dispatched now can be given its own worktree and branch.
+   *
+   * Only an adapter that says so can. `http` and `ao-cli` do not implement the
+   * question and are answered for here — never isolated, and the reason says
+   * which mode, so a plan row reading "not isolated" also says why.
+   */
+  async isolationSupport(): Promise<IsolationSupport> {
+    if (!this.adapter.isolationSupport) {
+      return {
+        supported: false,
+        reason: `the orchestrator is in '${this.adapter.mode}' mode, which does not give tasks their own branch`,
+      };
+    }
+    return this.adapter.isolationSupport();
+  }
+
+  /**
+   * Merge a wave's task branches into the run branch.
+   *
+   * Never rejects. Its one caller is the wave gate in
+   * `WaveExecutionController`; nothing else should be merging a run.
+   */
+  async integrate(request: IntegrateRequest): Promise<IntegrateOutcome> {
+    if (!this.adapter.integrate) {
+      return {
+        ok: false,
+        code: 'UNSUPPORTED',
+        message: `the orchestrator is in '${this.adapter.mode}' mode, which cannot merge a wave`,
+      };
+    }
+    try {
+      return await this.adapter.integrate(request);
+    } catch (error) {
+      // A transport is asked not to throw; one that does must still not take
+      // the wave's driver down with it.
+      return {
+        ok: false,
+        code: 'UNREACHABLE',
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /**
    * Ingest a pushed status update from a session callback
    * (`/api/orchestrator/status`). For push-based adapters this replaces the
    * poll loop: the payload is cached on the adapter and re-emitted as a
@@ -431,15 +478,27 @@ export class OrchestratorService {
 
   /**
    * Mark a session as complete (for external completion notifications)
+   *
+   * Emits whether or not this process dispatched the session. It used to
+   * return early when `sessionMappings` had no entry — and that map is process
+   * memory, so after a restart it has no entry for anything still running.
+   * Every completion that arrived after a restart was therefore swallowed
+   * here: the callback route had already marked the session row COMPLETE, but
+   * no `job:complete` was emitted, the ExecutionBridge never heard, and the
+   * wave task stayed `dispatched` forever with its wave unable to end.
+   *
+   * The mapping is only the fast path to the external id. Subscribers key on
+   * `sessionId` — the bridge resolves it to a wave task through the database —
+   * and `ingestStatusUpdate` already falls back the same way. A duplicate is
+   * harmless: subscribers apply a terminal report conditionally.
    */
   markSessionComplete(sessionId: string, report: CompletionReport): void {
     const mapping = this.sessionMappings.get(sessionId);
-    if (!mapping) return;
 
     this.emitEvent({
       type: report.success ? 'job:complete' : 'job:error',
       sessionId,
-      externalJobId: mapping.externalJobId,
+      externalJobId: mapping?.externalJobId ?? sessionId,
       timestamp: new Date().toISOString(),
       data: report,
     });

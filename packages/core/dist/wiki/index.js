@@ -289,8 +289,10 @@ __export(schema_exports, {
   plansRelations: () => plansRelations,
   rufloSessions: () => rufloSessions,
   rufloSessionsRelations: () => rufloSessionsRelations,
+  runwaySamples: () => runwaySamples,
   scoreHistory: () => scoreHistory,
   scoreHistoryRelations: () => scoreHistoryRelations,
+  scoreReadings: () => scoreReadings,
   sessionStatusValues: () => sessionStatusValues,
   tasks: () => tasks,
   tasksRelations: () => tasksRelations,
@@ -413,6 +415,19 @@ var horizonItems = (0, import_sqlite_core.sqliteTable)("horizon_items", {
   archivedAt: (0, import_sqlite_core.integer)("archived_at", { mode: "timestamp" }),
   id: (0, import_sqlite_core.text)("id").primaryKey().$defaultFn(() => (0, import_cuid2.createId)()),
   title: (0, import_sqlite_core.text)("title").notNull(),
+  /**
+   * The body of the ticket this item came from.
+   *
+   * The bridge always forwarded it and nothing kept it, so the planner worked
+   * from the title alone — "Fix checkout", with the actual specification
+   * discarded one hop earlier.
+   *
+   * Null for items created without one, which is every item made on the board
+   * itself and every row older than this column. Capped on the way in (see
+   * `MAX_ITEM_DESCRIPTION_CHARS`), and untrusted: it is whatever someone typed
+   * into the tracker, so it reaches a prompt only as a labelled block.
+   */
+  description: (0, import_sqlite_core.text)("description"),
   zone: (0, import_sqlite_core.text)("zone", { enum: zoneValues }).notNull().default("DIRECTIONAL"),
   repo: (0, import_sqlite_core.text)("repo").notNull(),
   complexity: (0, import_sqlite_core.text)("complexity", { enum: complexityValues }),
@@ -628,6 +643,23 @@ var scoreHistoryRelations = (0, import_drizzle_orm3.relations)(scoreHistory, ({ 
     references: [conductorScores.id]
   })
 }));
+var runwaySamples = (0, import_sqlite_core3.sqliteTable)("runway_samples", {
+  id: (0, import_sqlite_core3.text)("id").primaryKey().$defaultFn(() => (0, import_cuid23.createId)()),
+  at: (0, import_sqlite_core3.integer)("at", { mode: "timestamp_ms" }).notNull(),
+  /** Hours. Real-valued: a reading of 3.75h must not round to 4 and pass the line. */
+  runwayHours: (0, import_sqlite_core3.real)("runway_hours").notNull(),
+  capacity: (0, import_sqlite_core3.integer)("capacity")
+});
+var scoreReadings = (0, import_sqlite_core3.sqliteTable)("score_readings", {
+  id: (0, import_sqlite_core3.text)("id").primaryKey().$defaultFn(() => (0, import_cuid23.createId)()),
+  at: (0, import_sqlite_core3.integer)("at", { mode: "timestamp_ms" }).notNull(),
+  modelVersion: (0, import_sqlite_core3.integer)("model_version").notNull(),
+  windowHours: (0, import_sqlite_core3.real)("window_hours").notNull(),
+  total: (0, import_sqlite_core3.integer)("total").notNull(),
+  measuredMax: (0, import_sqlite_core3.integer)("measured_max").notNull(),
+  complete: (0, import_sqlite_core3.integer)("complete", { mode: "boolean" }).notNull(),
+  result: (0, import_sqlite_core3.text)("result", { mode: "json" }).notNull()
+});
 
 // src/db/schema/events.ts
 var import_sqlite_core4 = require("drizzle-orm/sqlite-core");
@@ -661,6 +693,56 @@ var wavePlans = (0, import_sqlite_core5.sqliteTable)("wave_plans", {
   version: (0, import_sqlite_core5.integer)("version").notNull().default(1),
   previousWavePlanId: (0, import_sqlite_core5.text)("previous_wave_plan_id"),
   rawMarkdown: (0, import_sqlite_core5.text)("raw_markdown"),
+  /**
+   * Why the plan is `failed`, in words a person can act on — the task that
+   * ended it and that task's error.
+   *
+   * `status = 'failed'` used to be the whole record. Everything that reports a
+   * failed run outward (the conductor route, and through it the bridge watcher
+   * and Linear) had to reconstruct the cause from task rows, and a plan failed
+   * by anything other than a task had no cause to find. Written once, by the
+   * first thing that fails the plan; later failures do not overwrite it.
+   *
+   * It also carries why a plan is `paused`, in the one case where nobody
+   * pressed pause: a plan that was `executing` when the cockpit last stopped
+   * and had been idle too long to restart on its own (see `holdStalePlans` in
+   * the execution bridge). Resuming the plan clears it.
+   */
+  failureReason: (0, import_sqlite_core5.text)("failure_reason"),
+  /**
+   * The run's name: `<ticket>-<last six of this id>`, e.g. `AVA-12-k3x9qd`.
+   *
+   * Fixed by the plan's first dispatch and never recomputed, because the
+   * session runner names branches after it — `devpilot/<run>/run` and
+   * `devpilot/<run>/task-<code>` — and a second wave that computed a different
+   * name would be merged into a different branch from the first.
+   */
+  runId: (0, import_sqlite_core5.text)("run_id"),
+  /**
+   * Whether this plan's tasks each run in their own git worktree, on their own
+   * branch, and are merged wave by wave.
+   *
+   * Decided once, with `runId`, at the plan's first dispatch, from what the
+   * runner says it can do — and then never again. A plan must not be half
+   * isolated: wave 2's tasks are cut from a run branch that only exists, and
+   * only contains wave 1, if wave 1 was isolated too.
+   *
+   * NULL is "not decided": the plan has not dispatched, or it predates the
+   * column. FALSE is a decision, and `isolationNote` says why it went that way.
+   */
+  isolated: (0, import_sqlite_core5.integer)("isolated", { mode: "boolean" }),
+  /** Why `isolated` is false, in words for the person reading the run. */
+  isolationNote: (0, import_sqlite_core5.text)("isolation_note"),
+  /**
+   * The run branch, as the runner named it, and its head after the most recent
+   * merge. Both NULL until the first wave has been merged: the name is the
+   * runner's to give (it reduces the run id to ref-safe characters), so it is
+   * recorded from the runner's answer rather than guessed here.
+   *
+   * Local to the machine the runner is on. Nothing pushes it.
+   */
+  runBranch: (0, import_sqlite_core5.text)("run_branch"),
+  runHeadSha: (0, import_sqlite_core5.text)("run_head_sha"),
   startedAt: (0, import_sqlite_core5.integer)("started_at", { mode: "timestamp" }),
   completedAt: (0, import_sqlite_core5.integer)("completed_at", { mode: "timestamp" }),
   createdAt: (0, import_sqlite_core5.integer)("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date()),
@@ -724,11 +806,56 @@ var waveTasks = (0, import_sqlite_core5.sqliteTable)("wave_tasks", {
   canRunInParallel: (0, import_sqlite_core5.integer)("can_run_in_parallel", { mode: "boolean" }).notNull().default(true),
   status: (0, import_sqlite_core5.text)("status", { enum: waveTaskStatusValues }).notNull().default("pending"),
   assignedSessionId: (0, import_sqlite_core5.text)("assigned_session_id"),
+  /**
+   * When the task's FIRST attempt was dispatched. Set once and never moved.
+   *
+   * It used to be rewritten by every dispatch and again by `job:started`, so a
+   * retried task reported the start of its last attempt and there was no stable
+   * instant to measure the task from. `lastAttemptAt` carries the moving one;
+   * `retryCount + 1` is which attempt that is.
+   */
   startedAt: (0, import_sqlite_core5.integer)("started_at", { mode: "timestamp" }),
+  /** When the current (most recent) attempt was dispatched. */
+  lastAttemptAt: (0, import_sqlite_core5.integer)("last_attempt_at", { mode: "timestamp" }),
   completedAt: (0, import_sqlite_core5.integer)("completed_at", { mode: "timestamp" }),
   errorMessage: (0, import_sqlite_core5.text)("error_message"),
   completionSummary: (0, import_sqlite_core5.text)("completion_summary"),
-  retryCount: (0, import_sqlite_core5.integer)("retry_count").notNull().default(0)
+  retryCount: (0, import_sqlite_core5.integer)("retry_count").notNull().default(0),
+  /**
+   * Where the current attempt's work is, for an isolated task: its branch, the
+   * commit that branch was cut from, and the branch's head. From the runner's
+   * completion report — for a failed attempt too, whose partial work the runner
+   * commits. All three NULL for a task that was not isolated, and for one whose
+   * completion was applied from the session row after a restart (the row does
+   * not carry them); `branch` and `commitSha` are then filled in when the wave
+   * is merged, from the runner's answer.
+   *
+   * Cleared when a new attempt claims the task: the runner renames the previous
+   * attempt's branch, so these would name a branch that has moved.
+   */
+  branch: (0, import_sqlite_core5.text)("branch"),
+  baseSha: (0, import_sqlite_core5.text)("base_sha"),
+  commitSha: (0, import_sqlite_core5.text)("commit_sha"),
+  /**
+   * The files the attempt changed: modified ∪ created ∪ deleted from its
+   * completion report. For an isolated task that is git's diff from `baseSha`
+   * to `commitSha`, and exact.
+   *
+   * NULL is "no report recorded them", which is not `[]` — a task that ran and
+   * changed nothing.
+   */
+  filesChanged: (0, import_sqlite_core5.text)("files_changed", { mode: "json" }).$type(),
+  /**
+   * When this attempt's branch was merged into the run branch. NULL is "not
+   * merged": the wave has not ended yet, the branch conflicted, the plan is not
+   * isolated, or the run ended before this task did.
+   *
+   * It is what makes merging a wave safe to repeat. A wave is asked to be
+   * merged only while it has a completed task without this, so a restart
+   * between the merge and the next wave neither skips the merge nor asks for
+   * it again.
+   */
+  mergedAt: (0, import_sqlite_core5.integer)("merged_at", { mode: "timestamp" })
 });
 var waveTasksRelations = (0, import_drizzle_orm4.relations)(waveTasks, ({ one }) => ({
   wave: one(waves, {
@@ -1020,6 +1147,7 @@ var createTableStatements = `
 CREATE TABLE IF NOT EXISTS horizon_items (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
+  description TEXT,
   zone TEXT NOT NULL CHECK(zone IN ('READY', 'REFINING', 'SHAPING', 'DIRECTIONAL')),
   repo TEXT NOT NULL,
   complexity TEXT CHECK(complexity IN ('S', 'M', 'L', 'XL')),
@@ -1159,6 +1287,28 @@ CREATE TABLE IF NOT EXISTS score_history (
   recorded_at INTEGER NOT NULL
 );
 
+-- Runway Samples: runway as it was read, about once a minute
+CREATE TABLE IF NOT EXISTS runway_samples (
+  id TEXT PRIMARY KEY,
+  at INTEGER NOT NULL,
+  runway_hours REAL NOT NULL,
+  capacity INTEGER
+);
+CREATE INDEX IF NOT EXISTS runway_samples_at ON runway_samples(at);
+
+-- Score Readings: a computed Conductor Score with the numbers behind it
+CREATE TABLE IF NOT EXISTS score_readings (
+  id TEXT PRIMARY KEY,
+  at INTEGER NOT NULL,
+  model_version INTEGER NOT NULL,
+  window_hours REAL NOT NULL,
+  total INTEGER NOT NULL,
+  measured_max INTEGER NOT NULL,
+  complete INTEGER NOT NULL,
+  result TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS score_readings_at ON score_readings(at);
+
 -- Activity Events
 CREATE TABLE IF NOT EXISTS activity_events (
   id TEXT PRIMARY KEY,
@@ -1186,6 +1336,12 @@ CREATE TABLE IF NOT EXISTS wave_plans (
   version INTEGER NOT NULL DEFAULT 1,
   previous_wave_plan_id TEXT REFERENCES wave_plans(id),
   raw_markdown TEXT,
+  failure_reason TEXT,
+  run_id TEXT,
+  isolated INTEGER,
+  isolation_note TEXT,
+  run_branch TEXT,
+  run_head_sha TEXT,
   started_at INTEGER,
   completed_at INTEGER,
   created_at INTEGER NOT NULL,
@@ -1223,10 +1379,16 @@ CREATE TABLE IF NOT EXISTS wave_tasks (
   status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'dispatched', 'running', 'completed', 'failed', 'retrying', 'skipped')),
   assigned_session_id TEXT,
   started_at INTEGER,
+  last_attempt_at INTEGER,
   completed_at INTEGER,
   error_message TEXT,
   completion_summary TEXT,
-  retry_count INTEGER NOT NULL DEFAULT 0
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  branch TEXT,
+  base_sha TEXT,
+  commit_sha TEXT,
+  files_changed TEXT,
+  merged_at INTEGER
 );
 
 -- Dependency Edges
@@ -1296,6 +1458,21 @@ function createSQLiteAdapter(path) {
   );
   ensureColumn(sqliteConnection, "ruflo_sessions", "tokens_used", "tokens_used INTEGER");
   ensureColumn(sqliteConnection, "ruflo_sessions", "cost_usd", "cost_usd INTEGER");
+  ensureColumn(sqliteConnection, "horizon_items", "description", "description TEXT");
+  ensureColumn(sqliteConnection, "horizon_items", "archived_at", "archived_at INTEGER");
+  ensureColumn(sqliteConnection, "ruflo_sessions", "telemetry", "telemetry TEXT");
+  ensureColumn(sqliteConnection, "wave_tasks", "last_attempt_at", "last_attempt_at INTEGER");
+  ensureColumn(sqliteConnection, "wave_plans", "failure_reason", "failure_reason TEXT");
+  ensureColumn(sqliteConnection, "wave_plans", "run_id", "run_id TEXT");
+  ensureColumn(sqliteConnection, "wave_plans", "isolated", "isolated INTEGER");
+  ensureColumn(sqliteConnection, "wave_plans", "isolation_note", "isolation_note TEXT");
+  ensureColumn(sqliteConnection, "wave_plans", "run_branch", "run_branch TEXT");
+  ensureColumn(sqliteConnection, "wave_plans", "run_head_sha", "run_head_sha TEXT");
+  ensureColumn(sqliteConnection, "wave_tasks", "branch", "branch TEXT");
+  ensureColumn(sqliteConnection, "wave_tasks", "base_sha", "base_sha TEXT");
+  ensureColumn(sqliteConnection, "wave_tasks", "commit_sha", "commit_sha TEXT");
+  ensureColumn(sqliteConnection, "wave_tasks", "files_changed", "files_changed TEXT");
+  ensureColumn(sqliteConnection, "wave_tasks", "merged_at", "merged_at INTEGER");
   sqliteDb = (0, import_better_sqlite32.drizzle)(sqliteConnection, { schema: schema_exports });
   return sqliteDb;
 }

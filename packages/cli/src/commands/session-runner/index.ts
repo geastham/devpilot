@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import { resolve } from 'path';
 import { SessionRunner } from './server';
+import { resolveHarness, type Harness } from './harness';
 import type { RunnerConfig } from './types';
 
 export { SessionRunner } from './server';
@@ -51,10 +52,34 @@ export const sessionRunnerCommand = new Command('session-runner')
   )
   .option('--max-concurrent <n>', 'Max simultaneous sessions before answering 429', '3')
   .option('--timeout <minutes>', 'Wall-clock cap per session', '30')
+  .option(
+    '--harness <spec>',
+    'How agents are configured: baseline | lean, optionally +technique (e.g. baseline+compact-200k)',
+    process.env.DEVPILOT_HARNESS || 'baseline',
+  )
+  .option(
+    '--worktree-root <dir>',
+    'Where per-task git worktrees are created (default ~/.devpilot/worktrees)',
+    process.env.DEVPILOT_WORKTREE_ROOT,
+  )
+  .option(
+    '--worktree-setup <command>',
+    'Shell command run in each new task worktree before its agent starts (e.g. "pnpm install --offline")',
+    process.env.DEVPILOT_WORKTREE_SETUP,
+  )
   .action(async (options) => {
     let repoMap: Map<string, string>;
     try {
       repoMap = parseRepoMap(options.repo ?? []);
+    } catch (error) {
+      console.error(chalk.red(error instanceof Error ? error.message : String(error)));
+      process.exitCode = 1;
+      return;
+    }
+
+    let harness: Harness;
+    try {
+      harness = resolveHarness(options.harness);
     } catch (error) {
       console.error(chalk.red(error instanceof Error ? error.message : String(error)));
       process.exitCode = 1;
@@ -71,6 +96,11 @@ export const sessionRunnerCommand = new Command('session-runner')
       permissionMode: options.permissionMode,
       maxConcurrent: parseInt(options.maxConcurrent, 10),
       timeoutMs: parseInt(options.timeout, 10) * 60_000,
+      harness,
+      isolation: {
+        worktreeRoot: options.worktreeRoot ? resolve(options.worktreeRoot) : undefined,
+        setupCommand: options.worktreeSetup || undefined,
+      },
       log: (line) => console.log(chalk.dim(`[runner] ${line}`)),
     };
 
@@ -91,6 +121,22 @@ export const sessionRunnerCommand = new Command('session-runner')
     console.log(`  ${chalk.dim('workspace')}   ${config.workspace}`);
     console.log(`  ${chalk.dim('claude')}      ${config.claudePath} (${config.permissionMode})`);
     console.log(`  ${chalk.dim('concurrency')} ${config.maxConcurrent}`);
+    console.log(`  ${chalk.dim('harness')}     ${harness.stamp}`);
+    // What was switched on, and what to watch for — printed where the person
+    // who chose it will see it, since each of these is a trade.
+    for (const t of harness.techniques) {
+      console.log(`  ${chalk.dim('           ')} ${t.id}: ${t.summary}`);
+      console.log(chalk.dim(`               watch for ${t.watch}`));
+    }
+    // A task that is one of a planned run gets its own worktree and branch. A
+    // worktree has the tracked files and nothing else, which is worth saying
+    // to whoever is about to wonder why an agent could not run the tests.
+    console.log(
+      `  ${chalk.dim('worktrees')}   ${config.isolation?.worktreeRoot ?? '~/.devpilot/worktrees'}` +
+        (config.isolation?.setupCommand
+          ? chalk.dim(` (setup: ${config.isolation.setupCommand})`)
+          : chalk.dim(' (no --worktree-setup: tracked files only)'))
+    );
     if (repoMap.size > 0) {
       for (const [repo, path] of repoMap) console.log(`  ${chalk.dim('repo')}        ${repo} → ${path}`);
     }

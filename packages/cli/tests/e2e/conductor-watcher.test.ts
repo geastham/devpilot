@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ConductorWatcher } from '../../src/commands/bridge/conductor-watcher';
+import { ConductorWatcher, programOf } from '../../src/commands/bridge/conductor-watcher';
 
 /**
  * The write-back: a finished conductor run must reach Linear.
@@ -591,5 +591,146 @@ describe('the summary a reviewer reads weeks later', () => {
     expect(summary).toContain('2.3');
     expect(summary).toContain('cannot find name Clock');
     expect(summary).toContain('2 of 5');
+  });
+});
+
+/**
+ * "DevPilot finished 6 tasks" is the sentence after which a person asks where
+ * the work is. Until the watcher relayed it, a successful run's ticket did not
+ * say — and the two possible answers are opposites.
+ */
+describe('where the work is', () => {
+  beforeEach(() => {
+    completions = [];
+    statuses = [];
+    states = {};
+    failNext = 0;
+  });
+
+  const SENTENCE =
+    'The work is on the local branch `devpilot/AVA-13-k3x9qd/run` (at 25a9d9af), on the machine that ran it, and has not been pushed.';
+  const done = (outcome: Record<string, unknown>) => ({
+    status: 'complete',
+    completedWaves: [0, 1],
+    outcome: { tasksTotal: 3, tasksComplete: 3, wavesTotal: 2, filesChanged: ['src/a.ts'], ...outcome },
+  });
+  const summaryOf = async (state: Record<string, unknown>) => {
+    states.i1 = state;
+    const w = watcher();
+    w.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-13' });
+    await w.sweep();
+    return String(completions[0].report.summary);
+  };
+
+  it('names the run branch on a run that succeeded, as its own paragraph', async () => {
+    const summary = await summaryOf(done({ isolation: { isolated: true, summary: SENTENCE } }));
+    expect(summary).toContain('3 tasks');
+    expect(summary.endsWith(`\n\n${SENTENCE}`)).toBe(true);
+    // Not listed among the files, and not counted as one.
+    expect(summary).toContain('1 file changed');
+  });
+
+  it('says it once on a run that failed', async () => {
+    const summary = await summaryOf({
+      status: 'failed',
+      outcome: {
+        tasksTotal: 3,
+        tasksComplete: 2,
+        failures: [{ taskCode: '1.3', error: 'merge conflict with the run branch in: seed.txt' }],
+        isolation: { isolated: true, summary: SENTENCE },
+      },
+    });
+    expect(summary).toContain('merge conflict with the run branch in: seed.txt');
+    expect(summary.split(SENTENCE)).toHaveLength(2);
+  });
+
+  it('says the opposite thing for a run that could not be isolated', async () => {
+    const summary = await summaryOf(
+      done({ isolation: { isolated: false, reason: 'the session runner does not support it' } })
+    );
+    expect(summary).toContain('not given a branch per task (the session runner does not support it)');
+    expect(summary).toContain('uncommitted edits in the checkout');
+    expect(summary).not.toContain('local branch');
+  });
+
+  it('says nothing about it when the cockpit did not', async () => {
+    // An older cockpit, or a plan nothing was dispatched for.
+    const summary = await summaryOf(done({}));
+    expect(summary).not.toMatch(/branch|uncommitted/);
+    expect(await summaryOf(done({ isolation: { isolated: true, summary: null } }))).not.toMatch(/branch/);
+  });
+});
+
+describe('a run the cockpit is holding', () => {
+  beforeEach(() => {
+    completions = [];
+    statuses = [];
+    states = {};
+    failNext = 0;
+  });
+
+  const REASON =
+    'not resumed after a restart: no activity since 2026-09-12T08:00:00.000Z. Resume it from the cockpit to continue.';
+
+  it('says so, with the reason, once — and keeps watching', async () => {
+    states.i1 = {
+      status: 'executing',
+      currentWaveIndex: 1,
+      completedWaves: [0],
+      outcome: { tasksTotal: 6, tasksComplete: 3, pausedReason: REASON },
+    };
+    const w = watcher();
+    w.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-13' });
+    await w.sweep();
+    await w.sweep();
+
+    expect(statuses).toHaveLength(1);
+    expect(String(statuses[0].report.message)).toBe(`Run paused — ${REASON}`);
+    // Held, not over: nothing is reported as a completion.
+    expect(completions).toHaveLength(0);
+  });
+
+  it('reports ordinary progress again once it is resumed', async () => {
+    states.i1 = { status: 'executing', completedWaves: [0], outcome: { tasksTotal: 6, tasksComplete: 3, pausedReason: REASON } };
+    const w = watcher();
+    w.watch({ sessionId: 's1', itemId: 'i1', linearIdentifier: 'AVA-13' });
+    await w.sweep();
+
+    states.i1 = { status: 'executing', currentWaveIndex: 1, completedWaves: [0], outcome: { tasksTotal: 6, tasksComplete: 4, wavesTotal: 2, pausedReason: null } };
+    await w.sweep();
+
+    expect(statuses).toHaveLength(2);
+    expect(String(statuses[1].report.message)).toContain('4/6 tasks done');
+  });
+});
+
+/**
+ * What the cockpit is told about a shell command.
+ *
+ * The first three words used to cross, which is where a secret on a command
+ * line usually is. A command's arguments are tool input, and tool input stays
+ * on the machine.
+ */
+describe('programOf', () => {
+  it('names the program and drops its arguments', () => {
+    expect(programOf('pnpm vitest run tests/unit')).toBe('pnpm');
+    expect(programOf('git commit -m "fix the thing"')).toBe('git');
+  });
+
+  it('never carries a secret set inline on the command', () => {
+    expect(programOf('STRIPE_KEY=sk_live_abc123 node deploy.js')).toBe('node');
+    expect(programOf('export API_TOKEN=abc123 && npm run deploy')).toBe('npm');
+    expect(programOf("curl -H 'Authorization: Bearer abc123' https://api.example.com")).toBe('curl');
+  });
+
+  it('shows a binary by name, not by where it lives on the machine', () => {
+    expect(programOf('/Users/someone/project/node_modules/.bin/tsc --noEmit')).toBe('tsc');
+  });
+
+  it('falls back to "shell" rather than guessing at something odd', () => {
+    expect(programOf(undefined)).toBe('shell');
+    expect(programOf('')).toBe('shell');
+    expect(programOf('$(cat /etc/passwd)')).toBe('shell');
+    expect(programOf('FOO=bar')).toBe('shell');
   });
 });

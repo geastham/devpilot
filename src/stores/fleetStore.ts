@@ -18,6 +18,8 @@ interface FleetStoreState {
   sessions: RufloSession[];
   runwayHours: number;
   runwayStatus: RunwayStatus;
+  /** Concurrent agent slots, from the operator or the runner. Null when unknown. */
+  fleetCapacity: number | null;
   conductorScore: ConductorScore;
   avgVelocityTasksPerHour: number;
   planningVelocityPerHour: number;
@@ -31,6 +33,7 @@ interface FleetStoreState {
   addSession: (session: RufloSession) => void;
   removeSession: (sessionId: string) => void;
   setRunway: (hours: number) => void;
+  setFleetCapacity: (capacity: number | null) => void;
   setScore: (score: ConductorScore) => void;
   addActivityEvent: (event: ActivityEvent) => void;
   setActivityEvents: (events: ActivityEvent[]) => void;
@@ -48,14 +51,18 @@ interface FleetStoreState {
 // Default values
 // ============================================================================
 
+/**
+ * Before the first fetch there is no score, and saying so is different from
+ * saying it is zero: nothing measured, out of nothing.
+ */
 const defaultScore: ConductorScore = {
   total: 0,
-  fleetUtilization: 0,
-  runwayHealth: 0,
-  planAccuracy: 0,
-  costEfficiency: 0,
-  velocityTrend: 0,
-  leaderboardRank: null,
+  measuredMax: 0,
+  max: 1000,
+  complete: false,
+  dimensions: [],
+  windowHours: 0,
+  modelVersion: 0,
 };
 
 // ============================================================================
@@ -69,6 +76,7 @@ export const useFleetStore = create<FleetStoreState>()(
       sessions: [],
       runwayHours: 0,
       runwayStatus: 'healthy',
+      fleetCapacity: null,
       conductorScore: defaultScore,
       avgVelocityTasksPerHour: 0,
       planningVelocityPerHour: 0,
@@ -101,6 +109,8 @@ export const useFleetStore = create<FleetStoreState>()(
           runwayHours: hours,
           runwayStatus: getRunwayStatusFromHours(hours),
         }),
+
+      setFleetCapacity: (capacity) => set({ fleetCapacity: capacity }),
 
       setScore: (score) => set({ conductorScore: score }),
 

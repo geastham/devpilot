@@ -153,6 +153,151 @@ describe('cost while running', () => {
     expect(t.costIsEstimate).toBe(true);
   });
 
+  /**
+   * The stream emits one event per content block and repeats the response's
+   * usage on each — verified against `claude -p --output-format stream-json`,
+   * where a thinking + text + tool_use reply arrived as three events with one
+   * id and identical usage. Adding each one tripled the running estimate.
+   */
+  it('counts a response once, however many blocks the stream splits it into', () => {
+    const block = (id: string, usage: Record<string, number>) =>
+      JSON.stringify({ type: 'assistant', message: { id, usage, content: [] } });
+    const usage = { input_tokens: 10, output_tokens: 4, cache_read_input_tokens: 13_796 };
+
+    const once = new TelemetryCollector();
+    once.ingestLine(block('msg_1', usage));
+
+    const split = new TelemetryCollector();
+    for (let i = 0; i < 3; i++) split.ingestLine(block('msg_1', usage));
+
+    expect(split.snapshot().costUsd).toBeCloseTo(once.snapshot().costUsd);
+    expect(split.snapshot().tokensCacheRead).toBe(13_796);
+    expect(split.snapshot().turns).toBe(1);
+  });
+
+  it('takes the final token counts from the result, including cache', () => {
+    const c = new TelemetryCollector();
+    c.ingestLine(turn({ input_tokens: 10, output_tokens: 4 }));
+    c.ingestLine(
+      JSON.stringify({
+        type: 'result',
+        total_cost_usd: 0.03,
+        num_turns: 2,
+        usage: {
+          input_tokens: 18,
+          output_tokens: 173,
+          cache_read_input_tokens: 40_523,
+          cache_creation_input_tokens: 16_070,
+        },
+      })
+    );
+    expect(c.snapshot()).toMatchObject({
+      tokensIn: 18,
+      tokensOut: 173,
+      tokensCacheRead: 40_523,
+      tokensCacheWrite: 16_070,
+    });
+  });
+
+  /**
+   * The shape of a real run, numbers and all: three Haiku responses whose
+   * stream usage carries the input side and a placeholder for output (3, 4, 4),
+   * then a result with the real output (567) and Claude's own cost.
+   *
+   * The per-model buckets used to be left as the stream had counted them, so
+   * the 556 output tokens that only the result knew about belonged to no model
+   * and were priced at the default rate — Opus. The list price of a Haiku
+   * session came out at nearly twice what Claude Code itself reported.
+   */
+  describe('a finished run is priced at its own model’s rates', () => {
+    const haiku = 'claude-haiku-4-5-20251001';
+    const response = (id: string, cacheRead: number, cacheWrite: number, output: number) =>
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          id,
+          model: haiku,
+          usage: {
+            input_tokens: 8,
+            output_tokens: output,
+            cache_read_input_tokens: cacheRead,
+            cache_creation_input_tokens: cacheWrite,
+            cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: cacheWrite },
+          },
+          content: [{ type: 'text', text: 'working' }],
+        },
+      });
+    const usage = {
+      input_tokens: 25,
+      output_tokens: 567,
+      cache_read_input_tokens: 66_702,
+      cache_creation_input_tokens: 6_570,
+      cache_creation: { ephemeral_1h_input_tokens: 6_570, ephemeral_5m_input_tokens: 0 },
+    };
+    const stream = () => {
+      const c = new TelemetryCollector();
+      c.ingestLine(response('msg_1', 18_138, 5_904, 3));
+      c.ingestLine(response('msg_2', 24_042, 480, 4));
+      c.ingestLine(response('msg_3', 24_522, 186, 4));
+      return c;
+    };
+
+    it('agrees with Claude Code’s own figure once the result arrives', () => {
+      const c = stream();
+      c.ingestLine(
+        JSON.stringify({
+          type: 'result',
+          total_cost_usd: 0.0226702,
+          num_turns: 3,
+          usage,
+          modelUsage: {
+            [haiku]: { inputTokens: 25, outputTokens: 567, cacheReadInputTokens: 66_702, cacheCreationInputTokens: 6_570 },
+          },
+        })
+      );
+      const reading = c.snapshot();
+      expect(reading.tokensOut).toBe(567);
+      // 25×$1 + 567×$5 + 66,702×$0.10 + 6,570×$2 (one-hour write), per million.
+      expect(reading.listCostUsd).toBeCloseTo(0.0226702, 7);
+      expect(reading.listCostUsd).toBeCloseTo(reading.costUsd, 7);
+      expect(reading.model).toBe(haiku);
+    });
+
+    it('still does when the result names no models', () => {
+      const c = stream();
+      c.ingestLine(JSON.stringify({ type: 'result', total_cost_usd: 0.0226702, num_turns: 3, usage }));
+      expect(c.snapshot().listCostUsd).toBeCloseTo(0.0226702, 7);
+    });
+
+    it('includes a model that only did background work', () => {
+      // The top-level usage can leave out a model the per-model figures name.
+      const c = stream();
+      c.ingestLine(
+        JSON.stringify({
+          type: 'result',
+          total_cost_usd: 0.05,
+          num_turns: 3,
+          usage,
+          modelUsage: {
+            [haiku]: { inputTokens: 25, outputTokens: 567, cacheReadInputTokens: 66_702, cacheCreationInputTokens: 6_570 },
+            'claude-opus-5-5': { inputTokens: 1_000, outputTokens: 200, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+          },
+        })
+      );
+      const reading = c.snapshot();
+      expect(reading.tokensIn).toBe(1_025);
+      expect(reading.tokensOut).toBe(767);
+      // Haiku's share as before, plus 1,000×$4 + 200×$20 per million on Opus 5.5.
+      expect(reading.listCostUsd).toBeCloseTo(0.0226702 + 0.004 + 0.004, 7);
+    });
+
+    it('says so while the run is in flight: output is not yet known', () => {
+      // Before the result, only the placeholder output has been seen.
+      expect(stream().snapshot().tokensOut).toBe(11);
+      expect(stream().snapshot().costIsEstimate).toBe(true);
+    });
+  });
+
   it('prices cache reads far below fresh input', () => {
     const fresh = new TelemetryCollector();
     fresh.ingestLine(turn({ input_tokens: 100_000 }));
