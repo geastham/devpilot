@@ -1,18 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
   <!--
-    DevPilot mark, redrawn as vector.
+    The DevPilot mark as an icon: the terminal prompt from the dashboard header
+    (src/components/brand/DevPilotMark.tsx), on its chip.
 
-    public/devpilot-logo.png (1024px compass rose over a wireframe globe, with
-    wordmark) was being served AS THE FAVICON: 1.2 MB to render 16 CSS pixels,
-    where the hairlines fall below a pixel and the wordmark is unreadable.
-
-    Deliberately BOLDER than the source art. A first pass kept both of the
-    original's rings at 1.5px; at 16px they anti-aliased into a grey smudge.
-    One ring at 3px and a star with real mass at the waist is what actually
-    survives a browser tab — the mark has to read at 16px first and look like
-    the logo second.
+    Drawn BOLDER than the component. In the header the glyph is half the chip
+    wide with a hairline stroke; at 16 CSS pixels that anti-aliases into a grey
+    smudge. Here it spans most of the chip at nearly twice the weight, which is
+    what survives a browser tab. The hosted app (devpilot-website, app/icon.svg)
+    carries an identical copy.
   -->
-  <rect width="64" height="64" rx="13" fill="#070A0F"/>
-  <circle cx="32" cy="32" r="18" fill="none" stroke="#22D3EE" stroke-opacity="0.45" stroke-width="3"/>
-  <path d="M32 3 L37.5 26.5 L61 32 L37.5 37.5 L32 61 L26.5 37.5 L3 32 L26.5 26.5 Z" fill="#67E8F9"/>
+  <!-- Border and fill as two solid shapes: a translucent stroke straddles the
+       chip's edge and renders as two bands, light outside and dark inside. -->
+  <rect width="64" height="64" rx="15" fill="#157181"/>
+  <rect x="3" y="3" width="58" height="58" rx="12" fill="#0B2128"/>
+  <path d="M18.5 20.5 L28.5 30.5 L18.5 40.5 M32 43.5 H45.5" fill="none" stroke="#67E8F9" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
