@@ -524,6 +524,33 @@ var wavePlans = sqliteTable5("wave_plans", {
    */
   runBranch: text5("run_branch"),
   runHeadSha: text5("run_head_sha"),
+  /**
+   * What the wave assigner changed about the planner's layout, and why: each
+   * task it moved for a shared file, for a dependency between two tasks' files,
+   * or to fit the fleet's capacity, with a sentence of reason.
+   *
+   * Until this column the assigner's adjustments were computed, counted into
+   * `wave_plan_metrics.file_conflicts_avoided`, and thrown away — so a plan
+   * review could show THAT two tasks had been sequenced and never why.
+   *
+   * NULL is "not recorded": the plan predates the column. That is not `[]`,
+   * which is an assignment that moved nothing.
+   */
+  adjustments: text5("adjustments", { mode: "json" }).$type(),
+  /**
+   * Whether this plan's waves were assigned with a code graph, and what the
+   * graph said about each task: how many files depend on what it changes, the
+   * first of them, and the claims the assigner sequenced on (TRD 27 §5.1,
+   * §5.3). When the graph was not used, the reason it was not.
+   *
+   * A snapshot from when the plan was made, of an index that goes stale as the
+   * code changes; `indexedAt` inside it says how old the index was then.
+   *
+   * NULL is "not asked": the plan predates the column, or was written by a
+   * caller that does not ask. Such a plan was assigned from its tasks' own
+   * files alone, exactly as every plan was before.
+   */
+  codeGraph: text5("code_graph", { mode: "json" }).$type(),
   startedAt: integer5("started_at", { mode: "timestamp" }),
   completedAt: integer5("completed_at", { mode: "timestamp" }),
   createdAt: integer5("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date()),
@@ -1123,6 +1150,8 @@ CREATE TABLE IF NOT EXISTS wave_plans (
   isolation_note TEXT,
   run_branch TEXT,
   run_head_sha TEXT,
+  adjustments TEXT,
+  code_graph TEXT,
   started_at INTEGER,
   completed_at INTEGER,
   created_at INTEGER NOT NULL,
@@ -1254,6 +1283,8 @@ function createSQLiteAdapter(path) {
   ensureColumn(sqliteConnection, "wave_tasks", "commit_sha", "commit_sha TEXT");
   ensureColumn(sqliteConnection, "wave_tasks", "files_changed", "files_changed TEXT");
   ensureColumn(sqliteConnection, "wave_tasks", "merged_at", "merged_at INTEGER");
+  ensureColumn(sqliteConnection, "wave_plans", "adjustments", "adjustments TEXT");
+  ensureColumn(sqliteConnection, "wave_plans", "code_graph", "code_graph TEXT");
   sqliteDb = drizzle(sqliteConnection, { schema: schema_exports });
   return sqliteDb;
 }
@@ -1341,9 +1372,11 @@ function resetDatabase() {
 // src/wave-planner/index.ts
 var wave_planner_exports = {};
 __export(wave_planner_exports, {
+  BLAST_RADIUS_LISTED: () => BLAST_RADIUS_LISTED,
   CodebaseContextService: () => CodebaseContextService,
   CompletionListener: () => CompletionListener,
   ConcurrencyManager: () => ConcurrencyManager,
+  DEFAULT_HISTORY_LIMIT: () => DEFAULT_HISTORY_LIMIT,
   DEFAULT_PLANNER_MODEL: () => DEFAULT_PLANNER_MODEL,
   DEFAULT_RECONCILE_INTERVAL_MS: () => DEFAULT_RECONCILE_INTERVAL_MS,
   DEFAULT_RECONCILE_STALL_MS: () => DEFAULT_RECONCILE_STALL_MS,
@@ -1353,9 +1386,12 @@ __export(wave_planner_exports, {
   ExecutionBridge: () => ExecutionBridge,
   FleetContextService: () => FleetContextService,
   IN_FLIGHT_WAVE_TASK_STATUSES: () => IN_FLIGHT_WAVE_TASK_STATUSES,
+  MAX_DEPENDENT_CLAIMS_PER_TASK: () => MAX_DEPENDENT_CLAIMS_PER_TASK,
+  MAX_HISTORY_LIMIT: () => MAX_HISTORY_LIMIT,
   MAX_ITEM_DESCRIPTION_CHARS: () => MAX_ITEM_DESCRIPTION_CHARS,
   PlanRefinementService: () => PlanRefinementService,
   PromptConstructor: () => PromptConstructor,
+  SUMMARY_MAX_CHARS: () => SUMMARY_MAX_CHARS,
   TERMINAL_WAVE_PLAN_STATUSES: () => TERMINAL_WAVE_PLAN_STATUSES,
   TERMINAL_WAVE_TASK_STATUSES: () => TERMINAL_WAVE_TASK_STATUSES,
   WaveDispatchCoordinator: () => WaveDispatchCoordinator,
@@ -1363,8 +1399,10 @@ __export(wave_planner_exports, {
   WavePlanGenerator: () => WavePlanGenerator,
   WavePlannerAIClient: () => WavePlannerAIClient,
   assignWaves: () => assignWaves,
+  blastRadiusOf: () => blastRadiusOf,
   buildDAGGraph: () => buildDAGGraph,
   buildSpecContentForItem: () => buildSpecContentForItem,
+  codeGraphOf: () => codeGraphOf,
   collectFinalMetrics: () => collectFinalMetrics,
   compareTaskCodes: () => compareTaskCodes,
   computeCriticalPath: () => computeCriticalPath,
@@ -1374,6 +1412,8 @@ __export(wave_planner_exports, {
   createPromptConstructor: () => createPromptConstructor,
   createWavePlanGenerator: () => createWavePlanGenerator,
   defaultTemplate: () => defaultTemplate,
+  dependentClaimsOf: () => dependentClaimsOf,
+  describeCodeGraph: () => describeCodeGraph,
   extractAllTaskCodes: () => extractAllTaskCodes,
   extractWaveFromTaskCode: () => extractWaveFromTaskCode,
   findCommonTheme: () => findCommonTheme,
@@ -1390,6 +1430,7 @@ __export(wave_planner_exports, {
   initExecutionBridge: () => initExecutionBridge,
   isDispatchableWaveTaskStatus: () => isDispatchableWaveTaskStatus,
   isInFlightWaveTaskStatus: () => isInFlightWaveTaskStatus,
+  isPlanCodeGraph: () => isPlanCodeGraph,
   isTerminalWavePlanStatus: () => isTerminalWavePlanStatus,
   isTerminalWaveTaskStatus: () => isTerminalWaveTaskStatus,
   isWaveOver: () => isWaveOver,
@@ -1400,6 +1441,7 @@ __export(wave_planner_exports, {
   parseFilePaths: () => parseFilePaths,
   parseWavePlanResponse: () => parseWavePlanResponse,
   projectWavePlanToPlan: () => projectWavePlanToPlan,
+  readPlanCodeGraph: () => readPlanCodeGraph,
   readWaveSignal: () => readWaveSignal,
   refinementTemplate: () => refinementTemplate,
   renderTicketDescription: () => renderTicketDescription,
@@ -1408,13 +1450,16 @@ __export(wave_planner_exports, {
   resolveWikiModel: () => resolveWikiModel,
   runIdFor: () => runIdFor,
   scorePlan: () => scorePlan,
+  selectDependentClaims: () => selectDependentClaims,
   simplifiedTemplate: () => simplifiedTemplate,
   sleep: () => sleep,
   toActivityEventType: () => toActivityEventType,
   topologicalSort: () => topologicalSort,
   validateDAG: () => validateDAG,
   waveSignalFor: () => waveSignalFor,
-  workFromReport: () => workFromReport
+  withCodeGraph: () => withCodeGraph,
+  workFromReport: () => workFromReport,
+  workHistoryForPaths: () => workHistoryForPaths
 });
 
 // src/wave-planner/utils.ts
@@ -2074,6 +2119,33 @@ function computeCriticalPath(tasks2, edges) {
 }
 
 // src/wave-planner/wave-assigner.ts
+var MAX_DEPENDENT_CLAIMS_PER_TASK = 25;
+function selectDependentClaims(ownFiles, claims, max = MAX_DEPENDENT_CLAIMS_PER_TASK) {
+  const own = new Set(ownFiles);
+  const byOwnFile = /* @__PURE__ */ new Map();
+  for (const claim of claims) {
+    if (!own.has(claim.dependsOn) || own.has(claim.file)) continue;
+    let dependents = byOwnFile.get(claim.dependsOn);
+    if (!dependents) byOwnFile.set(claim.dependsOn, dependents = /* @__PURE__ */ new Set());
+    dependents.add(claim.file);
+  }
+  const groups = [...byOwnFile.entries()].map(([file, dependents]) => ({ file, dependents: [...dependents].sort() })).sort((a, b) => a.dependents.length - b.dependents.length || compareStrings(a.file, b.file));
+  const selected = [];
+  const leftOut = [];
+  let full = false;
+  for (const group of groups) {
+    if (full || selected.length + group.dependents.length > max) {
+      full = true;
+      leftOut.push({ file: group.file, dependents: group.dependents.length });
+      continue;
+    }
+    for (const file of group.dependents) selected.push({ file, dependsOn: group.file });
+  }
+  return { claims: selected, leftOut };
+}
+function compareStrings(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
 function assignWaves(tasks2, edges, config) {
   if (tasks2.length === 0) {
     return {
@@ -2094,7 +2166,9 @@ function assignWaves(tasks2, edges, config) {
   const tasksByDepth = groupTasksByDepth(tasks2, depths);
   const { wavesAfterConflicts, conflictAdjustments } = resolveFileConflicts(
     tasksByDepth,
-    graph
+    graph,
+    config?.dependentClaims,
+    config?.maxDependentClaimsPerTask
   );
   const { finalWaves, capacityAdjustments } = applyCapacityConstraints(
     wavesAfterConflicts,
@@ -2139,11 +2213,12 @@ function groupTasksByDepth(tasks2, depths) {
   }
   return grouped;
 }
-function resolveFileConflicts(tasksByDepth, graph) {
+function resolveFileConflicts(tasksByDepth, graph, dependentClaims, maxDependentClaimsPerTask) {
   const adjustments = [];
   const result = /* @__PURE__ */ new Map();
   const claimedFilesByWave = /* @__PURE__ */ new Map();
   const waveByTaskCode = /* @__PURE__ */ new Map();
+  const dependencies = dependentClaims && Object.values(dependentClaims).some((claims) => claims.length > 0) ? new DependencyClaims(dependentClaims, maxDependentClaimsPerTask) : null;
   const depths = Array.from(tasksByDepth.keys()).sort((a, b) => a - b);
   for (const depth of depths) {
     const tasksAtDepth = tasksByDepth.get(depth) || [];
@@ -2157,10 +2232,13 @@ function resolveFileConflicts(tasksByDepth, graph) {
       }
       let wave = earliestWave;
       const conflictingFiles2 = [];
+      const dependencyConflicts = [];
+      const ownClaims = dependencies ? dependencies.claimsOf(task) : [];
       for (; ; ) {
         const claimedFiles2 = claimedFilesByWave.get(wave);
         const conflictsHere = claimedFiles2 ? task.filePaths.filter((file) => claimedFiles2.has(file)) : [];
-        if (conflictsHere.length === 0) {
+        const dependenciesHere = dependencies ? dependencies.conflictsIn(wave, task, ownClaims) : [];
+        if (conflictsHere.length === 0 && dependenciesHere.length === 0) {
           break;
         }
         for (const file of conflictsHere) {
@@ -2168,16 +2246,31 @@ function resolveFileConflicts(tasksByDepth, graph) {
             conflictingFiles2.push(file);
           }
         }
+        for (const sentence of dependenciesHere) {
+          if (!dependencyConflicts.includes(sentence)) {
+            dependencyConflicts.push(sentence);
+          }
+        }
         wave++;
       }
       if (wave !== earliestWave) {
-        adjustments.push({
-          type: "FILE_CONFLICT_BUMP",
-          taskCode: task.taskCode,
-          fromWave: earliestWave,
-          toWave: wave,
-          reason: `File conflict detected with files: ${conflictingFiles2.join(", ")}`
-        });
+        if (conflictingFiles2.length > 0) {
+          adjustments.push({
+            type: "FILE_CONFLICT_BUMP",
+            taskCode: task.taskCode,
+            fromWave: earliestWave,
+            toWave: wave,
+            reason: `File conflict detected with files: ${conflictingFiles2.join(", ")}` + (dependencyConflicts.length > 0 ? `; dependency conflict: ${dependencyConflicts.join("; ")}` : "")
+          });
+        } else {
+          adjustments.push({
+            type: "DEPENDENCY_CONFLICT_BUMP",
+            taskCode: task.taskCode,
+            fromWave: earliestWave,
+            toWave: wave,
+            reason: `Dependency conflict: ${dependencyConflicts.join("; ")}`
+          });
+        }
       }
       const tasksInWave = result.get(wave) || [];
       tasksInWave.push(task);
@@ -2187,6 +2280,9 @@ function resolveFileConflicts(tasksByDepth, graph) {
         claimedFiles.add(file);
       }
       claimedFilesByWave.set(wave, claimedFiles);
+      if (dependencies) {
+        dependencies.place(wave, task, ownClaims);
+      }
       waveByTaskCode.set(
         task.taskCode,
         Math.max(waveByTaskCode.get(task.taskCode) ?? 0, wave)
@@ -2198,6 +2294,68 @@ function resolveFileConflicts(tasksByDepth, graph) {
     conflictAdjustments: adjustments
   };
 }
+var DependencyClaims = class {
+  constructor(claims, max = MAX_DEPENDENT_CLAIMS_PER_TASK) {
+    this.claims = claims;
+    this.max = max;
+    this.ownerByWave = /* @__PURE__ */ new Map();
+    this.claimByWave = /* @__PURE__ */ new Map();
+  }
+  /**
+   * The claims this task brings, capped. Looked up by task code and then
+   * filtered to the row's own files, so two rows sharing a code (an invalid
+   * plan, which the assigner still has to survive) each get only the claims
+   * that are theirs.
+   */
+  claimsOf(task) {
+    const given = this.claims[task.taskCode];
+    if (!given || given.length === 0) return [];
+    return selectDependentClaims(task.filePaths, given, this.max).claims;
+  }
+  /**
+   * Why `task` may not join `wave`, one sentence per pair of files, or none.
+   * Each sentence names the file that depends, the file it depends on, and the
+   * task already in the wave — which is what a person reviewing the plan needs
+   * to check the claim against the code.
+   */
+  conflictsIn(wave, task, ownClaims) {
+    const sentences = [];
+    const claimed = this.claimByWave.get(wave);
+    if (claimed) {
+      for (const file of task.filePaths) {
+        const claim = claimed.get(file);
+        if (claim && claim.taskCode !== task.taskCode) {
+          sentences.push(`${file} depends on ${claim.dependsOn}, which task ${claim.taskCode} changes`);
+        }
+      }
+    }
+    const owners = this.ownerByWave.get(wave);
+    if (owners) {
+      for (const claim of ownClaims) {
+        const owner = owners.get(claim.file);
+        if (owner !== void 0 && owner !== task.taskCode) {
+          sentences.push(`${claim.file}, which task ${owner} changes, depends on ${claim.dependsOn}`);
+        }
+      }
+    }
+    return sentences;
+  }
+  /** Record a task's files and claims against the wave it was placed in. */
+  place(wave, task, ownClaims) {
+    let owners = this.ownerByWave.get(wave);
+    if (!owners) this.ownerByWave.set(wave, owners = /* @__PURE__ */ new Map());
+    for (const file of task.filePaths) {
+      if (!owners.has(file)) owners.set(file, task.taskCode);
+    }
+    let claimed = this.claimByWave.get(wave);
+    if (!claimed) this.claimByWave.set(wave, claimed = /* @__PURE__ */ new Map());
+    for (const claim of ownClaims) {
+      if (!claimed.has(claim.file)) {
+        claimed.set(claim.file, { taskCode: task.taskCode, dependsOn: claim.dependsOn });
+      }
+    }
+  }
+};
 function applyCapacityConstraints(tasksByDepth, maxTasksPerWave) {
   const adjustments = [];
   const waves2 = [];
@@ -2320,7 +2478,7 @@ function computeFileConflictScore(assignment, tasks2) {
     return 1;
   }
   const fileConflictAdjustments = assignment.adjustments.filter(
-    (adj) => adj.type === "FILE_CONFLICT_BUMP"
+    (adj) => adj.type === "FILE_CONFLICT_BUMP" || adj.type === "DEPENDENCY_CONFLICT_BUMP"
   ).length;
   const conflictRatio = fileConflictAdjustments / totalFileRefs;
   const score = Math.max(0, 1 - conflictRatio);
@@ -2347,6 +2505,1624 @@ function computeConfidenceSignals(parallelizationScore, fileConflictScore) {
     parallelization,
     conflictRisk
   };
+}
+
+// src/orchestrator/adapter.ts
+function isPushCapableAdapter(adapter) {
+  return typeof adapter.ingestStatus === "function" && typeof adapter.ingestCompletion === "function";
+}
+
+// src/orchestrator/client.ts
+var OrchestratorClient = class {
+  constructor(config) {
+    this.config = {
+      ...config,
+      timeout: config.timeout || 3e4
+    };
+  }
+  /**
+   * Check if orchestrator is healthy
+   */
+  async healthCheck() {
+    const response = await this.fetch("/health");
+    return response.json();
+  }
+  /**
+   * Dispatch a task to the orchestrator
+   */
+  async dispatch(request) {
+    const response = await this.fetch("/dispatch", {
+      method: "POST",
+      body: JSON.stringify(request)
+    });
+    if (!response.ok) {
+      const error = await response.text();
+      return {
+        accepted: false,
+        error: `Orchestrator rejected dispatch: ${error}`
+      };
+    }
+    return response.json();
+  }
+  /**
+   * Fetch the completion report for a finished job.
+   *
+   * The ao-cli and claude-session adapters both implement this; the HTTP
+   * adapter did not, and `OrchestratorAdapter.getCompletionReport` is optional —
+   * so StatusPoller.handleCompletion received null and NEVER invoked its
+   * onComplete callback. In practice that meant an http-mode job could run to
+   * completion locally and the host would never be told: the session sat at its
+   * last polled status forever.
+   *
+   * Returns null (rather than throwing) when the job is unknown or not yet
+   * finished, which is what the poller expects.
+   */
+  async getCompletionReport(externalJobId) {
+    const response = await this.fetch(`/jobs/${encodeURIComponent(externalJobId)}/result`);
+    if (!response.ok) return null;
+    try {
+      return await response.json();
+    } catch {
+      return null;
+    }
+  }
+  /**
+   * Cancel a running job
+   */
+  async cancel(sessionId) {
+    const response = await this.fetch(`/jobs/${sessionId}/cancel`, {
+      method: "POST"
+    });
+    return response.json();
+  }
+  /**
+   * Get status of a specific job
+   */
+  async getJobStatus(sessionId) {
+    const response = await this.fetch(`/jobs/${sessionId}/status`);
+    return response.json();
+  }
+  /**
+   * Get queue information
+   */
+  async getQueue() {
+    const response = await this.fetch("/queue");
+    return response.json();
+  }
+  async fetch(path, options = {}) {
+    const url = `${this.config.url}${path}`;
+    const headers = {
+      "Content-Type": "application/json"
+    };
+    if (this.config.apiKey) {
+      headers["Authorization"] = `Bearer ${this.config.apiKey}`;
+    }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.config.timeout);
+    try {
+      const response = await fetch(url, {
+        ...options,
+        headers: {
+          ...headers,
+          ...options.headers
+        },
+        signal: controller.signal
+      });
+      return response;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+};
+var clientInstance = null;
+function initOrchestratorClient(config) {
+  clientInstance = new OrchestratorClient(config);
+  return clientInstance;
+}
+function getOrchestratorClient() {
+  if (!clientInstance) {
+    throw new Error("Orchestrator client not initialized. Call initOrchestratorClient first.");
+  }
+  return clientInstance;
+}
+function isOrchestratorConfigured() {
+  return clientInstance !== null;
+}
+function buildDispatchRequest(params) {
+  return {
+    sessionId: params.sessionId,
+    repo: params.repo,
+    linearTicketId: params.linearTicketId,
+    callbackUrl: params.callbackUrl,
+    taskSpec: {
+      prompt: `Complete the task: ${params.title}`,
+      filePaths: params.filePaths,
+      model: params.model || "sonnet",
+      workstream: params.workstream,
+      acceptanceCriteria: params.acceptanceCriteria,
+      estimatedMinutes: params.estimatedMinutes
+    }
+  };
+}
+
+// src/orchestrator/ao-cli-adapter.ts
+import { exec } from "child_process";
+import { promisify } from "util";
+var execAsync = promisify(exec);
+function parseSessionId(output) {
+  const match = output.match(/Session started:\s*(\S+)/i);
+  if (match) return match[1];
+  const uuidMatch = output.match(/^([a-f0-9-]{36})$/im);
+  if (uuidMatch) return uuidMatch[1];
+  const sessionMatch = output.match(/session[:\s]+([a-zA-Z0-9_-]+)/i);
+  if (sessionMatch) return sessionMatch[1];
+  return null;
+}
+function parseStatusOutput(output) {
+  try {
+    const json = JSON.parse(output);
+    return {
+      status: mapAoStatus(json.status || json.state),
+      progressPercent: json.progress ?? json.progressPercent ?? 0,
+      currentStep: json.currentStep ?? json.step,
+      currentFile: json.currentFile ?? json.file,
+      message: json.message,
+      filesModified: json.filesModified ?? json.files,
+      tokensUsed: json.tokensUsed ?? json.tokens,
+      costUsd: json.costUsd ?? json.cost
+    };
+  } catch {
+    const status = {};
+    const statusMatch = output.match(/status:\s*(\w+)/i);
+    if (statusMatch) {
+      status.status = mapAoStatus(statusMatch[1]);
+    }
+    const progressMatch = output.match(/progress:\s*(\d+)/i);
+    if (progressMatch) {
+      status.progressPercent = parseInt(progressMatch[1], 10);
+    }
+    const stepMatch = output.match(/(?:step|task|working on):\s*(.+)/i);
+    if (stepMatch) {
+      status.currentStep = stepMatch[1].trim();
+    }
+    const fileMatch = output.match(/(?:file|editing):\s*(.+)/i);
+    if (fileMatch) {
+      status.currentFile = fileMatch[1].trim();
+    }
+    const messageMatch = output.match(/message:\s*(.+)/i);
+    if (messageMatch) {
+      status.message = messageMatch[1].trim();
+    }
+    return status;
+  }
+}
+function mapAoStatus(aoStatus) {
+  const normalized = aoStatus?.toLowerCase() ?? "";
+  if (normalized.includes("queue") || normalized.includes("pending")) return "queued";
+  if (normalized.includes("run") || normalized.includes("active") || normalized.includes("working")) return "running";
+  if (normalized.includes("wait") || normalized.includes("pause")) return "waiting";
+  if (normalized.includes("complete") || normalized.includes("done") || normalized.includes("finished")) return "complete";
+  if (normalized.includes("error") || normalized.includes("fail")) return "error";
+  if (normalized.includes("cancel") || normalized.includes("stop")) return "cancelled";
+  return "running";
+}
+var AoCliAdapter = class {
+  constructor(config) {
+    this.mode = "ao-cli";
+    this.config = config;
+    this.aoPath = config.aoPath || "ao";
+    throw new Error(
+      "The ao-cli orchestrator mode is deprecated and non-functional.\n\n  `ao` no longer exposes the commands this adapter calls (`ao list`,\n  `ao status <id>`), and `ao spawn` no longer accepts a prompt.\n\n  Use --mode http against the ao daemon instead:\n    devpilot bridge connect --mode http --http-url http://127.0.0.1:3001\n\n  See docs/AO-INTEGRATION.md for the current integration path."
+    );
+    this.projectName = config.aoProjectName || "default";
+    this.workingDirectory = config.workingDirectory;
+  }
+  /**
+   * Execute an ao command and return stdout
+   */
+  async execAo(args, options) {
+    const cmd = `${this.aoPath} ${args.join(" ")}`;
+    const cwd = options?.cwd || this.workingDirectory || process.cwd();
+    try {
+      const { stdout, stderr } = await execAsync(cmd, {
+        cwd,
+        timeout: 6e4,
+        // 1 minute timeout for most commands
+        env: {
+          ...process.env
+          // Pass through any ao-specific env vars
+        }
+      });
+      return { stdout: stdout.trim(), stderr: stderr.trim() };
+    } catch (error) {
+      const execError = error;
+      if (execError.stdout || execError.stderr) {
+        return {
+          stdout: execError.stdout?.trim() || "",
+          stderr: execError.stderr?.trim() || execError.message
+        };
+      }
+      throw error;
+    }
+  }
+  /**
+   * Check if ao CLI is available and working
+   */
+  async healthCheck() {
+    try {
+      const { stdout } = await this.execAo(["--version"]);
+      let activeJobs = 0;
+      try {
+        const { stdout: listOutput } = await this.execAo(["list"]);
+        const lines = listOutput.split("\n").filter((l) => l.trim());
+        activeJobs = lines.length > 1 ? lines.length - 1 : 0;
+      } catch {
+      }
+      return {
+        status: "healthy",
+        version: stdout || "unknown",
+        activeJobs,
+        queueLength: 0,
+        // ao-cli doesn't have a queue concept
+        availableWorkers: 1
+        // Local execution
+      };
+    } catch (error) {
+      return {
+        status: "down",
+        version: "unknown",
+        activeJobs: 0,
+        queueLength: 0,
+        availableWorkers: 0
+      };
+    }
+  }
+  /**
+   * Dispatch a task using ao spawn
+   * Command: ao spawn <project> <ticket-id> "<prompt>"
+   */
+  async dispatch(request) {
+    try {
+      const ticketId = request.linearTicketId || request.sessionId;
+      const prompt = request.taskSpec.prompt;
+      const args = [
+        "spawn",
+        this.projectName,
+        ticketId,
+        `"${prompt.replace(/"/g, '\\"')}"`
+      ];
+      if (request.taskSpec.model) {
+        args.push("--model", request.taskSpec.model);
+      }
+      if (request.repo) {
+        args.push("--repo", request.repo);
+      }
+      const { stdout, stderr } = await this.execAo(args);
+      const externalJobId = parseSessionId(stdout);
+      if (!externalJobId && stderr) {
+        return {
+          accepted: false,
+          error: `ao spawn failed: ${stderr}`
+        };
+      }
+      return {
+        accepted: true,
+        orchestratorJobId: externalJobId || ticketId,
+        estimatedStartTime: (/* @__PURE__ */ new Date()).toISOString(),
+        queuePosition: 0
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      return {
+        accepted: false,
+        error: `Failed to dispatch via ao CLI: ${errorMessage}`
+      };
+    }
+  }
+  /**
+   * Get job status using ao status <session>
+   */
+  async getJobStatus(externalJobId) {
+    try {
+      const { stdout, stderr } = await this.execAo(["status", externalJobId]);
+      if (!stdout && stderr) {
+        if (stderr.toLowerCase().includes("not found")) {
+          return {
+            sessionId: externalJobId,
+            externalJobId,
+            status: "error",
+            progressPercent: 0,
+            message: "Session not found"
+          };
+        }
+      }
+      const parsed = parseStatusOutput(stdout || stderr);
+      return {
+        sessionId: externalJobId,
+        externalJobId,
+        status: parsed.status || "running",
+        progressPercent: parsed.progressPercent || 0,
+        currentStep: parsed.currentStep,
+        currentFile: parsed.currentFile,
+        message: parsed.message,
+        filesModified: parsed.filesModified,
+        tokensUsed: parsed.tokensUsed,
+        costUsd: parsed.costUsd,
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      return {
+        sessionId: externalJobId,
+        externalJobId,
+        status: "error",
+        progressPercent: 0,
+        message: `Failed to get status: ${errorMessage}`
+      };
+    }
+  }
+  /**
+   * Cancel a job using ao stop <session>
+   */
+  async cancel(externalJobId) {
+    try {
+      const { stdout, stderr } = await this.execAo(["stop", externalJobId]);
+      if (stderr && stderr.toLowerCase().includes("error")) {
+        return {
+          success: false,
+          message: stderr
+        };
+      }
+      return {
+        success: true,
+        message: stdout || `Session ${externalJobId} stopped`
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      return {
+        success: false,
+        message: `Failed to cancel: ${errorMessage}`
+      };
+    }
+  }
+  /**
+   * Send a message to an active session using ao send <session> "<message>"
+   */
+  async sendMessage(externalJobId, message) {
+    try {
+      const { stdout, stderr } = await this.execAo([
+        "send",
+        externalJobId,
+        `"${message.replace(/"/g, '\\"')}"`
+      ]);
+      if (stderr && stderr.toLowerCase().includes("error")) {
+        return {
+          success: false,
+          error: stderr
+        };
+      }
+      return {
+        success: true,
+        message: stdout || "Message sent"
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      return {
+        success: false,
+        error: `Failed to send message: ${errorMessage}`
+      };
+    }
+  }
+  /**
+   * Get completion report for a finished job
+   * Uses ao status with detailed output
+   */
+  async getCompletionReport(externalJobId) {
+    try {
+      const { stdout } = await this.execAo(["status", externalJobId, "--json"]);
+      try {
+        const json = JSON.parse(stdout);
+        if (json.status !== "complete" && json.status !== "done" && json.status !== "finished") {
+          return null;
+        }
+        return {
+          sessionId: externalJobId,
+          success: !json.error,
+          prUrl: json.prUrl || json.pr_url,
+          commitSha: json.commitSha || json.commit,
+          filesModified: json.filesModified || [],
+          filesCreated: json.filesCreated || [],
+          filesDeleted: json.filesDeleted || [],
+          summary: json.summary || json.message || "Task completed",
+          tokensUsed: json.tokensUsed || 0,
+          costUsd: json.costUsd || 0,
+          durationMinutes: json.durationMinutes || 0,
+          error: json.error ? {
+            code: json.error.code || "UNKNOWN",
+            message: json.error.message || String(json.error),
+            recoverable: json.error.recoverable || false
+          } : void 0
+        };
+      } catch {
+        const status = parseStatusOutput(stdout);
+        if (status.status !== "complete") {
+          return null;
+        }
+        return {
+          sessionId: externalJobId,
+          success: true,
+          filesModified: status.filesModified || [],
+          filesCreated: [],
+          filesDeleted: [],
+          summary: status.message || "Task completed",
+          tokensUsed: status.tokensUsed || 0,
+          costUsd: status.costUsd || 0,
+          durationMinutes: 0
+        };
+      }
+    } catch {
+      return null;
+    }
+  }
+  /**
+   * Cleanup - no persistent resources for CLI adapter
+   */
+  async shutdown() {
+  }
+};
+function createAoCliAdapter(config) {
+  return new AoCliAdapter(config);
+}
+
+// src/orchestrator/claude-session-adapter.ts
+var ISOLATION_CAPABILITY = "isolation";
+var CODE_GRAPH_CAPABILITY = "code-graph";
+var GRAPH_TIMEOUT_MS = 5e3;
+var INTEGRATE_TIMEOUT_MS = 5 * 6e4;
+var HttpSessionTransport = class _HttpSessionTransport {
+  constructor(baseUrl, apiKey, timeoutMs = 3e4, graphTimeoutMs = GRAPH_TIMEOUT_MS) {
+    this.baseUrl = baseUrl;
+    this.apiKey = apiKey;
+    this.timeoutMs = timeoutMs;
+    this.graphTimeoutMs = graphTimeoutMs;
+    /**
+     * The runner's capabilities, once it has told us.
+     *
+     * Cached because every isolated create asks, and a wave is many creates. It
+     * is dropped whenever the runner fails to do something it was asked — a
+     * refused create, a failed merge, no answer at all — because the usual
+     * reason a runner starts behaving differently is that it is a different
+     * runner: restarted, upgraded, or put back to an older version. The next
+     * question then goes to `/v1/health` again rather than to a memory of a
+     * process that may no longer exist. A read that fails is never cached.
+     */
+    this.knownCapabilities = null;
+  }
+  /** Extract the runner's session id from a create/idempotent response body. */
+  static readExternalId(json) {
+    const j = json ?? {};
+    return j.externalSessionId ?? j.sessionId ?? j.id;
+  }
+  async capabilities() {
+    return this.readCapabilities();
+  }
+  /**
+   * `capabilities`, with a say over how long `/v1/health` may take. The code
+   * graph reads pass their own, much shorter, limit: they are optional, and
+   * must not wait the thirty seconds a dispatch is allowed.
+   */
+  async readCapabilities(timeoutMs) {
+    if (this.knownCapabilities) return this.knownCapabilities;
+    try {
+      const res = await this.fetch("/v1/health", {}, timeoutMs);
+      if (!res.ok) return null;
+      const json = await res.json();
+      const capabilities = Array.isArray(json.capabilities) ? json.capabilities.filter((c) => typeof c === "string") : [];
+      this.knownCapabilities = capabilities;
+      return capabilities;
+    } catch {
+      return null;
+    }
+  }
+  async createSession(params) {
+    if (params.isolation) {
+      const capabilities = await this.capabilities();
+      if (!capabilities?.includes(ISOLATION_CAPABILITY)) {
+        this.knownCapabilities = null;
+        return {
+          accepted: false,
+          error: "ISOLATION_UNAVAILABLE: this run gives each task its own branch, and the session runner " + (capabilities ? "does not report that it can (it may have been replaced by an older version)" : "did not answer when asked whether it can")
+        };
+      }
+    }
+    try {
+      const res = await this.fetch("/v1/sessions", {
+        method: "POST",
+        body: JSON.stringify(params)
+      });
+      if (res.status === 201 || res.status === 200) {
+        const json = await res.json().catch(() => ({}));
+        return { accepted: true, externalSessionId: _HttpSessionTransport.readExternalId(json) };
+      }
+      if (res.status === 409) {
+        const json = await res.json().catch(() => ({}));
+        const existing = _HttpSessionTransport.readExternalId(json);
+        if (existing) {
+          return { accepted: true, externalSessionId: existing };
+        }
+        return { accepted: false, error: "CONFLICT: session already dispatched without an id in response" };
+      }
+      if (res.status === 429) {
+        return { accepted: false, error: "CAPACITY" };
+      }
+      this.knownCapabilities = null;
+      const body = await res.text().catch(() => "");
+      const refusal = _HttpSessionTransport.readRefusal(body);
+      if (refusal?.error === "ISOLATION_UNAVAILABLE") {
+        return { accepted: false, error: `ISOLATION_UNAVAILABLE: ${refusal.message ?? "no reason given"}` };
+      }
+      return { accepted: false, error: `Session create failed: ${res.status} ${body}` };
+    } catch (error) {
+      this.knownCapabilities = null;
+      return { accepted: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  static readRefusal(body) {
+    try {
+      const json = JSON.parse(body);
+      return {
+        error: typeof json.error === "string" ? json.error : void 0,
+        message: typeof json.message === "string" ? json.message : void 0
+      };
+    } catch {
+      return null;
+    }
+  }
+  async integrate(request) {
+    try {
+      const res = await this.fetch(
+        "/v1/integrate",
+        { method: "POST", body: JSON.stringify(request) },
+        INTEGRATE_TIMEOUT_MS
+      );
+      const text8 = await res.text().catch(() => "");
+      if (res.status === 200) {
+        const result = _HttpSessionTransport.readIntegration(text8);
+        if (result) return { ok: true, result };
+        this.knownCapabilities = null;
+        return {
+          ok: false,
+          code: "BAD_RESPONSE",
+          message: "the session runner answered the merge with something that is not a merge result"
+        };
+      }
+      this.knownCapabilities = null;
+      const refusal = _HttpSessionTransport.readRefusal(text8);
+      return {
+        ok: false,
+        code: refusal?.error ?? `HTTP_${res.status}`,
+        // The runner's own sentence when it sent one: it says what is in the
+        // way and what to do about it. A runner with no `/v1/integrate` at all
+        // answers a bare 404, and that needs saying in words.
+        message: refusal?.message ?? `the session runner answered ${res.status}${refusal?.error ? ` (${refusal.error})` : ""} when asked to merge the wave \u2014 it may predate a branch per task`
+      };
+    } catch (error) {
+      this.knownCapabilities = null;
+      return {
+        ok: false,
+        code: "UNREACHABLE",
+        message: `the session runner could not be reached to merge the wave (${error instanceof Error ? error.message : String(error)})`
+      };
+    }
+  }
+  /**
+   * Ask the runner's code graph a question, or say why there is no answer.
+   *
+   * The same question is asked first as for isolation — does this runner say
+   * it can? — and for the same reason: a runner from before the capability
+   * answers an unknown route with a bare 404, which says nothing a person can
+   * act on, while "the runner predates the code graph" does.
+   *
+   * Unlike a refused create, none of the unhappy paths here is a failure of
+   * anything. They all come back as `available: false`, and nothing is retried.
+   * The capability cache is dropped on each of them all the same, including
+   * "not listed": the capability arrives with a runner upgrade, the cockpit
+   * outlives the runner it started beside, and asking `/v1/health` again is a
+   * cheap way not to go on quoting a runner that has been replaced. The cost
+   * is one extra local GET per question for as long as the runner is an older
+   * one — per plan, and per task dispatched.
+   */
+  async askGraph(path, request, read) {
+    const unavailable = (reason) => {
+      this.knownCapabilities = null;
+      return { available: false, reason };
+    };
+    const deadline = Date.now() + this.graphTimeoutMs;
+    const capabilities = await this.readCapabilities(this.graphTimeoutMs);
+    if (capabilities === null) {
+      return unavailable("the session runner did not answer /v1/health, so it could not be asked for the code graph");
+    }
+    if (!capabilities.includes(CODE_GRAPH_CAPABILITY)) {
+      return unavailable(
+        `the session runner does not report the '${CODE_GRAPH_CAPABILITY}' capability (it predates the code graph)`
+      );
+    }
+    try {
+      const res = await this.fetch(
+        path,
+        { method: "POST", body: JSON.stringify(request) },
+        Math.max(1, deadline - Date.now())
+      );
+      const text8 = await res.text().catch(() => "");
+      if (res.status !== 200) {
+        const refusal = _HttpSessionTransport.readRefusal(text8);
+        return unavailable(
+          refusal?.message ?? `the session runner answered ${res.status}${refusal?.error ? ` (${refusal.error})` : ""} when asked for the code graph`
+        );
+      }
+      let json;
+      try {
+        const parsed = JSON.parse(text8);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+        json = parsed;
+      } catch {
+        return unavailable("the session runner answered the code graph request with something that is not JSON");
+      }
+      if (json.available === false) {
+        return {
+          available: false,
+          reason: typeof json.reason === "string" && json.reason ? json.reason : "the session runner gave no reason"
+        };
+      }
+      const answer = json.available === true ? read(json) : null;
+      return answer ?? unavailable("the session runner answered the code graph request with something that is not a code graph answer");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return unavailable(
+        error instanceof Error && error.name === "AbortError" ? `the session runner did not answer the code graph request within ${this.graphTimeoutMs / 1e3}s` : `the session runner could not be reached for the code graph (${message})`
+      );
+    }
+  }
+  async graphDependents(request) {
+    return this.askGraph("/v1/graph/dependents", request, (json) => {
+      const byFile = _HttpSessionTransport.readFileLists(json.byFile);
+      if (!byFile) return null;
+      return {
+        available: true,
+        byFile,
+        truncated: json.truncated === true,
+        indexedAt: typeof json.indexedAt === "string" ? json.indexedAt : null
+      };
+    });
+  }
+  async graphAffectedTests(request) {
+    return this.askGraph("/v1/graph/affected-tests", request, (json) => {
+      if (!Array.isArray(json.tests)) return null;
+      return {
+        available: true,
+        tests: json.tests.filter((t) => typeof t === "string"),
+        truncated: json.truncated === true
+      };
+    });
+  }
+  /**
+   * `{ file: [file, …] }`, if that is what the value is. Shape-checked because
+   * it is acted on — these lists decide which tasks share a wave — and a list
+   * that is not a list of strings is dropped whole rather than half-read.
+   */
+  static readFileLists(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const out = {};
+    for (const [file, list] of Object.entries(value)) {
+      if (!Array.isArray(list) || !list.every((entry) => typeof entry === "string")) return null;
+      out[file] = list;
+    }
+    return out;
+  }
+  /** A merge result, if that is what the body is. Shape-checked: it is acted on. */
+  static readIntegration(body) {
+    try {
+      const json = JSON.parse(body);
+      if (typeof json.runBranch !== "string" || typeof json.headSha !== "string") return null;
+      return {
+        runBranch: json.runBranch,
+        headSha: json.headSha,
+        merged: Array.isArray(json.merged) ? json.merged : [],
+        conflicts: Array.isArray(json.conflicts) ? json.conflicts : [],
+        missing: Array.isArray(json.missing) ? json.missing : []
+      };
+    } catch {
+      return null;
+    }
+  }
+  async sendMessage(externalSessionId, message) {
+    try {
+      const res = await this.fetch(`/v1/sessions/${externalSessionId}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ message })
+      });
+      if (res.status === 410) {
+        return { success: false, error: "session already terminal" };
+      }
+      return res.ok ? { success: true } : { success: false, error: `send failed: ${res.status}` };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  async stopSession(externalSessionId) {
+    try {
+      const res = await this.fetch(`/v1/sessions/${externalSessionId}/stop`, { method: "POST" });
+      if (res.ok || res.status === 410) {
+        return { success: true, message: `Session ${externalSessionId} stopped` };
+      }
+      return { success: false, message: `stop failed: ${res.status}` };
+    } catch (error) {
+      return { success: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  async getSession(externalSessionId) {
+    try {
+      const res = await this.fetch(`/v1/sessions/${externalSessionId}`);
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      return null;
+    }
+  }
+  async health() {
+    try {
+      const res = await this.fetch("/v1/health");
+      if (!res.ok) return { status: "down", version: "unknown" };
+      const json = await res.json();
+      return { status: "healthy", version: json.version ?? "unknown" };
+    } catch {
+      return { status: "down", version: "unknown" };
+    }
+  }
+  async fetch(path, options = {}, timeoutMs = this.timeoutMs) {
+    const headers = { "Content-Type": "application/json" };
+    if (this.apiKey) headers["Authorization"] = `Bearer ${this.apiKey}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(`${this.baseUrl}${path}`, {
+        ...options,
+        headers: { ...headers, ...options.headers },
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+};
+var ClaudeSessionAdapter = class {
+  constructor(config, transport) {
+    this.mode = "claude-session";
+    this.pushBased = true;
+    this.cache = /* @__PURE__ */ new Map();
+    this.config = config;
+    if (transport) {
+      this.transport = transport;
+    } else {
+      if (!config.sessionApiUrl) {
+        throw new Error(
+          "claude-session adapter requires sessionApiUrl (or an injected SessionTransport)"
+        );
+      }
+      this.transport = new HttpSessionTransport(
+        config.sessionApiUrl,
+        config.sessionApiKey ?? config.apiKey,
+        config.timeout
+      );
+    }
+  }
+  async healthCheck() {
+    const base = {
+      status: "healthy",
+      version: "claude-session",
+      activeJobs: this.cache.size,
+      queueLength: 0,
+      availableWorkers: 1
+    };
+    if (this.transport.health) {
+      const probe = await this.transport.health();
+      return { ...base, status: probe.status, version: probe.version };
+    }
+    return base;
+  }
+  async dispatch(request) {
+    const result = await this.transport.createSession({
+      sessionId: request.sessionId,
+      repo: request.repo,
+      prompt: request.taskSpec.prompt,
+      model: request.taskSpec.model,
+      filePaths: request.taskSpec.filePaths,
+      acceptanceCriteria: request.taskSpec.acceptanceCriteria,
+      constraints: request.taskSpec.constraints,
+      linearTicketId: request.linearTicketId,
+      callbackUrl: request.callbackUrl,
+      callbackToken: this.config.callbackToken,
+      environmentId: this.config.sessionEnvironmentId,
+      // Absent for every dispatch that is not a task of an isolated plan, and
+      // then absent from the request body too: the runner runs the session in
+      // the checkout itself, as it always has.
+      ...request.isolation ? { isolation: request.isolation } : {},
+      metadata: request.metadata
+    });
+    if (!result.accepted || !result.externalSessionId) {
+      return { accepted: false, error: result.error ?? "Session dispatch rejected" };
+    }
+    this.cache.set(result.externalSessionId, {
+      status: {
+        sessionId: request.sessionId,
+        externalJobId: result.externalSessionId,
+        status: "queued",
+        progressPercent: 0,
+        message: "Session dispatched, awaiting first update",
+        startedAt: (/* @__PURE__ */ new Date()).toISOString()
+      }
+    });
+    return {
+      accepted: true,
+      orchestratorJobId: result.externalSessionId,
+      estimatedStartTime: (/* @__PURE__ */ new Date()).toISOString(),
+      queuePosition: 0
+    };
+  }
+  async getJobStatus(externalJobId) {
+    const cached = this.cache.get(externalJobId);
+    if (cached) return cached.status;
+    if (this.transport.getSession) {
+      const pulled = await this.transport.getSession(externalJobId);
+      if (pulled) {
+        return {
+          sessionId: externalJobId,
+          externalJobId,
+          status: pulled.status ?? "running",
+          progressPercent: pulled.progressPercent ?? 0,
+          currentStep: pulled.currentStep,
+          currentFile: pulled.currentFile,
+          message: pulled.message,
+          filesModified: pulled.filesModified,
+          updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+        };
+      }
+    }
+    return {
+      sessionId: externalJobId,
+      externalJobId,
+      status: "error",
+      progressPercent: 0,
+      message: "Unknown session (no cached state and no pull fallback)"
+    };
+  }
+  async cancel(externalJobId) {
+    const result = await this.transport.stopSession(externalJobId);
+    if (result.success) this.cache.delete(externalJobId);
+    return result;
+  }
+  async sendMessage(externalJobId, message) {
+    const result = await this.transport.sendMessage(externalJobId, message);
+    return result.success ? { success: true, message: "Message delivered to session" } : { success: false, error: result.error };
+  }
+  async getCompletionReport(externalJobId) {
+    return this.cache.get(externalJobId)?.completion ?? null;
+  }
+  /**
+   * Whether the runner behind this adapter can give a task its own branch.
+   *
+   * Three ways to be told no, and each is worded for the person who will read
+   * it on the plan: the transport has no way to ask or to merge; the runner did
+   * not answer; the runner answered and does not list the capability.
+   *
+   * "Did not answer" is reported as unsupported rather than waited out. The
+   * plan's first task is about to be sent to that same runner; if it really is
+   * down the dispatch fails and says so, and if it was a blip the plan runs
+   * un-isolated with this reason on its row. What it must not do is guess.
+   */
+  async isolationSupport() {
+    if (!this.transport.capabilities || !this.transport.integrate) {
+      return {
+        supported: false,
+        reason: "the session transport in use cannot give a task its own branch or merge a wave"
+      };
+    }
+    const capabilities = await this.transport.capabilities();
+    if (capabilities === null) {
+      return {
+        supported: false,
+        reason: "the session runner did not answer /v1/health when the run started, so it could not be asked whether it gives each task its own branch"
+      };
+    }
+    if (!capabilities.includes(ISOLATION_CAPABILITY)) {
+      return {
+        supported: false,
+        reason: `the session runner does not report the '${ISOLATION_CAPABILITY}' capability (it predates a worktree and branch per task) \u2014 upgrade the runner to isolate tasks`
+      };
+    }
+    return { supported: true };
+  }
+  async integrate(request) {
+    if (!this.transport.integrate) {
+      return {
+        ok: false,
+        code: "UNSUPPORTED",
+        message: "the session transport in use cannot merge a wave"
+      };
+    }
+    return this.transport.integrate(request);
+  }
+  /**
+   * What depends on these files, from the runner's code graph index.
+   *
+   * A transport with no way to ask answers for itself here, in words, the same
+   * as `isolationSupport` does: a custom transport is not a runner that failed.
+   */
+  async graphDependents(request) {
+    if (!this.transport.graphDependents) {
+      return { available: false, reason: "the session transport in use cannot read a code graph" };
+    }
+    return this.transport.graphDependents(request);
+  }
+  async graphAffectedTests(request) {
+    if (!this.transport.graphAffectedTests) {
+      return { available: false, reason: "the session transport in use cannot read a code graph" };
+    }
+    return this.transport.graphAffectedTests(request);
+  }
+  async shutdown() {
+    this.cache.clear();
+  }
+  // --- IPushCapableAdapter -------------------------------------------------
+  /**
+   * Feed a pushed status update (from the session's POST to
+   * `/api/orchestrator/status`) into the adapter's cache.
+   */
+  ingestStatus(externalJobId, update) {
+    const prev = this.cache.get(externalJobId);
+    this.cache.set(externalJobId, {
+      completion: prev?.completion,
+      status: {
+        sessionId: update.sessionId,
+        externalJobId,
+        status: update.status,
+        progressPercent: update.progressPercent,
+        currentStep: update.currentStep,
+        currentFile: update.currentFile,
+        message: update.message,
+        filesModified: update.filesModified,
+        tokensUsed: update.tokensUsed,
+        updatedAt: update.timestamp
+      }
+    });
+  }
+  /**
+   * Feed a pushed completion report (from the session's POST to
+   * `/api/orchestrator/complete`) into the adapter's cache.
+   */
+  ingestCompletion(externalJobId, report) {
+    const prev = this.cache.get(externalJobId);
+    this.cache.set(externalJobId, {
+      completion: report,
+      status: {
+        sessionId: report.sessionId,
+        externalJobId,
+        status: report.success ? "complete" : "error",
+        progressPercent: report.success ? 100 : prev?.status.progressPercent ?? 0,
+        message: report.summary,
+        filesModified: report.filesModified,
+        tokensUsed: report.tokensUsed,
+        costUsd: report.costUsd,
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      }
+    });
+  }
+};
+function createClaudeSessionAdapter(config, transport) {
+  return new ClaudeSessionAdapter(config, transport);
+}
+
+// src/orchestrator/service.ts
+var HttpAdapter = class {
+  constructor(config) {
+    this.mode = "http";
+    if (!config.url) {
+      throw new Error("HTTP adapter requires url configuration");
+    }
+    this.client = new OrchestratorClient({
+      url: config.url,
+      apiKey: config.apiKey,
+      callbackUrl: config.callbackUrl || "",
+      timeout: config.timeout
+    });
+  }
+  async healthCheck() {
+    return this.client.healthCheck();
+  }
+  async dispatch(request) {
+    return this.client.dispatch(request);
+  }
+  /**
+   * Forwarded so http mode can actually finish.
+   *
+   * IOrchestratorAdapter.getCompletionReport is OPTIONAL, and this adapter did
+   * not implement it — so OrchestratorService.getCompletionReport always
+   * returned null for http mode, StatusPoller.handleCompletion never invoked
+   * onComplete, and a job that finished locally was never reported to the host.
+   * The ao-cli and claude-session adapters both implement it; this was the odd
+   * one out.
+   */
+  async getCompletionReport(externalJobId) {
+    return this.client.getCompletionReport(externalJobId);
+  }
+  async getJobStatus(externalJobId) {
+    const status = await this.client.getJobStatus(externalJobId);
+    return {
+      sessionId: externalJobId,
+      externalJobId,
+      status: status.status,
+      progressPercent: status.progressPercent,
+      message: status.message
+    };
+  }
+  async cancel(externalJobId) {
+    return this.client.cancel(externalJobId);
+  }
+  async sendMessage(_externalJobId, _message) {
+    return {
+      success: false,
+      error: "HTTP adapter does not support direct messaging"
+    };
+  }
+  async shutdown() {
+  }
+};
+var DisabledAdapter = class {
+  constructor() {
+    this.mode = "disabled";
+  }
+  async healthCheck() {
+    return {
+      status: "down",
+      version: "disabled",
+      activeJobs: 0,
+      queueLength: 0,
+      availableWorkers: 0
+    };
+  }
+  async dispatch(_request) {
+    return {
+      accepted: false,
+      error: "Orchestrator is disabled"
+    };
+  }
+  async getJobStatus(externalJobId) {
+    return {
+      sessionId: externalJobId,
+      externalJobId,
+      status: "error",
+      progressPercent: 0,
+      message: "Orchestrator is disabled"
+    };
+  }
+  async cancel(_externalJobId) {
+    return {
+      success: false,
+      message: "Orchestrator is disabled"
+    };
+  }
+  async shutdown() {
+  }
+};
+var OrchestratorService = class {
+  constructor(config, sessionTransport) {
+    this.sessionMappings = /* @__PURE__ */ new Map();
+    this.eventCallbacks = /* @__PURE__ */ new Set();
+    this.config = config;
+    this.sessionTransport = sessionTransport;
+    this.adapter = this.createAdapter(config);
+  }
+  /**
+   * Create the appropriate adapter based on mode
+   */
+  createAdapter(config) {
+    switch (config.mode) {
+      case "claude-session":
+        return new ClaudeSessionAdapter(config, this.sessionTransport);
+      case "http":
+        return new HttpAdapter(config);
+      case "ao-cli":
+        return new AoCliAdapter(config);
+      case "disabled":
+      default:
+        return new DisabledAdapter();
+    }
+  }
+  /**
+   * Whether the active adapter receives progress via pushed callbacks. When
+   * true, the StatusPoller should not track its sessions.
+   */
+  get isPushBased() {
+    return this.adapter.pushBased ?? false;
+  }
+  /**
+   * Get current orchestrator mode
+   */
+  get mode() {
+    return this.adapter.mode;
+  }
+  /**
+   * Check if orchestrator is available
+   */
+  get isEnabled() {
+    return this.adapter.mode !== "disabled";
+  }
+  /**
+   * Subscribe to orchestrator events
+   */
+  onEvent(callback) {
+    this.eventCallbacks.add(callback);
+    return () => this.eventCallbacks.delete(callback);
+  }
+  /**
+   * Emit an event to all subscribers
+   */
+  emitEvent(event) {
+    for (const callback of this.eventCallbacks) {
+      try {
+        callback(event);
+      } catch (error) {
+        console.error("Error in orchestrator event callback:", error);
+      }
+    }
+  }
+  /**
+   * Check orchestrator health
+   */
+  async healthCheck() {
+    return this.adapter.healthCheck();
+  }
+  /**
+   * Dispatch a task to the orchestrator
+   * Stores session mapping for later status queries
+   */
+  async dispatch(request) {
+    const response = await this.adapter.dispatch(request);
+    if (response.accepted && response.orchestratorJobId) {
+      this.sessionMappings.set(request.sessionId, {
+        sessionId: request.sessionId,
+        externalJobId: response.orchestratorJobId,
+        mode: this.adapter.mode,
+        startedAt: /* @__PURE__ */ new Date()
+      });
+      this.emitEvent({
+        type: "job:started",
+        sessionId: request.sessionId,
+        externalJobId: response.orchestratorJobId,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        data: {
+          sessionId: request.sessionId,
+          status: "running",
+          progressPercent: 0,
+          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        }
+      });
+    }
+    return {
+      ...response,
+      mode: this.adapter.mode
+    };
+  }
+  /**
+   * Get job status by DevPilot session ID
+   */
+  async getJobStatusBySessionId(sessionId) {
+    const mapping = this.sessionMappings.get(sessionId);
+    if (!mapping) {
+      return null;
+    }
+    const status = await this.adapter.getJobStatus(mapping.externalJobId);
+    mapping.lastStatusAt = /* @__PURE__ */ new Date();
+    this.emitEvent({
+      type: "job:progress",
+      sessionId,
+      externalJobId: mapping.externalJobId,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      data: {
+        sessionId,
+        status: status.status,
+        progressPercent: status.progressPercent,
+        currentStep: status.currentStep,
+        currentFile: status.currentFile,
+        message: status.message,
+        filesModified: status.filesModified,
+        tokensUsed: status.tokensUsed,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      }
+    });
+    return status;
+  }
+  /**
+   * Get job status by external job ID
+   */
+  async getJobStatus(externalJobId) {
+    return this.adapter.getJobStatus(externalJobId);
+  }
+  /**
+   * Cancel a job by DevPilot session ID
+   */
+  async cancelBySessionId(sessionId) {
+    const mapping = this.sessionMappings.get(sessionId);
+    if (!mapping) {
+      return {
+        success: false,
+        message: `No active job found for session ${sessionId}`
+      };
+    }
+    const result = await this.adapter.cancel(mapping.externalJobId);
+    if (result.success) {
+      this.emitEvent({
+        type: "job:cancelled",
+        sessionId,
+        externalJobId: mapping.externalJobId,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        data: { error: "Cancelled by user" }
+      });
+      this.sessionMappings.delete(sessionId);
+    }
+    return result;
+  }
+  /**
+   * Cancel a job by external job ID
+   */
+  async cancel(externalJobId) {
+    return this.adapter.cancel(externalJobId);
+  }
+  /**
+   * Send a message to an active session
+   */
+  async sendMessage(sessionId, message) {
+    const mapping = this.sessionMappings.get(sessionId);
+    if (!mapping) {
+      return {
+        success: false,
+        error: `No active job found for session ${sessionId}`
+      };
+    }
+    if (!this.adapter.sendMessage) {
+      return {
+        success: false,
+        error: `Current adapter (${this.adapter.mode}) does not support messaging`
+      };
+    }
+    return this.adapter.sendMessage(mapping.externalJobId, message);
+  }
+  /**
+   * Get completion report for a finished job
+   */
+  async getCompletionReport(sessionId) {
+    const mapping = this.sessionMappings.get(sessionId);
+    if (!mapping) {
+      return null;
+    }
+    if (!this.adapter.getCompletionReport) {
+      return null;
+    }
+    return this.adapter.getCompletionReport(mapping.externalJobId);
+  }
+  /**
+   * Whether a task dispatched now can be given its own worktree and branch.
+   *
+   * Only an adapter that says so can. `http` and `ao-cli` do not implement the
+   * question and are answered for here — never isolated, and the reason says
+   * which mode, so a plan row reading "not isolated" also says why.
+   */
+  async isolationSupport() {
+    if (!this.adapter.isolationSupport) {
+      return {
+        supported: false,
+        reason: `the orchestrator is in '${this.adapter.mode}' mode, which does not give tasks their own branch`
+      };
+    }
+    return this.adapter.isolationSupport();
+  }
+  /**
+   * Merge a wave's task branches into the run branch.
+   *
+   * Never rejects. Its one caller is the wave gate in
+   * `WaveExecutionController`; nothing else should be merging a run.
+   */
+  async integrate(request) {
+    if (!this.adapter.integrate) {
+      return {
+        ok: false,
+        code: "UNSUPPORTED",
+        message: `the orchestrator is in '${this.adapter.mode}' mode, which cannot merge a wave`
+      };
+    }
+    try {
+      return await this.adapter.integrate(request);
+    } catch (error) {
+      return {
+        ok: false,
+        code: "UNREACHABLE",
+        message: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+  /**
+   * What depends on these files, read from the repository's code graph index
+   * by whatever runs the sessions.
+   *
+   * Never rejects, and `available: false` is not a failure — see
+   * `GraphDependentsOutcome`. `http`, `ao-cli` and `disabled` have no runner
+   * with a checkout to read, and are answered for here with the mode named, so
+   * a plan that says "made without the code graph" also says why.
+   */
+  async graphDependents(request) {
+    if (!this.adapter.graphDependents) {
+      return { available: false, reason: this.noGraphInThisMode() };
+    }
+    try {
+      return await this.adapter.graphDependents(request);
+    } catch (error) {
+      return { available: false, reason: this.graphFault(error) };
+    }
+  }
+  /** The test files reached from these files. Same terms as `graphDependents`. */
+  async graphAffectedTests(request) {
+    if (!this.adapter.graphAffectedTests) {
+      return { available: false, reason: this.noGraphInThisMode() };
+    }
+    try {
+      return await this.adapter.graphAffectedTests(request);
+    } catch (error) {
+      return { available: false, reason: this.graphFault(error) };
+    }
+  }
+  noGraphInThisMode() {
+    return `the orchestrator is in '${this.adapter.mode}' mode, which has no session runner to read a code graph from`;
+  }
+  graphFault(error) {
+    return `the code graph could not be read (${error instanceof Error ? error.message : String(error)})`;
+  }
+  /**
+   * Ingest a pushed status update from a session callback
+   * (`/api/orchestrator/status`). For push-based adapters this replaces the
+   * poll loop: the payload is cached on the adapter and re-emitted as a
+   * `job:progress` event to SSE subscribers. No-op mapping if the session is
+   * unknown. Safe to call for non-push adapters (falls through to event only).
+   */
+  ingestStatusUpdate(update) {
+    const mapping = this.sessionMappings.get(update.sessionId);
+    if (mapping && isPushCapableAdapter(this.adapter)) {
+      this.adapter.ingestStatus(mapping.externalJobId, update);
+      mapping.lastStatusAt = /* @__PURE__ */ new Date();
+    }
+    this.emitEvent({
+      type: "job:progress",
+      sessionId: update.sessionId,
+      externalJobId: mapping?.externalJobId ?? update.sessionId,
+      timestamp: update.timestamp,
+      data: update
+    });
+  }
+  /**
+   * Ingest a pushed completion report from a session callback
+   * (`/api/orchestrator/complete`). Caches it on the adapter (so
+   * getCompletionReport can serve it) and finalizes the session.
+   */
+  ingestCompletionReport(report) {
+    const mapping = this.sessionMappings.get(report.sessionId);
+    if (mapping && isPushCapableAdapter(this.adapter)) {
+      this.adapter.ingestCompletion(mapping.externalJobId, report);
+    }
+    this.markSessionComplete(report.sessionId, report);
+  }
+  /**
+   * Mark a session as complete (for external completion notifications)
+   *
+   * Emits whether or not this process dispatched the session. It used to
+   * return early when `sessionMappings` had no entry — and that map is process
+   * memory, so after a restart it has no entry for anything still running.
+   * Every completion that arrived after a restart was therefore swallowed
+   * here: the callback route had already marked the session row COMPLETE, but
+   * no `job:complete` was emitted, the ExecutionBridge never heard, and the
+   * wave task stayed `dispatched` forever with its wave unable to end.
+   *
+   * The mapping is only the fast path to the external id. Subscribers key on
+   * `sessionId` — the bridge resolves it to a wave task through the database —
+   * and `ingestStatusUpdate` already falls back the same way. A duplicate is
+   * harmless: subscribers apply a terminal report conditionally.
+   */
+  markSessionComplete(sessionId, report) {
+    const mapping = this.sessionMappings.get(sessionId);
+    this.emitEvent({
+      type: report.success ? "job:complete" : "job:error",
+      sessionId,
+      externalJobId: mapping?.externalJobId ?? sessionId,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      data: report
+    });
+    this.sessionMappings.delete(sessionId);
+  }
+  /**
+   * Get all active session mappings
+   */
+  getActiveSessions() {
+    return Array.from(this.sessionMappings.values());
+  }
+  /**
+   * Get external job ID for a session
+   */
+  getExternalJobId(sessionId) {
+    return this.sessionMappings.get(sessionId)?.externalJobId;
+  }
+  /**
+   * Shutdown the orchestrator service
+   */
+  async shutdown() {
+    if (this.adapter.shutdown) {
+      await this.adapter.shutdown();
+    }
+    this.sessionMappings.clear();
+    this.eventCallbacks.clear();
+  }
+};
+var globalForOrchestrator = globalThis;
+function getInstance() {
+  return globalForOrchestrator.__devpilotOrchestratorService ?? null;
+}
+function setInstance(service) {
+  globalForOrchestrator.__devpilotOrchestratorService = service;
+}
+function initOrchestratorService(config, sessionTransport) {
+  const existing = getInstance();
+  if (existing) {
+    existing.shutdown();
+  }
+  const service = new OrchestratorService(config, sessionTransport);
+  setInstance(service);
+  return service;
+}
+function getOrchestratorService() {
+  const service = getInstance();
+  if (!service) {
+    throw new Error("Orchestrator service not initialized. Call initOrchestratorService first.");
+  }
+  return service;
+}
+function isOrchestratorServiceInitialized() {
+  return getInstance() !== null;
+}
+function getOrchestratorServiceOrNull() {
+  return getInstance();
+}
+
+// src/wave-planner/plan-code-graph.ts
+var BLAST_RADIUS_LISTED = 25;
+async function readPlanCodeGraph(repo, tasks2, source = getOrchestratorServiceOrNull()) {
+  const files = [...new Set(tasks2.flatMap((task) => task.filePaths))];
+  if (files.length === 0) {
+    return { used: false, reason: "no task in the plan names a file, so there was nothing to look up" };
+  }
+  if (!source) {
+    return {
+      used: false,
+      reason: "no orchestrator is running in this process, so there is no session runner to read a code graph from"
+    };
+  }
+  let outcome;
+  try {
+    outcome = await source.graphDependents({ repo, files, depth: 1 });
+  } catch (error) {
+    return {
+      used: false,
+      reason: `the code graph could not be read (${error instanceof Error ? error.message : String(error)})`
+    };
+  }
+  if (!outcome.available) {
+    return { used: false, reason: outcome.reason };
+  }
+  return {
+    used: true,
+    indexedAt: outcome.indexedAt,
+    truncated: outcome.truncated,
+    tasks: tasks2.map((task) => blastRadiusOf(task, outcome.byFile))
+  };
+}
+function blastRadiusOf(task, dependentsByFile, maxClaims = MAX_DEPENDENT_CLAIMS_PER_TASK) {
+  const own = new Set(task.filePaths);
+  const all = /* @__PURE__ */ new Set();
+  const claims = [];
+  for (const dependsOn of own) {
+    for (const file of dependentsByFile[dependsOn] ?? []) {
+      if (own.has(file)) continue;
+      all.add(file);
+      claims.push({ file, dependsOn });
+    }
+  }
+  const selected = selectDependentClaims(task.filePaths, claims, maxClaims);
+  return {
+    taskCode: task.taskCode,
+    dependentCount: all.size,
+    dependents: [...all].sort().slice(0, BLAST_RADIUS_LISTED),
+    claims: selected.claims,
+    leftOut: selected.leftOut
+  };
+}
+function dependentClaimsOf(codeGraph) {
+  if (!codeGraph?.used || !codeGraph.tasks) return void 0;
+  const out = {};
+  let any = false;
+  for (const task of codeGraph.tasks) {
+    if (task.claims.length === 0) continue;
+    out[task.taskCode] = [...out[task.taskCode] ?? [], ...task.claims];
+    any = true;
+  }
+  return any ? out : void 0;
+}
+function withCodeGraph(plan, codeGraph) {
+  return { ...plan, codeGraph };
+}
+function codeGraphOf(plan) {
+  const value = plan?.codeGraph;
+  return isPlanCodeGraph(value) ? value : null;
+}
+function isPlanCodeGraph(value) {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value;
+  if (typeof candidate.used !== "boolean") return false;
+  if (!candidate.used) return typeof candidate.reason === "string";
+  return Array.isArray(candidate.tasks) && candidate.tasks.every(
+    (task) => task !== null && typeof task === "object" && typeof task.taskCode === "string" && typeof task.dependentCount === "number" && Array.isArray(task.dependents) && Array.isArray(task.claims) && task.claims.every((c) => c && typeof c.file === "string" && typeof c.dependsOn === "string") && Array.isArray(task.leftOut)
+  );
+}
+function describeCodeGraph(codeGraph, adjustments) {
+  if (!codeGraph.used) {
+    return {
+      used: false,
+      reason: codeGraph.reason ?? "no reason was recorded",
+      indexedAt: null,
+      truncated: false,
+      tasks: [],
+      sequenced: []
+    };
+  }
+  const truncated = codeGraph.truncated === true;
+  return {
+    used: true,
+    reason: null,
+    indexedAt: codeGraph.indexedAt ?? null,
+    truncated,
+    tasks: (codeGraph.tasks ?? []).map((task) => ({
+      taskCode: task.taskCode,
+      dependentCount: task.dependentCount,
+      dependents: task.dependents,
+      more: Math.max(0, task.dependentCount - task.dependents.length),
+      summary: blastRadiusSummary(task.dependentCount, truncated),
+      notSequencedOn: task.leftOut.map(
+        (left) => `${left.file} has ${left.dependents} dependent${left.dependents === 1 ? "" : "s"} \u2014 too many to keep other tasks apart on`
+      )
+    })),
+    sequenced: (adjustments ?? []).filter((adjustment) => adjustment.type === "DEPENDENCY_CONFLICT_BUMP").map((adjustment) => {
+      const wavesLater = adjustment.toWave - adjustment.fromWave;
+      return {
+        taskCode: adjustment.taskCode,
+        wavesLater,
+        because: `Task ${adjustment.taskCode} runs ${wavesLater} wave${wavesLater === 1 ? "" : "s"} later than its dependencies alone would put it: ${sentenceBody(adjustment.reason)}.`
+      };
+    })
+  };
+}
+function blastRadiusSummary(count, lowerBound) {
+  if (count === 0) {
+    return lowerBound ? "No file was found that depends on what this changes (some lists were cut short)" : "No indexed file depends on what this changes";
+  }
+  return `${lowerBound ? "At least " : ""}${count} file${count === 1 ? "" : "s"} depend${count === 1 ? "s" : ""} on what this changes`;
+}
+function sentenceBody(reason) {
+  return reason.replace(/^Dependency conflict:\s*/, "");
 }
 
 // src/wave-planner/models.ts
@@ -2588,9 +4364,9 @@ var FleetContextService = class {
 // src/wave-planner/codebase-context.ts
 import { promises as fs } from "fs";
 import { join, relative } from "path";
-import { exec } from "child_process";
-import { promisify } from "util";
-var execAsync = promisify(exec);
+import { exec as exec2 } from "child_process";
+import { promisify as promisify2 } from "util";
+var execAsync2 = promisify2(exec2);
 var CodebaseContextService = class {
   /**
    * Assemble codebase context for a repository
@@ -2667,7 +4443,7 @@ var CodebaseContextService = class {
    */
   async getRecentlyModifiedFiles(dir, limit = 20) {
     try {
-      const { stdout } = await execAsync(
+      const { stdout } = await execAsync2(
         `git -C "${dir}" log --pretty=format: --name-only --since="1 week ago" | sort | uniq`,
         { maxBuffer: 1024 * 1024 }
       );
@@ -3880,7 +5656,12 @@ var WavePlanGenerator = class {
       const allTasks = refinementResult.plan.waves.flatMap((w) => w.tasks);
       const edges = refinementResult.plan.dependencyEdges;
       const criticalPath = computeCriticalPath(allTasks, edges);
-      const waveAssignment = assignWaves(allTasks, edges, this.config.waveAssigner);
+      const codeGraph = await readPlanCodeGraph(repo, allTasks);
+      const dependentClaims = dependentClaimsOf(codeGraph);
+      const waveAssignment = assignWaves(allTasks, edges, {
+        ...this.config.waveAssigner,
+        ...dependentClaims ? { dependentClaims } : {}
+      });
       let wavePlanId;
       if (this.config.autoPersist !== false) {
         wavePlanId = await this.persistWavePlan(
@@ -3889,7 +5670,8 @@ var WavePlanGenerator = class {
           refinementResult.plan,
           criticalPath,
           waveAssignment,
-          refinementResult.score
+          refinementResult.score,
+          codeGraph
         );
       }
       const generationDurationMs = Date.now() - startTime;
@@ -3899,6 +5681,7 @@ var WavePlanGenerator = class {
         criticalPath,
         waveAssignment,
         score: refinementResult.score,
+        codeGraph,
         metrics: {
           totalTokensUsed: refinementResult.totalTokensUsed,
           refinementIterations: refinementResult.iterationsPerformed,
@@ -3957,6 +5740,10 @@ var WavePlanGenerator = class {
         wavePlan.dependencyEdges,
         allTasks
       );
+      const codeGraph = {
+        used: false,
+        reason: "the planner failed and this is the flat fallback plan \u2014 one wave, no files named \u2014 which is not passed through the wave assigner"
+      };
       let wavePlanId;
       if (this.config.autoPersist !== false) {
         wavePlanId = await this.persistWavePlan(
@@ -3965,7 +5752,8 @@ var WavePlanGenerator = class {
           wavePlan,
           criticalPath,
           waveAssignment,
-          score
+          score,
+          codeGraph
         );
       }
       return {
@@ -3974,6 +5762,7 @@ var WavePlanGenerator = class {
         criticalPath,
         waveAssignment,
         score,
+        codeGraph,
         success: false
       };
     } catch {
@@ -3987,8 +5776,13 @@ var WavePlanGenerator = class {
    * Public so the conductor graph can persist an approved plan as its own node.
    * The graph decides *when* a plan is approved (after a human interrupt); the
    * write itself is unchanged and still versions against prior plans.
+   *
+   * `codeGraph` is what a code graph said when `waveAssignment` was made — or
+   * that it was not used, and why. Optional for the callers that predate it;
+   * left out, the plan row records that nobody asked (NULL), which is the
+   * truth. The assignment's adjustments are recorded either way.
    */
-  async persistWavePlan(horizonItemId, planId, wavePlan, criticalPath, waveAssignment, score) {
+  async persistWavePlan(horizonItemId, planId, wavePlan, criticalPath, waveAssignment, score, codeGraph) {
     const db2 = getDatabase();
     const existingPlans = await db2.select().from(wavePlans).where(eq2(wavePlans.horizonItemId, horizonItemId)).orderBy(wavePlans.version);
     const version = existingPlans.length > 0 ? existingPlans[existingPlans.length - 1].version + 1 : 1;
@@ -4006,7 +5800,9 @@ var WavePlanGenerator = class {
       currentWaveIndex: 0,
       version,
       previousWavePlanId,
-      rawMarkdown: wavePlan.rawMarkdown
+      rawMarkdown: wavePlan.rawMarkdown,
+      adjustments: waveAssignment.adjustments,
+      codeGraph: codeGraph ?? null
     }).returning();
     const wavePlanId = insertedWavePlan.id;
     for (const wave of waveAssignment.waves) {
@@ -4051,6 +5847,11 @@ var WavePlanGenerator = class {
       tasksCompleted: 0,
       tasksFailed: 0,
       tasksRetried: 0,
+      // Shared-file bumps only, as the column's name says. A
+      // DEPENDENCY_CONFLICT_BUMP is a predicted conflict, from an index that
+      // can be wrong; counting it here would report a prediction as a conflict
+      // avoided. Those rows are kept, with their reasons, in
+      // `wave_plans.adjustments`.
       fileConflictsAvoided: waveAssignment.adjustments.filter(
         (a) => a.type === "FILE_CONFLICT_BUMP"
       ).length,
@@ -4344,6 +6145,84 @@ async function projectWavePlanToPlan(params) {
     confidenceSignals
   }).where(eq3(plans.id, planId));
   return { planId, workstreamIds, taskIds };
+}
+
+// src/wave-planner/work-history.ts
+var DEFAULT_HISTORY_LIMIT = 5;
+var MAX_HISTORY_LIMIT = 20;
+var SUMMARY_MAX_CHARS = 400;
+var ERROR_MAX_CHARS = 300;
+function workHistoryForPaths(rows, paths, opts = {}) {
+  const limit = clampLimit(opts.limit);
+  const started = rows.map((row) => ({ row, at: row.completedAt ?? row.lastAttemptAt ?? row.startedAt })).filter((entry) => entry.row.startedAt !== null && entry.at !== null).sort((a, b) => b.at - a.at || compare(a.row.taskCode, b.row.taskCode) || compare(a.row.wavePlanId, b.row.wavePlanId));
+  const byPath = {};
+  const totals = {};
+  for (const path of paths) {
+    const wanted = normalizePath(path);
+    const entries = [];
+    let total = 0;
+    for (const { row, at } of started) {
+      const matchedOn = matchOf(row, wanted);
+      if (!matchedOn) continue;
+      total++;
+      if (entries.length < limit) entries.push(entryOf(row, at, matchedOn));
+    }
+    byPath[path] = entries;
+    totals[path] = total;
+  }
+  return { byPath, totals };
+}
+function matchOf(row, path) {
+  if (row.filesChanged !== null) {
+    return row.filesChanged.some((file) => normalizePath(file) === path) ? "changed" : null;
+  }
+  return row.filePaths.some((file) => normalizePath(file) === path) ? "planned" : null;
+}
+function entryOf(row, at, matchedOn) {
+  const summary = row.completionSummary?.trim() || null;
+  const error = row.errorMessage?.trim() || null;
+  return {
+    taskCode: row.taskCode,
+    task: row.label,
+    item: row.itemTitle,
+    ticketId: row.ticketId,
+    wavePlanId: row.wavePlanId,
+    status: row.status,
+    at: new Date(at).toISOString(),
+    matchedOn,
+    retried: row.retryCount > 0,
+    attempts: row.retryCount + 1,
+    error: error ? cut(error, ERROR_MAX_CHARS) : null,
+    // The controller's own wording for a branch that did not merge; see
+    // `integrateWave` in execution/controller.ts.
+    conflicted: error !== null && error.startsWith("merge conflict"),
+    summary: summary ? cut(summary, SUMMARY_MAX_CHARS) : null,
+    summaryTruncated: summary !== null && summary.length > SUMMARY_MAX_CHARS,
+    costUsd: finalCostOf(row.session)
+  };
+}
+function finalCostOf(session) {
+  if (!session || !session.terminal) return null;
+  const cents = session.reportedCostCents;
+  if (cents === null || !Number.isFinite(cents)) return null;
+  const reading = session.telemetryCostUsd;
+  if (reading !== null && Number.isFinite(reading) && Math.round(reading * 100) === cents) {
+    return reading;
+  }
+  return cents / 100;
+}
+function cut(text8, max) {
+  return text8.length > max ? `${text8.slice(0, max - 1).trimEnd()}\u2026` : text8;
+}
+function clampLimit(limit) {
+  if (typeof limit !== "number" || !Number.isFinite(limit)) return DEFAULT_HISTORY_LIMIT;
+  return Math.min(MAX_HISTORY_LIMIT, Math.max(1, Math.floor(limit)));
+}
+function normalizePath(path) {
+  return path.trim().replace(/\\/g, "/").replace(/^(\.\/)+/, "");
+}
+function compare(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 // src/wave-planner/execution/types.ts
@@ -4806,9 +6685,12 @@ import { eq as eq8, and as and4, inArray as inArray2, notInArray as notInArray2,
 var orchestrator_exports = {};
 __export(orchestrator_exports, {
   AoCliAdapter: () => AoCliAdapter,
+  CODE_GRAPH_CAPABILITY: () => CODE_GRAPH_CAPABILITY,
   ClaudeSessionAdapter: () => ClaudeSessionAdapter,
+  GRAPH_TIMEOUT_MS: () => GRAPH_TIMEOUT_MS,
   HttpSessionTransport: () => HttpSessionTransport,
   ISOLATION_CAPABILITY: () => ISOLATION_CAPABILITY,
+  MAX_REACHED_TESTS_LISTED: () => MAX_REACHED_TESTS_LISTED,
   OrchestratorClient: () => OrchestratorClient,
   OrchestratorService: () => OrchestratorService,
   StatusPoller: () => StatusPoller,
@@ -4832,889 +6714,8 @@ __export(orchestrator_exports, {
   sessionReportingForMode: () => sessionReportingForMode
 });
 
-// src/orchestrator/adapter.ts
-function isPushCapableAdapter(adapter) {
-  return typeof adapter.ingestStatus === "function" && typeof adapter.ingestCompletion === "function";
-}
-
-// src/orchestrator/client.ts
-var OrchestratorClient = class {
-  constructor(config) {
-    this.config = {
-      ...config,
-      timeout: config.timeout || 3e4
-    };
-  }
-  /**
-   * Check if orchestrator is healthy
-   */
-  async healthCheck() {
-    const response = await this.fetch("/health");
-    return response.json();
-  }
-  /**
-   * Dispatch a task to the orchestrator
-   */
-  async dispatch(request) {
-    const response = await this.fetch("/dispatch", {
-      method: "POST",
-      body: JSON.stringify(request)
-    });
-    if (!response.ok) {
-      const error = await response.text();
-      return {
-        accepted: false,
-        error: `Orchestrator rejected dispatch: ${error}`
-      };
-    }
-    return response.json();
-  }
-  /**
-   * Fetch the completion report for a finished job.
-   *
-   * The ao-cli and claude-session adapters both implement this; the HTTP
-   * adapter did not, and `OrchestratorAdapter.getCompletionReport` is optional —
-   * so StatusPoller.handleCompletion received null and NEVER invoked its
-   * onComplete callback. In practice that meant an http-mode job could run to
-   * completion locally and the host would never be told: the session sat at its
-   * last polled status forever.
-   *
-   * Returns null (rather than throwing) when the job is unknown or not yet
-   * finished, which is what the poller expects.
-   */
-  async getCompletionReport(externalJobId) {
-    const response = await this.fetch(`/jobs/${encodeURIComponent(externalJobId)}/result`);
-    if (!response.ok) return null;
-    try {
-      return await response.json();
-    } catch {
-      return null;
-    }
-  }
-  /**
-   * Cancel a running job
-   */
-  async cancel(sessionId) {
-    const response = await this.fetch(`/jobs/${sessionId}/cancel`, {
-      method: "POST"
-    });
-    return response.json();
-  }
-  /**
-   * Get status of a specific job
-   */
-  async getJobStatus(sessionId) {
-    const response = await this.fetch(`/jobs/${sessionId}/status`);
-    return response.json();
-  }
-  /**
-   * Get queue information
-   */
-  async getQueue() {
-    const response = await this.fetch("/queue");
-    return response.json();
-  }
-  async fetch(path, options = {}) {
-    const url = `${this.config.url}${path}`;
-    const headers = {
-      "Content-Type": "application/json"
-    };
-    if (this.config.apiKey) {
-      headers["Authorization"] = `Bearer ${this.config.apiKey}`;
-    }
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.config.timeout);
-    try {
-      const response = await fetch(url, {
-        ...options,
-        headers: {
-          ...headers,
-          ...options.headers
-        },
-        signal: controller.signal
-      });
-      return response;
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  }
-};
-var clientInstance = null;
-function initOrchestratorClient(config) {
-  clientInstance = new OrchestratorClient(config);
-  return clientInstance;
-}
-function getOrchestratorClient() {
-  if (!clientInstance) {
-    throw new Error("Orchestrator client not initialized. Call initOrchestratorClient first.");
-  }
-  return clientInstance;
-}
-function isOrchestratorConfigured() {
-  return clientInstance !== null;
-}
-function buildDispatchRequest(params) {
-  return {
-    sessionId: params.sessionId,
-    repo: params.repo,
-    linearTicketId: params.linearTicketId,
-    callbackUrl: params.callbackUrl,
-    taskSpec: {
-      prompt: `Complete the task: ${params.title}`,
-      filePaths: params.filePaths,
-      model: params.model || "sonnet",
-      workstream: params.workstream,
-      acceptanceCriteria: params.acceptanceCriteria,
-      estimatedMinutes: params.estimatedMinutes
-    }
-  };
-}
-
-// src/orchestrator/ao-cli-adapter.ts
-import { exec as exec2 } from "child_process";
-import { promisify as promisify2 } from "util";
-var execAsync2 = promisify2(exec2);
-function parseSessionId(output) {
-  const match = output.match(/Session started:\s*(\S+)/i);
-  if (match) return match[1];
-  const uuidMatch = output.match(/^([a-f0-9-]{36})$/im);
-  if (uuidMatch) return uuidMatch[1];
-  const sessionMatch = output.match(/session[:\s]+([a-zA-Z0-9_-]+)/i);
-  if (sessionMatch) return sessionMatch[1];
-  return null;
-}
-function parseStatusOutput(output) {
-  try {
-    const json = JSON.parse(output);
-    return {
-      status: mapAoStatus(json.status || json.state),
-      progressPercent: json.progress ?? json.progressPercent ?? 0,
-      currentStep: json.currentStep ?? json.step,
-      currentFile: json.currentFile ?? json.file,
-      message: json.message,
-      filesModified: json.filesModified ?? json.files,
-      tokensUsed: json.tokensUsed ?? json.tokens,
-      costUsd: json.costUsd ?? json.cost
-    };
-  } catch {
-    const status = {};
-    const statusMatch = output.match(/status:\s*(\w+)/i);
-    if (statusMatch) {
-      status.status = mapAoStatus(statusMatch[1]);
-    }
-    const progressMatch = output.match(/progress:\s*(\d+)/i);
-    if (progressMatch) {
-      status.progressPercent = parseInt(progressMatch[1], 10);
-    }
-    const stepMatch = output.match(/(?:step|task|working on):\s*(.+)/i);
-    if (stepMatch) {
-      status.currentStep = stepMatch[1].trim();
-    }
-    const fileMatch = output.match(/(?:file|editing):\s*(.+)/i);
-    if (fileMatch) {
-      status.currentFile = fileMatch[1].trim();
-    }
-    const messageMatch = output.match(/message:\s*(.+)/i);
-    if (messageMatch) {
-      status.message = messageMatch[1].trim();
-    }
-    return status;
-  }
-}
-function mapAoStatus(aoStatus) {
-  const normalized = aoStatus?.toLowerCase() ?? "";
-  if (normalized.includes("queue") || normalized.includes("pending")) return "queued";
-  if (normalized.includes("run") || normalized.includes("active") || normalized.includes("working")) return "running";
-  if (normalized.includes("wait") || normalized.includes("pause")) return "waiting";
-  if (normalized.includes("complete") || normalized.includes("done") || normalized.includes("finished")) return "complete";
-  if (normalized.includes("error") || normalized.includes("fail")) return "error";
-  if (normalized.includes("cancel") || normalized.includes("stop")) return "cancelled";
-  return "running";
-}
-var AoCliAdapter = class {
-  constructor(config) {
-    this.mode = "ao-cli";
-    this.config = config;
-    this.aoPath = config.aoPath || "ao";
-    throw new Error(
-      "The ao-cli orchestrator mode is deprecated and non-functional.\n\n  `ao` no longer exposes the commands this adapter calls (`ao list`,\n  `ao status <id>`), and `ao spawn` no longer accepts a prompt.\n\n  Use --mode http against the ao daemon instead:\n    devpilot bridge connect --mode http --http-url http://127.0.0.1:3001\n\n  See docs/AO-INTEGRATION.md for the current integration path."
-    );
-    this.projectName = config.aoProjectName || "default";
-    this.workingDirectory = config.workingDirectory;
-  }
-  /**
-   * Execute an ao command and return stdout
-   */
-  async execAo(args, options) {
-    const cmd = `${this.aoPath} ${args.join(" ")}`;
-    const cwd = options?.cwd || this.workingDirectory || process.cwd();
-    try {
-      const { stdout, stderr } = await execAsync2(cmd, {
-        cwd,
-        timeout: 6e4,
-        // 1 minute timeout for most commands
-        env: {
-          ...process.env
-          // Pass through any ao-specific env vars
-        }
-      });
-      return { stdout: stdout.trim(), stderr: stderr.trim() };
-    } catch (error) {
-      const execError = error;
-      if (execError.stdout || execError.stderr) {
-        return {
-          stdout: execError.stdout?.trim() || "",
-          stderr: execError.stderr?.trim() || execError.message
-        };
-      }
-      throw error;
-    }
-  }
-  /**
-   * Check if ao CLI is available and working
-   */
-  async healthCheck() {
-    try {
-      const { stdout } = await this.execAo(["--version"]);
-      let activeJobs = 0;
-      try {
-        const { stdout: listOutput } = await this.execAo(["list"]);
-        const lines = listOutput.split("\n").filter((l) => l.trim());
-        activeJobs = lines.length > 1 ? lines.length - 1 : 0;
-      } catch {
-      }
-      return {
-        status: "healthy",
-        version: stdout || "unknown",
-        activeJobs,
-        queueLength: 0,
-        // ao-cli doesn't have a queue concept
-        availableWorkers: 1
-        // Local execution
-      };
-    } catch (error) {
-      return {
-        status: "down",
-        version: "unknown",
-        activeJobs: 0,
-        queueLength: 0,
-        availableWorkers: 0
-      };
-    }
-  }
-  /**
-   * Dispatch a task using ao spawn
-   * Command: ao spawn <project> <ticket-id> "<prompt>"
-   */
-  async dispatch(request) {
-    try {
-      const ticketId = request.linearTicketId || request.sessionId;
-      const prompt = request.taskSpec.prompt;
-      const args = [
-        "spawn",
-        this.projectName,
-        ticketId,
-        `"${prompt.replace(/"/g, '\\"')}"`
-      ];
-      if (request.taskSpec.model) {
-        args.push("--model", request.taskSpec.model);
-      }
-      if (request.repo) {
-        args.push("--repo", request.repo);
-      }
-      const { stdout, stderr } = await this.execAo(args);
-      const externalJobId = parseSessionId(stdout);
-      if (!externalJobId && stderr) {
-        return {
-          accepted: false,
-          error: `ao spawn failed: ${stderr}`
-        };
-      }
-      return {
-        accepted: true,
-        orchestratorJobId: externalJobId || ticketId,
-        estimatedStartTime: (/* @__PURE__ */ new Date()).toISOString(),
-        queuePosition: 0
-      };
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return {
-        accepted: false,
-        error: `Failed to dispatch via ao CLI: ${errorMessage}`
-      };
-    }
-  }
-  /**
-   * Get job status using ao status <session>
-   */
-  async getJobStatus(externalJobId) {
-    try {
-      const { stdout, stderr } = await this.execAo(["status", externalJobId]);
-      if (!stdout && stderr) {
-        if (stderr.toLowerCase().includes("not found")) {
-          return {
-            sessionId: externalJobId,
-            externalJobId,
-            status: "error",
-            progressPercent: 0,
-            message: "Session not found"
-          };
-        }
-      }
-      const parsed = parseStatusOutput(stdout || stderr);
-      return {
-        sessionId: externalJobId,
-        externalJobId,
-        status: parsed.status || "running",
-        progressPercent: parsed.progressPercent || 0,
-        currentStep: parsed.currentStep,
-        currentFile: parsed.currentFile,
-        message: parsed.message,
-        filesModified: parsed.filesModified,
-        tokensUsed: parsed.tokensUsed,
-        costUsd: parsed.costUsd,
-        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-      };
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return {
-        sessionId: externalJobId,
-        externalJobId,
-        status: "error",
-        progressPercent: 0,
-        message: `Failed to get status: ${errorMessage}`
-      };
-    }
-  }
-  /**
-   * Cancel a job using ao stop <session>
-   */
-  async cancel(externalJobId) {
-    try {
-      const { stdout, stderr } = await this.execAo(["stop", externalJobId]);
-      if (stderr && stderr.toLowerCase().includes("error")) {
-        return {
-          success: false,
-          message: stderr
-        };
-      }
-      return {
-        success: true,
-        message: stdout || `Session ${externalJobId} stopped`
-      };
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return {
-        success: false,
-        message: `Failed to cancel: ${errorMessage}`
-      };
-    }
-  }
-  /**
-   * Send a message to an active session using ao send <session> "<message>"
-   */
-  async sendMessage(externalJobId, message) {
-    try {
-      const { stdout, stderr } = await this.execAo([
-        "send",
-        externalJobId,
-        `"${message.replace(/"/g, '\\"')}"`
-      ]);
-      if (stderr && stderr.toLowerCase().includes("error")) {
-        return {
-          success: false,
-          error: stderr
-        };
-      }
-      return {
-        success: true,
-        message: stdout || "Message sent"
-      };
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return {
-        success: false,
-        error: `Failed to send message: ${errorMessage}`
-      };
-    }
-  }
-  /**
-   * Get completion report for a finished job
-   * Uses ao status with detailed output
-   */
-  async getCompletionReport(externalJobId) {
-    try {
-      const { stdout } = await this.execAo(["status", externalJobId, "--json"]);
-      try {
-        const json = JSON.parse(stdout);
-        if (json.status !== "complete" && json.status !== "done" && json.status !== "finished") {
-          return null;
-        }
-        return {
-          sessionId: externalJobId,
-          success: !json.error,
-          prUrl: json.prUrl || json.pr_url,
-          commitSha: json.commitSha || json.commit,
-          filesModified: json.filesModified || [],
-          filesCreated: json.filesCreated || [],
-          filesDeleted: json.filesDeleted || [],
-          summary: json.summary || json.message || "Task completed",
-          tokensUsed: json.tokensUsed || 0,
-          costUsd: json.costUsd || 0,
-          durationMinutes: json.durationMinutes || 0,
-          error: json.error ? {
-            code: json.error.code || "UNKNOWN",
-            message: json.error.message || String(json.error),
-            recoverable: json.error.recoverable || false
-          } : void 0
-        };
-      } catch {
-        const status = parseStatusOutput(stdout);
-        if (status.status !== "complete") {
-          return null;
-        }
-        return {
-          sessionId: externalJobId,
-          success: true,
-          filesModified: status.filesModified || [],
-          filesCreated: [],
-          filesDeleted: [],
-          summary: status.message || "Task completed",
-          tokensUsed: status.tokensUsed || 0,
-          costUsd: status.costUsd || 0,
-          durationMinutes: 0
-        };
-      }
-    } catch {
-      return null;
-    }
-  }
-  /**
-   * Cleanup - no persistent resources for CLI adapter
-   */
-  async shutdown() {
-  }
-};
-function createAoCliAdapter(config) {
-  return new AoCliAdapter(config);
-}
-
-// src/orchestrator/claude-session-adapter.ts
-var ISOLATION_CAPABILITY = "isolation";
-var INTEGRATE_TIMEOUT_MS = 5 * 6e4;
-var HttpSessionTransport = class _HttpSessionTransport {
-  constructor(baseUrl, apiKey, timeoutMs = 3e4) {
-    this.baseUrl = baseUrl;
-    this.apiKey = apiKey;
-    this.timeoutMs = timeoutMs;
-    /**
-     * The runner's capabilities, once it has told us.
-     *
-     * Cached because every isolated create asks, and a wave is many creates. It
-     * is dropped whenever the runner fails to do something it was asked — a
-     * refused create, a failed merge, no answer at all — because the usual
-     * reason a runner starts behaving differently is that it is a different
-     * runner: restarted, upgraded, or put back to an older version. The next
-     * question then goes to `/v1/health` again rather than to a memory of a
-     * process that may no longer exist. A read that fails is never cached.
-     */
-    this.knownCapabilities = null;
-  }
-  /** Extract the runner's session id from a create/idempotent response body. */
-  static readExternalId(json) {
-    const j = json ?? {};
-    return j.externalSessionId ?? j.sessionId ?? j.id;
-  }
-  async capabilities() {
-    if (this.knownCapabilities) return this.knownCapabilities;
-    try {
-      const res = await this.fetch("/v1/health");
-      if (!res.ok) return null;
-      const json = await res.json();
-      const capabilities = Array.isArray(json.capabilities) ? json.capabilities.filter((c) => typeof c === "string") : [];
-      this.knownCapabilities = capabilities;
-      return capabilities;
-    } catch {
-      return null;
-    }
-  }
-  async createSession(params) {
-    if (params.isolation) {
-      const capabilities = await this.capabilities();
-      if (!capabilities?.includes(ISOLATION_CAPABILITY)) {
-        this.knownCapabilities = null;
-        return {
-          accepted: false,
-          error: "ISOLATION_UNAVAILABLE: this run gives each task its own branch, and the session runner " + (capabilities ? "does not report that it can (it may have been replaced by an older version)" : "did not answer when asked whether it can")
-        };
-      }
-    }
-    try {
-      const res = await this.fetch("/v1/sessions", {
-        method: "POST",
-        body: JSON.stringify(params)
-      });
-      if (res.status === 201 || res.status === 200) {
-        const json = await res.json().catch(() => ({}));
-        return { accepted: true, externalSessionId: _HttpSessionTransport.readExternalId(json) };
-      }
-      if (res.status === 409) {
-        const json = await res.json().catch(() => ({}));
-        const existing = _HttpSessionTransport.readExternalId(json);
-        if (existing) {
-          return { accepted: true, externalSessionId: existing };
-        }
-        return { accepted: false, error: "CONFLICT: session already dispatched without an id in response" };
-      }
-      if (res.status === 429) {
-        return { accepted: false, error: "CAPACITY" };
-      }
-      this.knownCapabilities = null;
-      const body = await res.text().catch(() => "");
-      const refusal = _HttpSessionTransport.readRefusal(body);
-      if (refusal?.error === "ISOLATION_UNAVAILABLE") {
-        return { accepted: false, error: `ISOLATION_UNAVAILABLE: ${refusal.message ?? "no reason given"}` };
-      }
-      return { accepted: false, error: `Session create failed: ${res.status} ${body}` };
-    } catch (error) {
-      this.knownCapabilities = null;
-      return { accepted: false, error: error instanceof Error ? error.message : String(error) };
-    }
-  }
-  static readRefusal(body) {
-    try {
-      const json = JSON.parse(body);
-      return {
-        error: typeof json.error === "string" ? json.error : void 0,
-        message: typeof json.message === "string" ? json.message : void 0
-      };
-    } catch {
-      return null;
-    }
-  }
-  async integrate(request) {
-    try {
-      const res = await this.fetch(
-        "/v1/integrate",
-        { method: "POST", body: JSON.stringify(request) },
-        INTEGRATE_TIMEOUT_MS
-      );
-      const text8 = await res.text().catch(() => "");
-      if (res.status === 200) {
-        const result = _HttpSessionTransport.readIntegration(text8);
-        if (result) return { ok: true, result };
-        this.knownCapabilities = null;
-        return {
-          ok: false,
-          code: "BAD_RESPONSE",
-          message: "the session runner answered the merge with something that is not a merge result"
-        };
-      }
-      this.knownCapabilities = null;
-      const refusal = _HttpSessionTransport.readRefusal(text8);
-      return {
-        ok: false,
-        code: refusal?.error ?? `HTTP_${res.status}`,
-        // The runner's own sentence when it sent one: it says what is in the
-        // way and what to do about it. A runner with no `/v1/integrate` at all
-        // answers a bare 404, and that needs saying in words.
-        message: refusal?.message ?? `the session runner answered ${res.status}${refusal?.error ? ` (${refusal.error})` : ""} when asked to merge the wave \u2014 it may predate a branch per task`
-      };
-    } catch (error) {
-      this.knownCapabilities = null;
-      return {
-        ok: false,
-        code: "UNREACHABLE",
-        message: `the session runner could not be reached to merge the wave (${error instanceof Error ? error.message : String(error)})`
-      };
-    }
-  }
-  /** A merge result, if that is what the body is. Shape-checked: it is acted on. */
-  static readIntegration(body) {
-    try {
-      const json = JSON.parse(body);
-      if (typeof json.runBranch !== "string" || typeof json.headSha !== "string") return null;
-      return {
-        runBranch: json.runBranch,
-        headSha: json.headSha,
-        merged: Array.isArray(json.merged) ? json.merged : [],
-        conflicts: Array.isArray(json.conflicts) ? json.conflicts : [],
-        missing: Array.isArray(json.missing) ? json.missing : []
-      };
-    } catch {
-      return null;
-    }
-  }
-  async sendMessage(externalSessionId, message) {
-    try {
-      const res = await this.fetch(`/v1/sessions/${externalSessionId}/messages`, {
-        method: "POST",
-        body: JSON.stringify({ message })
-      });
-      if (res.status === 410) {
-        return { success: false, error: "session already terminal" };
-      }
-      return res.ok ? { success: true } : { success: false, error: `send failed: ${res.status}` };
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) };
-    }
-  }
-  async stopSession(externalSessionId) {
-    try {
-      const res = await this.fetch(`/v1/sessions/${externalSessionId}/stop`, { method: "POST" });
-      if (res.ok || res.status === 410) {
-        return { success: true, message: `Session ${externalSessionId} stopped` };
-      }
-      return { success: false, message: `stop failed: ${res.status}` };
-    } catch (error) {
-      return { success: false, message: error instanceof Error ? error.message : String(error) };
-    }
-  }
-  async getSession(externalSessionId) {
-    try {
-      const res = await this.fetch(`/v1/sessions/${externalSessionId}`);
-      if (!res.ok) return null;
-      return await res.json();
-    } catch {
-      return null;
-    }
-  }
-  async health() {
-    try {
-      const res = await this.fetch("/v1/health");
-      if (!res.ok) return { status: "down", version: "unknown" };
-      const json = await res.json();
-      return { status: "healthy", version: json.version ?? "unknown" };
-    } catch {
-      return { status: "down", version: "unknown" };
-    }
-  }
-  async fetch(path, options = {}, timeoutMs = this.timeoutMs) {
-    const headers = { "Content-Type": "application/json" };
-    if (this.apiKey) headers["Authorization"] = `Bearer ${this.apiKey}`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      return await fetch(`${this.baseUrl}${path}`, {
-        ...options,
-        headers: { ...headers, ...options.headers },
-        signal: controller.signal
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-};
-var ClaudeSessionAdapter = class {
-  constructor(config, transport) {
-    this.mode = "claude-session";
-    this.pushBased = true;
-    this.cache = /* @__PURE__ */ new Map();
-    this.config = config;
-    if (transport) {
-      this.transport = transport;
-    } else {
-      if (!config.sessionApiUrl) {
-        throw new Error(
-          "claude-session adapter requires sessionApiUrl (or an injected SessionTransport)"
-        );
-      }
-      this.transport = new HttpSessionTransport(
-        config.sessionApiUrl,
-        config.sessionApiKey ?? config.apiKey,
-        config.timeout
-      );
-    }
-  }
-  async healthCheck() {
-    const base = {
-      status: "healthy",
-      version: "claude-session",
-      activeJobs: this.cache.size,
-      queueLength: 0,
-      availableWorkers: 1
-    };
-    if (this.transport.health) {
-      const probe = await this.transport.health();
-      return { ...base, status: probe.status, version: probe.version };
-    }
-    return base;
-  }
-  async dispatch(request) {
-    const result = await this.transport.createSession({
-      sessionId: request.sessionId,
-      repo: request.repo,
-      prompt: request.taskSpec.prompt,
-      model: request.taskSpec.model,
-      filePaths: request.taskSpec.filePaths,
-      acceptanceCriteria: request.taskSpec.acceptanceCriteria,
-      constraints: request.taskSpec.constraints,
-      linearTicketId: request.linearTicketId,
-      callbackUrl: request.callbackUrl,
-      callbackToken: this.config.callbackToken,
-      environmentId: this.config.sessionEnvironmentId,
-      // Absent for every dispatch that is not a task of an isolated plan, and
-      // then absent from the request body too: the runner runs the session in
-      // the checkout itself, as it always has.
-      ...request.isolation ? { isolation: request.isolation } : {},
-      metadata: request.metadata
-    });
-    if (!result.accepted || !result.externalSessionId) {
-      return { accepted: false, error: result.error ?? "Session dispatch rejected" };
-    }
-    this.cache.set(result.externalSessionId, {
-      status: {
-        sessionId: request.sessionId,
-        externalJobId: result.externalSessionId,
-        status: "queued",
-        progressPercent: 0,
-        message: "Session dispatched, awaiting first update",
-        startedAt: (/* @__PURE__ */ new Date()).toISOString()
-      }
-    });
-    return {
-      accepted: true,
-      orchestratorJobId: result.externalSessionId,
-      estimatedStartTime: (/* @__PURE__ */ new Date()).toISOString(),
-      queuePosition: 0
-    };
-  }
-  async getJobStatus(externalJobId) {
-    const cached = this.cache.get(externalJobId);
-    if (cached) return cached.status;
-    if (this.transport.getSession) {
-      const pulled = await this.transport.getSession(externalJobId);
-      if (pulled) {
-        return {
-          sessionId: externalJobId,
-          externalJobId,
-          status: pulled.status ?? "running",
-          progressPercent: pulled.progressPercent ?? 0,
-          currentStep: pulled.currentStep,
-          currentFile: pulled.currentFile,
-          message: pulled.message,
-          filesModified: pulled.filesModified,
-          updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-        };
-      }
-    }
-    return {
-      sessionId: externalJobId,
-      externalJobId,
-      status: "error",
-      progressPercent: 0,
-      message: "Unknown session (no cached state and no pull fallback)"
-    };
-  }
-  async cancel(externalJobId) {
-    const result = await this.transport.stopSession(externalJobId);
-    if (result.success) this.cache.delete(externalJobId);
-    return result;
-  }
-  async sendMessage(externalJobId, message) {
-    const result = await this.transport.sendMessage(externalJobId, message);
-    return result.success ? { success: true, message: "Message delivered to session" } : { success: false, error: result.error };
-  }
-  async getCompletionReport(externalJobId) {
-    return this.cache.get(externalJobId)?.completion ?? null;
-  }
-  /**
-   * Whether the runner behind this adapter can give a task its own branch.
-   *
-   * Three ways to be told no, and each is worded for the person who will read
-   * it on the plan: the transport has no way to ask or to merge; the runner did
-   * not answer; the runner answered and does not list the capability.
-   *
-   * "Did not answer" is reported as unsupported rather than waited out. The
-   * plan's first task is about to be sent to that same runner; if it really is
-   * down the dispatch fails and says so, and if it was a blip the plan runs
-   * un-isolated with this reason on its row. What it must not do is guess.
-   */
-  async isolationSupport() {
-    if (!this.transport.capabilities || !this.transport.integrate) {
-      return {
-        supported: false,
-        reason: "the session transport in use cannot give a task its own branch or merge a wave"
-      };
-    }
-    const capabilities = await this.transport.capabilities();
-    if (capabilities === null) {
-      return {
-        supported: false,
-        reason: "the session runner did not answer /v1/health when the run started, so it could not be asked whether it gives each task its own branch"
-      };
-    }
-    if (!capabilities.includes(ISOLATION_CAPABILITY)) {
-      return {
-        supported: false,
-        reason: `the session runner does not report the '${ISOLATION_CAPABILITY}' capability (it predates a worktree and branch per task) \u2014 upgrade the runner to isolate tasks`
-      };
-    }
-    return { supported: true };
-  }
-  async integrate(request) {
-    if (!this.transport.integrate) {
-      return {
-        ok: false,
-        code: "UNSUPPORTED",
-        message: "the session transport in use cannot merge a wave"
-      };
-    }
-    return this.transport.integrate(request);
-  }
-  async shutdown() {
-    this.cache.clear();
-  }
-  // --- IPushCapableAdapter -------------------------------------------------
-  /**
-   * Feed a pushed status update (from the session's POST to
-   * `/api/orchestrator/status`) into the adapter's cache.
-   */
-  ingestStatus(externalJobId, update) {
-    const prev = this.cache.get(externalJobId);
-    this.cache.set(externalJobId, {
-      completion: prev?.completion,
-      status: {
-        sessionId: update.sessionId,
-        externalJobId,
-        status: update.status,
-        progressPercent: update.progressPercent,
-        currentStep: update.currentStep,
-        currentFile: update.currentFile,
-        message: update.message,
-        filesModified: update.filesModified,
-        tokensUsed: update.tokensUsed,
-        updatedAt: update.timestamp
-      }
-    });
-  }
-  /**
-   * Feed a pushed completion report (from the session's POST to
-   * `/api/orchestrator/complete`) into the adapter's cache.
-   */
-  ingestCompletion(externalJobId, report) {
-    const prev = this.cache.get(externalJobId);
-    this.cache.set(externalJobId, {
-      completion: report,
-      status: {
-        sessionId: report.sessionId,
-        externalJobId,
-        status: report.success ? "complete" : "error",
-        progressPercent: report.success ? 100 : prev?.status.progressPercent ?? 0,
-        message: report.summary,
-        filesModified: report.filesModified,
-        tokensUsed: report.tokensUsed,
-        costUsd: report.costUsd,
-        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-      }
-    });
-  }
-};
-function createClaudeSessionAdapter(config, transport) {
-  return new ClaudeSessionAdapter(config, transport);
-}
-
 // src/orchestrator/session-prompt.ts
+var MAX_REACHED_TESTS_LISTED = 10;
 function sessionReportingForMode(mode) {
   return mode === "claude-session" ? "runner" : "agent";
 }
@@ -5730,7 +6731,9 @@ function buildSessionPrompt(input) {
     sessionId,
     reporting = "agent",
     goal,
-    predecessorsMerged = false
+    predecessorsMerged = false,
+    reachedTests,
+    reachedTestsTruncated = false
   } = input;
   const sections = [];
   sections.push(`# Task
@@ -5756,6 +6759,10 @@ These files are this task's scope. Other tasks running at the same time have bee
 
 ` + fileScope.map((f) => `- \`${f}\``).join("\n")
     );
+  }
+  const reached = reachedTestsSection(reachedTests, reachedTestsTruncated);
+  if (reached) {
+    sections.push(reached);
   }
   if (predecessorContext.length > 0) {
     const blocks = predecessorContext.map((p) => {
@@ -5796,6 +6803,25 @@ ${blocks}`
     reporting === "runner" ? finishingSection(sessionId) : reportingProtocolSection(callbackUrl, sessionId)
   );
   return sections.join("\n\n");
+}
+function reachedTestsSection(tests, truncated) {
+  if (!tests || tests.length === 0) return null;
+  const usable = tests.filter(
+    (path) => path.length > 0 && path.length <= 300 && !/[`\u0000-\u001f\u007f]/.test(path)
+  );
+  if (usable.length === 0) return null;
+  const listed = usable.slice(0, MAX_REACHED_TESTS_LISTED);
+  const unlisted = usable.length - listed.length;
+  const more = unlisted > 0 ? `
+
+\u2026and ${truncated ? "at least " : ""}${unlisted} more not listed.` : truncated ? `
+
+\u2026and more not listed.` : "";
+  return `# Tests Reached From Your Files
+
+These test files are reached from the files in your scope: they use them, directly or through other files, according to an index of the repository's code. This is information about where a change here can show up \u2014 it is not a list of tests you are being asked to run or to make pass. The index can be wrong in both directions, so a file here may not depend on yours, and one that does may be missing:
+
+` + listed.map((path) => `- \`${path}\``).join("\n") + more;
 }
 function finishingSection(sessionId) {
   return `# When You Finish
@@ -5849,447 +6875,6 @@ curl -sS -X POST '${completeUrl}' \\
 \`\`\`
 
 Replace \`<callback-token>\` with the token provided by your runner. Send the completion callback even if the task failed \u2014 set \`"success": false\` and include an \`"error"\` field describing what went wrong.`;
-}
-
-// src/orchestrator/service.ts
-var HttpAdapter = class {
-  constructor(config) {
-    this.mode = "http";
-    if (!config.url) {
-      throw new Error("HTTP adapter requires url configuration");
-    }
-    this.client = new OrchestratorClient({
-      url: config.url,
-      apiKey: config.apiKey,
-      callbackUrl: config.callbackUrl || "",
-      timeout: config.timeout
-    });
-  }
-  async healthCheck() {
-    return this.client.healthCheck();
-  }
-  async dispatch(request) {
-    return this.client.dispatch(request);
-  }
-  /**
-   * Forwarded so http mode can actually finish.
-   *
-   * IOrchestratorAdapter.getCompletionReport is OPTIONAL, and this adapter did
-   * not implement it — so OrchestratorService.getCompletionReport always
-   * returned null for http mode, StatusPoller.handleCompletion never invoked
-   * onComplete, and a job that finished locally was never reported to the host.
-   * The ao-cli and claude-session adapters both implement it; this was the odd
-   * one out.
-   */
-  async getCompletionReport(externalJobId) {
-    return this.client.getCompletionReport(externalJobId);
-  }
-  async getJobStatus(externalJobId) {
-    const status = await this.client.getJobStatus(externalJobId);
-    return {
-      sessionId: externalJobId,
-      externalJobId,
-      status: status.status,
-      progressPercent: status.progressPercent,
-      message: status.message
-    };
-  }
-  async cancel(externalJobId) {
-    return this.client.cancel(externalJobId);
-  }
-  async sendMessage(_externalJobId, _message) {
-    return {
-      success: false,
-      error: "HTTP adapter does not support direct messaging"
-    };
-  }
-  async shutdown() {
-  }
-};
-var DisabledAdapter = class {
-  constructor() {
-    this.mode = "disabled";
-  }
-  async healthCheck() {
-    return {
-      status: "down",
-      version: "disabled",
-      activeJobs: 0,
-      queueLength: 0,
-      availableWorkers: 0
-    };
-  }
-  async dispatch(_request) {
-    return {
-      accepted: false,
-      error: "Orchestrator is disabled"
-    };
-  }
-  async getJobStatus(externalJobId) {
-    return {
-      sessionId: externalJobId,
-      externalJobId,
-      status: "error",
-      progressPercent: 0,
-      message: "Orchestrator is disabled"
-    };
-  }
-  async cancel(_externalJobId) {
-    return {
-      success: false,
-      message: "Orchestrator is disabled"
-    };
-  }
-  async shutdown() {
-  }
-};
-var OrchestratorService = class {
-  constructor(config, sessionTransport) {
-    this.sessionMappings = /* @__PURE__ */ new Map();
-    this.eventCallbacks = /* @__PURE__ */ new Set();
-    this.config = config;
-    this.sessionTransport = sessionTransport;
-    this.adapter = this.createAdapter(config);
-  }
-  /**
-   * Create the appropriate adapter based on mode
-   */
-  createAdapter(config) {
-    switch (config.mode) {
-      case "claude-session":
-        return new ClaudeSessionAdapter(config, this.sessionTransport);
-      case "http":
-        return new HttpAdapter(config);
-      case "ao-cli":
-        return new AoCliAdapter(config);
-      case "disabled":
-      default:
-        return new DisabledAdapter();
-    }
-  }
-  /**
-   * Whether the active adapter receives progress via pushed callbacks. When
-   * true, the StatusPoller should not track its sessions.
-   */
-  get isPushBased() {
-    return this.adapter.pushBased ?? false;
-  }
-  /**
-   * Get current orchestrator mode
-   */
-  get mode() {
-    return this.adapter.mode;
-  }
-  /**
-   * Check if orchestrator is available
-   */
-  get isEnabled() {
-    return this.adapter.mode !== "disabled";
-  }
-  /**
-   * Subscribe to orchestrator events
-   */
-  onEvent(callback) {
-    this.eventCallbacks.add(callback);
-    return () => this.eventCallbacks.delete(callback);
-  }
-  /**
-   * Emit an event to all subscribers
-   */
-  emitEvent(event) {
-    for (const callback of this.eventCallbacks) {
-      try {
-        callback(event);
-      } catch (error) {
-        console.error("Error in orchestrator event callback:", error);
-      }
-    }
-  }
-  /**
-   * Check orchestrator health
-   */
-  async healthCheck() {
-    return this.adapter.healthCheck();
-  }
-  /**
-   * Dispatch a task to the orchestrator
-   * Stores session mapping for later status queries
-   */
-  async dispatch(request) {
-    const response = await this.adapter.dispatch(request);
-    if (response.accepted && response.orchestratorJobId) {
-      this.sessionMappings.set(request.sessionId, {
-        sessionId: request.sessionId,
-        externalJobId: response.orchestratorJobId,
-        mode: this.adapter.mode,
-        startedAt: /* @__PURE__ */ new Date()
-      });
-      this.emitEvent({
-        type: "job:started",
-        sessionId: request.sessionId,
-        externalJobId: response.orchestratorJobId,
-        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-        data: {
-          sessionId: request.sessionId,
-          status: "running",
-          progressPercent: 0,
-          timestamp: (/* @__PURE__ */ new Date()).toISOString()
-        }
-      });
-    }
-    return {
-      ...response,
-      mode: this.adapter.mode
-    };
-  }
-  /**
-   * Get job status by DevPilot session ID
-   */
-  async getJobStatusBySessionId(sessionId) {
-    const mapping = this.sessionMappings.get(sessionId);
-    if (!mapping) {
-      return null;
-    }
-    const status = await this.adapter.getJobStatus(mapping.externalJobId);
-    mapping.lastStatusAt = /* @__PURE__ */ new Date();
-    this.emitEvent({
-      type: "job:progress",
-      sessionId,
-      externalJobId: mapping.externalJobId,
-      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-      data: {
-        sessionId,
-        status: status.status,
-        progressPercent: status.progressPercent,
-        currentStep: status.currentStep,
-        currentFile: status.currentFile,
-        message: status.message,
-        filesModified: status.filesModified,
-        tokensUsed: status.tokensUsed,
-        timestamp: (/* @__PURE__ */ new Date()).toISOString()
-      }
-    });
-    return status;
-  }
-  /**
-   * Get job status by external job ID
-   */
-  async getJobStatus(externalJobId) {
-    return this.adapter.getJobStatus(externalJobId);
-  }
-  /**
-   * Cancel a job by DevPilot session ID
-   */
-  async cancelBySessionId(sessionId) {
-    const mapping = this.sessionMappings.get(sessionId);
-    if (!mapping) {
-      return {
-        success: false,
-        message: `No active job found for session ${sessionId}`
-      };
-    }
-    const result = await this.adapter.cancel(mapping.externalJobId);
-    if (result.success) {
-      this.emitEvent({
-        type: "job:cancelled",
-        sessionId,
-        externalJobId: mapping.externalJobId,
-        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-        data: { error: "Cancelled by user" }
-      });
-      this.sessionMappings.delete(sessionId);
-    }
-    return result;
-  }
-  /**
-   * Cancel a job by external job ID
-   */
-  async cancel(externalJobId) {
-    return this.adapter.cancel(externalJobId);
-  }
-  /**
-   * Send a message to an active session
-   */
-  async sendMessage(sessionId, message) {
-    const mapping = this.sessionMappings.get(sessionId);
-    if (!mapping) {
-      return {
-        success: false,
-        error: `No active job found for session ${sessionId}`
-      };
-    }
-    if (!this.adapter.sendMessage) {
-      return {
-        success: false,
-        error: `Current adapter (${this.adapter.mode}) does not support messaging`
-      };
-    }
-    return this.adapter.sendMessage(mapping.externalJobId, message);
-  }
-  /**
-   * Get completion report for a finished job
-   */
-  async getCompletionReport(sessionId) {
-    const mapping = this.sessionMappings.get(sessionId);
-    if (!mapping) {
-      return null;
-    }
-    if (!this.adapter.getCompletionReport) {
-      return null;
-    }
-    return this.adapter.getCompletionReport(mapping.externalJobId);
-  }
-  /**
-   * Whether a task dispatched now can be given its own worktree and branch.
-   *
-   * Only an adapter that says so can. `http` and `ao-cli` do not implement the
-   * question and are answered for here — never isolated, and the reason says
-   * which mode, so a plan row reading "not isolated" also says why.
-   */
-  async isolationSupport() {
-    if (!this.adapter.isolationSupport) {
-      return {
-        supported: false,
-        reason: `the orchestrator is in '${this.adapter.mode}' mode, which does not give tasks their own branch`
-      };
-    }
-    return this.adapter.isolationSupport();
-  }
-  /**
-   * Merge a wave's task branches into the run branch.
-   *
-   * Never rejects. Its one caller is the wave gate in
-   * `WaveExecutionController`; nothing else should be merging a run.
-   */
-  async integrate(request) {
-    if (!this.adapter.integrate) {
-      return {
-        ok: false,
-        code: "UNSUPPORTED",
-        message: `the orchestrator is in '${this.adapter.mode}' mode, which cannot merge a wave`
-      };
-    }
-    try {
-      return await this.adapter.integrate(request);
-    } catch (error) {
-      return {
-        ok: false,
-        code: "UNREACHABLE",
-        message: error instanceof Error ? error.message : String(error)
-      };
-    }
-  }
-  /**
-   * Ingest a pushed status update from a session callback
-   * (`/api/orchestrator/status`). For push-based adapters this replaces the
-   * poll loop: the payload is cached on the adapter and re-emitted as a
-   * `job:progress` event to SSE subscribers. No-op mapping if the session is
-   * unknown. Safe to call for non-push adapters (falls through to event only).
-   */
-  ingestStatusUpdate(update) {
-    const mapping = this.sessionMappings.get(update.sessionId);
-    if (mapping && isPushCapableAdapter(this.adapter)) {
-      this.adapter.ingestStatus(mapping.externalJobId, update);
-      mapping.lastStatusAt = /* @__PURE__ */ new Date();
-    }
-    this.emitEvent({
-      type: "job:progress",
-      sessionId: update.sessionId,
-      externalJobId: mapping?.externalJobId ?? update.sessionId,
-      timestamp: update.timestamp,
-      data: update
-    });
-  }
-  /**
-   * Ingest a pushed completion report from a session callback
-   * (`/api/orchestrator/complete`). Caches it on the adapter (so
-   * getCompletionReport can serve it) and finalizes the session.
-   */
-  ingestCompletionReport(report) {
-    const mapping = this.sessionMappings.get(report.sessionId);
-    if (mapping && isPushCapableAdapter(this.adapter)) {
-      this.adapter.ingestCompletion(mapping.externalJobId, report);
-    }
-    this.markSessionComplete(report.sessionId, report);
-  }
-  /**
-   * Mark a session as complete (for external completion notifications)
-   *
-   * Emits whether or not this process dispatched the session. It used to
-   * return early when `sessionMappings` had no entry — and that map is process
-   * memory, so after a restart it has no entry for anything still running.
-   * Every completion that arrived after a restart was therefore swallowed
-   * here: the callback route had already marked the session row COMPLETE, but
-   * no `job:complete` was emitted, the ExecutionBridge never heard, and the
-   * wave task stayed `dispatched` forever with its wave unable to end.
-   *
-   * The mapping is only the fast path to the external id. Subscribers key on
-   * `sessionId` — the bridge resolves it to a wave task through the database —
-   * and `ingestStatusUpdate` already falls back the same way. A duplicate is
-   * harmless: subscribers apply a terminal report conditionally.
-   */
-  markSessionComplete(sessionId, report) {
-    const mapping = this.sessionMappings.get(sessionId);
-    this.emitEvent({
-      type: report.success ? "job:complete" : "job:error",
-      sessionId,
-      externalJobId: mapping?.externalJobId ?? sessionId,
-      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-      data: report
-    });
-    this.sessionMappings.delete(sessionId);
-  }
-  /**
-   * Get all active session mappings
-   */
-  getActiveSessions() {
-    return Array.from(this.sessionMappings.values());
-  }
-  /**
-   * Get external job ID for a session
-   */
-  getExternalJobId(sessionId) {
-    return this.sessionMappings.get(sessionId)?.externalJobId;
-  }
-  /**
-   * Shutdown the orchestrator service
-   */
-  async shutdown() {
-    if (this.adapter.shutdown) {
-      await this.adapter.shutdown();
-    }
-    this.sessionMappings.clear();
-    this.eventCallbacks.clear();
-  }
-};
-var globalForOrchestrator = globalThis;
-function getInstance() {
-  return globalForOrchestrator.__devpilotOrchestratorService ?? null;
-}
-function setInstance(service) {
-  globalForOrchestrator.__devpilotOrchestratorService = service;
-}
-function initOrchestratorService(config, sessionTransport) {
-  const existing = getInstance();
-  if (existing) {
-    existing.shutdown();
-  }
-  const service = new OrchestratorService(config, sessionTransport);
-  setInstance(service);
-  return service;
-}
-function getOrchestratorService() {
-  const service = getInstance();
-  if (!service) {
-    throw new Error("Orchestrator service not initialized. Call initOrchestratorService first.");
-  }
-  return service;
-}
-function isOrchestratorServiceInitialized() {
-  return getInstance() !== null;
-}
-function getOrchestratorServiceOrNull() {
-  return getInstance();
 }
 
 // src/orchestrator/status-poller.ts
@@ -7701,6 +8286,7 @@ var WaveDispatchCoordinator = class {
         `ISOLATION_UNAVAILABLE: this run gives each task its own branch, and the orchestrator is now in '${service.mode}' mode, which cannot`
       );
     }
+    const reached = await this.reachedTests(service, ctx.repo, request.fileScope);
     const [session] = await this.db.insert(rufloSessions).values({
       repo: ctx.repo,
       linearTicketId: ctx.linearTicketId ?? `DP-${task.taskCode}-${Date.now()}`,
@@ -7737,7 +8323,11 @@ var WaveDispatchCoordinator = class {
       // True only when it is: the plan is isolated and every predecessor
       // listed has been merged, so the worktree this task is given was cut
       // from a branch that contains them.
-      predecessorsMerged: ctx.run.isolated && request.predecessorContext.length > 0 && request.predecessorContext.every((p) => p.merged === true)
+      predecessorsMerged: ctx.run.isolated && request.predecessorContext.length > 0 && request.predecessorContext.every((p) => p.merged === true),
+      // Present only when there is a list with something in it. Spread rather
+      // than passed as undefined so that, without a code graph, the input —
+      // and the prompt — are what they were.
+      ...reached ? { reachedTests: reached.tests, reachedTestsTruncated: reached.truncated } : {}
     });
     const dispatchReq = {
       sessionId: session.id,
@@ -7787,6 +8377,37 @@ var WaveDispatchCoordinator = class {
       externalJobId: response.orchestratorJobId ?? "",
       mode: service.mode
     };
+  }
+  /**
+   * The test files reached from a task's files, or null when there is nothing
+   * to tell the worker: the task names no files, there is no code graph to
+   * ask, or it found none.
+   *
+   * Asked of the runner, like the plan's dependents, because the index lives
+   * in the checkout and only the runner knows where that is. The request
+   * names the repository and nothing about the task's run, so the answer
+   * cannot come from an isolated task's own worktree: it describes the
+   * repository as it was last indexed, not the run branch the task's checkout
+   * is cut from. That is one more reason the prompt presents the list as
+   * information.
+   *
+   * Never throws and never fails a dispatch. "Unavailable" is not logged or
+   * recorded per task: it is the normal state of a repository with no index,
+   * and the plan already says whether a graph was there when it was made.
+   */
+  async reachedTests(service, repo, files) {
+    if (files.length === 0) {
+      return null;
+    }
+    try {
+      const outcome = await service.graphAffectedTests({ repo, files });
+      if (!outcome.available || outcome.tests.length === 0) {
+        return null;
+      }
+      return { tests: outcome.tests, truncated: outcome.truncated };
+    } catch {
+      return null;
+    }
   }
   /**
    * Map database model enum to dispatch model format
@@ -11931,9 +12552,9 @@ function isLive(observation, projectSlug, liveWithinMs, nowMs, existsImpl) {
 function condenseTitle(text8, max) {
   const flat = text8.replace(/\s+/g, " ").trim();
   if (flat.length <= max) return flat;
-  const cut = flat.slice(0, max);
-  const lastSpace = cut.lastIndexOf(" ");
-  const body = lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut.slice(0, max - 1);
+  const cut2 = flat.slice(0, max);
+  const lastSpace = cut2.lastIndexOf(" ");
+  const body = lastSpace > max * 0.6 ? cut2.slice(0, lastSpace) : cut2.slice(0, max - 1);
   return `${body.trimEnd()}\u2026`;
 }
 var CONTINUATION_PREAMBLE = /^\s*this session is being continued from a previous conversation/i;
@@ -12183,6 +12804,345 @@ async function summarizeSessions(jobs, options = {}) {
   return results;
 }
 
+// src/code-graph/index.ts
+var code_graph_exports = {};
+__export(code_graph_exports, {
+  CODE_GRAPH_DIR: () => CODE_GRAPH_DIR,
+  DEPENDENCY_EDGE_KINDS: () => DEPENDENCY_EDGE_KINDS,
+  affectedTests: () => affectedTests,
+  dependentsOf: () => dependentsOf,
+  exportStructure: () => exportStructure,
+  graphDbPath: () => graphDbPath,
+  isTestPath: () => isTestPath,
+  readGraphStatus: () => readGraphStatus
+});
+
+// src/code-graph/db.ts
+import Database3 from "better-sqlite3";
+import { existsSync as existsSync4 } from "fs";
+import { join as join3 } from "path";
+var CODE_GRAPH_DIR = ".codegraph";
+var CODE_GRAPH_DB_FILE = "codegraph.db";
+function graphDbPath(dir) {
+  return join3(dir, CODE_GRAPH_DIR, CODE_GRAPH_DB_FILE);
+}
+function openGraph(dir, required = {}) {
+  const dbPath = graphDbPath(dir);
+  if (!existsSync4(dbPath)) {
+    return { ok: false, dbPath, reason: `there is no code graph index at ${dbPath}` };
+  }
+  let db2;
+  try {
+    db2 = new Database3(dbPath, { readonly: true, fileMustExist: true, timeout: 1e3 });
+  } catch (error) {
+    return { ok: false, dbPath, reason: `the code graph index at ${dbPath} could not be opened: ${messageOf(error)}` };
+  }
+  try {
+    const missing = missingColumns(db2, required);
+    if (missing) {
+      db2.close();
+      return {
+        ok: false,
+        dbPath,
+        reason: `the code graph index at ${dbPath} ${missing} \u2014 it was written by an indexer version this build does not read`
+      };
+    }
+  } catch (error) {
+    closeQuietly(db2);
+    return { ok: false, dbPath, reason: `the code graph index at ${dbPath} could not be read: ${messageOf(error)}` };
+  }
+  return { ok: true, db: db2, dbPath };
+}
+function withGraph(dir, required, read) {
+  const opened = openGraph(dir, required);
+  if (!opened.ok) return opened;
+  try {
+    return { ok: true, value: read(opened.db, opened.dbPath), dbPath: opened.dbPath };
+  } catch (error) {
+    return {
+      ok: false,
+      dbPath: opened.dbPath,
+      reason: `the code graph index at ${opened.dbPath} could not be read: ${messageOf(error)}`
+    };
+  } finally {
+    closeQuietly(opened.db);
+  }
+}
+function missingColumns(db2, required) {
+  for (const [table, columns] of Object.entries(required)) {
+    const present = new Set(columnsOf(db2, table));
+    if (present.size === 0) return `has no \`${table}\` table`;
+    for (const column of columns) {
+      if (!present.has(column)) return `has no ${table}.${column} column`;
+    }
+  }
+  return null;
+}
+function columnsOf(db2, table) {
+  return db2.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+}
+function closeQuietly(db2) {
+  try {
+    db2.close();
+  } catch {
+  }
+}
+function messageOf(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+var IN_CHUNK = 400;
+function chunked(values, size = IN_CHUNK) {
+  const out = [];
+  for (let i = 0; i < values.length; i += size) out.push(values.slice(i, i + size));
+  return out;
+}
+function placeholders(count) {
+  return Array.from({ length: count }, () => "?").join(", ");
+}
+
+// src/code-graph/status.ts
+function readGraphStatus(dir) {
+  const read = withGraph(dir, { files: ["indexed_at"], nodes: [], edges: [] }, (db2) => {
+    const count = (table) => db2.prepare(`SELECT count(*) AS n FROM ${table}`).get().n;
+    const newest = db2.prepare("SELECT max(indexed_at) AS at FROM files").get().at;
+    const schemaVersion = columnsOf(db2, "schema_versions").includes("version") ? db2.prepare("SELECT max(version) AS v FROM schema_versions").get().v : null;
+    return {
+      files: count("files"),
+      nodes: count("nodes"),
+      edges: count("edges"),
+      indexedAt: typeof newest === "number" ? newest : null,
+      schemaVersion: typeof schemaVersion === "number" ? schemaVersion : null
+    };
+  });
+  if (!read.ok) {
+    return {
+      initialized: false,
+      dbPath: graphDbPath(dir),
+      files: 0,
+      nodes: 0,
+      edges: 0,
+      indexedAt: null,
+      schemaVersion: null,
+      reason: read.reason
+    };
+  }
+  return { initialized: true, dbPath: read.dbPath, ...read.value };
+}
+
+// src/code-graph/dependents.ts
+var DEPENDENCY_EDGE_KINDS = [
+  "calls",
+  "imports",
+  "references",
+  "instantiates",
+  "extends",
+  "implements"
+];
+var REQUIRED = { nodes: ["id", "file_path"], edges: ["source", "target", "kind"] };
+var DEFAULT_DEPTH = 1;
+var MAX_DEPTH = 3;
+var DEFAULT_LIMIT = 200;
+var MAX_LIMIT = 2e3;
+function dependentsOf(dir, files, opts = {}) {
+  const depth = clampInt(opts.depth, DEFAULT_DEPTH, 1, MAX_DEPTH);
+  const limit = clampInt(opts.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
+  const read = withGraph(dir, REQUIRED, (db2) => {
+    const direct = directDependentsReader(db2);
+    const byFile = {};
+    let truncated = false;
+    for (const file of files) {
+      const all = [...reach(direct, normalizePath2(file), depth).keys()].sort();
+      if (all.length > limit) truncated = true;
+      byFile[file] = all.slice(0, limit);
+    }
+    return { byFile, truncated };
+  });
+  if (!read.ok) return { available: false, reason: read.reason, byFile: {}, truncated: false };
+  return { available: true, ...read.value };
+}
+function affectedTests(dir, files, opts = {}) {
+  const limit = clampInt(opts.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
+  const read = withGraph(dir, REQUIRED, (db2) => {
+    const direct = directDependentsReader(db2);
+    const nearest = /* @__PURE__ */ new Map();
+    for (const file of files) {
+      for (const [dependent, steps] of reach(direct, normalizePath2(file), MAX_DEPTH)) {
+        if (!isTestPath(dependent)) continue;
+        const known = nearest.get(dependent);
+        if (known === void 0 || steps < known) nearest.set(dependent, steps);
+      }
+    }
+    const ordered = [...nearest.entries()].sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([test]) => test);
+    return { tests: ordered.slice(0, limit), truncated: ordered.length > limit };
+  });
+  if (!read.ok) return { available: false, reason: read.reason, tests: [], truncated: false };
+  return { available: true, ...read.value };
+}
+function isTestPath(path) {
+  const normalized = path.replace(/\\/g, "/");
+  const base = normalized.slice(normalized.lastIndexOf("/") + 1);
+  if (base.includes(".test.") || base.includes(".spec.")) return true;
+  if (base.endsWith("_test.go")) return true;
+  if (/^test_.*\.py$/.test(base)) return true;
+  const directories = `/${normalized.slice(0, normalized.length - base.length)}`;
+  return directories.includes("/tests/") || directories.includes("/__tests__/");
+}
+function directDependentsReader(db2) {
+  const queries = /* @__PURE__ */ new Map();
+  const kinds = DEPENDENCY_EDGE_KINDS.map((k) => `'${k}'`).join(", ");
+  const queryFor = (count) => {
+    let query = queries.get(count);
+    if (!query) {
+      const statement = db2.prepare(
+        `SELECT DISTINCT t.file_path AS target, s.file_path AS source
+           FROM nodes t
+           JOIN edges e ON e.target = t.id
+           JOIN nodes s ON s.id = e.source
+          WHERE t.file_path IN (${placeholders(count)})
+            AND e.kind IN (${kinds})
+            AND s.file_path <> t.file_path`
+      );
+      query = (files) => statement.all(...files);
+      queries.set(count, query);
+    }
+    return query;
+  };
+  return (files) => {
+    const out = /* @__PURE__ */ new Map();
+    for (const chunk of chunked(files, IN_CHUNK)) {
+      const rows = queryFor(chunk.length)(chunk);
+      for (const row of rows) {
+        let sources = out.get(row.target);
+        if (!sources) out.set(row.target, sources = /* @__PURE__ */ new Set());
+        sources.add(row.source);
+      }
+    }
+    return out;
+  };
+}
+function reach(direct, file, depth) {
+  const steps = /* @__PURE__ */ new Map([[file, 0]]);
+  let frontier = [file];
+  for (let step = 1; step <= depth && frontier.length > 0; step++) {
+    const next = [];
+    for (const sources of direct(frontier).values()) {
+      for (const source of sources) {
+        if (!steps.has(source)) {
+          steps.set(source, step);
+          next.push(source);
+        }
+      }
+    }
+    frontier = next;
+  }
+  steps.delete(file);
+  return steps;
+}
+function normalizePath2(path) {
+  return path.trim().replace(/\\/g, "/").replace(/^(\.\/)+/, "");
+}
+function clampInt(value, fallback, min, max) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+// src/code-graph/structure.ts
+var FILE_COLUMNS = ["path", "content_hash", "language"];
+var NODE_COLUMNS = [
+  "id",
+  "kind",
+  "name",
+  "qualified_name",
+  "file_path",
+  "start_line",
+  "end_line",
+  "is_exported"
+];
+var EDGE_COLUMNS = ["source", "target", "kind", "line"];
+var REQUIRED2 = { files: FILE_COLUMNS, nodes: NODE_COLUMNS, edges: EDGE_COLUMNS };
+function exportStructure(dir, opts = {}) {
+  const read = withGraph(dir, REQUIRED2, (db2) => {
+    const paths = opts.onlyPaths ? [...new Set(opts.onlyPaths)] : null;
+    return {
+      files: readFiles(db2, paths),
+      nodes: readNodes(db2, paths),
+      edges: readEdges(db2, paths),
+      indexerSchemaVersion: readSchemaVersion(db2)
+    };
+  });
+  if (!read.ok) {
+    return {
+      available: false,
+      reason: read.reason,
+      files: [],
+      nodes: [],
+      edges: [],
+      indexerSchemaVersion: null
+    };
+  }
+  return { available: true, ...read.value };
+}
+function rowsFor(db2, select, filterColumn, paths) {
+  if (paths === null) return db2.prepare(select).all();
+  const rows = [];
+  for (const chunk of chunked(paths, IN_CHUNK)) {
+    rows.push(
+      ...db2.prepare(`${select} WHERE ${filterColumn} IN (${placeholders(chunk.length)})`).all(...chunk)
+    );
+  }
+  return rows;
+}
+function readFiles(db2, paths) {
+  const rows = rowsFor(db2, "SELECT path, content_hash, language FROM files", "path", paths);
+  return rows.map((row) => ({ path: row.path, contentHash: row.content_hash, language: row.language })).sort((a, b) => compare2(a.path, b.path));
+}
+function readNodes(db2, paths) {
+  const rows = rowsFor(
+    db2,
+    "SELECT id, kind, name, qualified_name, file_path, start_line, end_line, is_exported FROM nodes",
+    "file_path",
+    paths
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    kind: row.kind,
+    name: row.name,
+    qualifiedName: row.qualified_name,
+    filePath: row.file_path,
+    startLine: row.start_line,
+    endLine: row.end_line,
+    isExported: row.is_exported === 1
+  })).sort((a, b) => compare2(a.filePath, b.filePath) || a.startLine - b.startLine || compare2(a.id, b.id));
+}
+function readEdges(db2, paths) {
+  const rows = rowsFor(
+    db2,
+    `SELECT e.source AS source, e.target AS target, e.kind AS kind, e.line AS line, s.file_path AS file_path
+       FROM edges e
+       JOIN nodes s ON s.id = e.source
+       JOIN nodes t ON t.id = e.target`,
+    "s.file_path",
+    paths
+  );
+  return rows.map((row) => ({
+    source: row.source,
+    target: row.target,
+    kind: row.kind,
+    line: typeof row.line === "number" ? row.line : null,
+    filePath: row.file_path
+  })).sort(
+    (a, b) => compare2(a.filePath, b.filePath) || compare2(a.source, b.source) || compare2(a.target, b.target) || compare2(a.kind, b.kind) || (a.line ?? -1) - (b.line ?? -1)
+  );
+}
+function readSchemaVersion(db2) {
+  if (!columnsOf(db2, "schema_versions").includes("version")) return null;
+  const row = db2.prepare("SELECT max(version) AS v FROM schema_versions").get();
+  return typeof row.v === "number" ? row.v : null;
+}
+function compare2(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 // src/index.ts
 var VERSION = "0.1.0";
 export {
@@ -12190,6 +13150,7 @@ export {
   activityEvents,
   adoption_exports as adoption,
   closeDatabase,
+  code_graph_exports as codeGraph,
   completedTasks,
   completedTasksRelations,
   complexityValues,

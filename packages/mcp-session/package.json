@@ -1,6 +1,6 @@
 {
   "name": "@devpilot.sh/mcp-session",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "MCP server letting a local coding agent take part in a DevPilot shared session \u2014 end-to-end encrypted, key never leaves the machine",
   "license": "MIT",
   "author": "DevPilot Team",

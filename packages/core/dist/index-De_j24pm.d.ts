@@ -1,4 +1,5 @@
-import { O as OrchestratorConfig, a as OrchestratorHealth, D as DispatchRequest, b as DispatchResponse, C as CompletionReport, I as IOrchestratorAdapter, c as OrchestratorMode, d as OrchestratorAdapterConfig, J as JobStatus, S as SendMessageResult, e as OrchestratorService, f as ClaudeSessionAdapter, g as CreateSessionParams, h as CreateSessionResult, H as HttpSessionTransport, i as IPushCapableAdapter, j as ISOLATION_CAPABILITY, k as IntegrateOutcome, l as IntegrateRequest, m as IntegrationResult, n as IsolationSupport, o as OrchestratorEvent, p as OrchestratorEventCallback, q as OrchestratorEventType, r as SessionTransport, s as StatusUpdate, T as TaskIsolation, t as TaskSpec, u as createClaudeSessionAdapter, v as getOrchestratorService, w as getOrchestratorServiceOrNull, x as initOrchestratorService, y as isOrchestratorServiceInitialized, z as isPushCapableAdapter } from './service-BKzQ2dca.js';
+import { g as OrchestratorConfig, O as OrchestratorHealth, D as DispatchRequest, a as DispatchResponse, C as CompletionReport, f as GraphAffectedTestsOutcome, e as GraphAffectedTestsRequest, d as GraphDependentsOutcome, G as GraphDependentsRequest, c as IntegrateOutcome, b as IntegrateRequest, h as IntegrationResult, I as IsolationSupport, S as StatusUpdate, T as TaskIsolation, i as TaskSpec } from './types-CbuwQ_x5.js';
+import { I as IOrchestratorAdapter, O as OrchestratorMode, a as OrchestratorAdapterConfig, J as JobStatus, S as SendMessageResult, b as OrchestratorService, C as CODE_GRAPH_CAPABILITY, c as ClaudeSessionAdapter, d as CreateSessionParams, e as CreateSessionResult, G as GRAPH_TIMEOUT_MS, H as HttpSessionTransport, f as IPushCapableAdapter, g as ISOLATION_CAPABILITY, h as OrchestratorEvent, i as OrchestratorEventCallback, j as OrchestratorEventType, k as SessionTransport, l as createClaudeSessionAdapter, m as getOrchestratorService, n as getOrchestratorServiceOrNull, o as initOrchestratorService, p as isOrchestratorServiceInitialized, q as isPushCapableAdapter } from './service-BbWARg0h.js';
 
 /**
  * HTTP client for communicating with the external agent-orchestrator
@@ -141,8 +142,9 @@ declare function createAoCliAdapter(config: OrchestratorAdapterConfig): AoCliAda
  * Session prompt envelope (spec/trd/01-TIER1-EXECUTION-LOOP.md §7.3).
  *
  * Composes the markdown task prompt handed to a Claude Code session at dispatch
- * time: the task, what the whole item is for, the files in scope, what the
- * tasks before it reported, and how the session should finish.
+ * time: the task, what the whole item is for, the files in scope, the tests a
+ * code graph reaches from them (when there is one), what the tasks before it
+ * reported, and how the session should finish.
  *
  * How it should finish depends on who reports to DevPilot (§7.2 allows either
  * "the session (or runner on its behalf)"), and that is the `reporting` input:
@@ -224,7 +226,20 @@ interface SessionPromptInput {
      * them, and nothing checked.
      */
     predecessorsMerged?: boolean;
+    /**
+     * Test files reached from the files in `fileScope`, when a code graph could
+     * say (TRD 27 §5.2). The first `MAX_REACHED_TESTS_LISTED` are listed.
+     *
+     * Absent or empty adds nothing: the prompt is then, byte for byte, the one
+     * built before this field existed — which is every prompt for a repository
+     * with no index.
+     */
+    reachedTests?: string[];
+    /** True when the list handed in was itself cut short, so "all of them" cannot be claimed. */
+    reachedTestsTruncated?: boolean;
 }
+/** How many reached tests a worker is shown. The rest are counted, not listed. */
+declare const MAX_REACHED_TESTS_LISTED = 10;
 /**
  * Which reporting mode an orchestrator mode needs.
  *
@@ -371,12 +386,18 @@ declare function createDbStatusPollerCallbacks(): Pick<StatusPollerConfig, 'onSt
 
 type index_AoCliAdapter = AoCliAdapter;
 declare const index_AoCliAdapter: typeof AoCliAdapter;
+declare const index_CODE_GRAPH_CAPABILITY: typeof CODE_GRAPH_CAPABILITY;
 declare const index_ClaudeSessionAdapter: typeof ClaudeSessionAdapter;
 declare const index_CompletionReport: typeof CompletionReport;
 declare const index_CreateSessionParams: typeof CreateSessionParams;
 declare const index_CreateSessionResult: typeof CreateSessionResult;
 declare const index_DispatchRequest: typeof DispatchRequest;
 declare const index_DispatchResponse: typeof DispatchResponse;
+declare const index_GRAPH_TIMEOUT_MS: typeof GRAPH_TIMEOUT_MS;
+declare const index_GraphAffectedTestsOutcome: typeof GraphAffectedTestsOutcome;
+declare const index_GraphAffectedTestsRequest: typeof GraphAffectedTestsRequest;
+declare const index_GraphDependentsOutcome: typeof GraphDependentsOutcome;
+declare const index_GraphDependentsRequest: typeof GraphDependentsRequest;
 declare const index_HttpSessionTransport: typeof HttpSessionTransport;
 declare const index_IOrchestratorAdapter: typeof IOrchestratorAdapter;
 declare const index_IPushCapableAdapter: typeof IPushCapableAdapter;
@@ -386,6 +407,7 @@ declare const index_IntegrateRequest: typeof IntegrateRequest;
 declare const index_IntegrationResult: typeof IntegrationResult;
 declare const index_IsolationSupport: typeof IsolationSupport;
 declare const index_JobStatus: typeof JobStatus;
+declare const index_MAX_REACHED_TESTS_LISTED: typeof MAX_REACHED_TESTS_LISTED;
 declare const index_OrchestratorAdapterConfig: typeof OrchestratorAdapterConfig;
 type index_OrchestratorClient = OrchestratorClient;
 declare const index_OrchestratorClient: typeof OrchestratorClient;
@@ -427,7 +449,7 @@ declare const index_isPushCapableAdapter: typeof isPushCapableAdapter;
 declare const index_isStatusPollerInitialized: typeof isStatusPollerInitialized;
 declare const index_sessionReportingForMode: typeof sessionReportingForMode;
 declare namespace index {
-  export { index_AoCliAdapter as AoCliAdapter, index_ClaudeSessionAdapter as ClaudeSessionAdapter, index_CompletionReport as CompletionReport, index_CreateSessionParams as CreateSessionParams, index_CreateSessionResult as CreateSessionResult, index_DispatchRequest as DispatchRequest, index_DispatchResponse as DispatchResponse, index_HttpSessionTransport as HttpSessionTransport, index_IOrchestratorAdapter as IOrchestratorAdapter, index_IPushCapableAdapter as IPushCapableAdapter, index_ISOLATION_CAPABILITY as ISOLATION_CAPABILITY, index_IntegrateOutcome as IntegrateOutcome, index_IntegrateRequest as IntegrateRequest, index_IntegrationResult as IntegrationResult, index_IsolationSupport as IsolationSupport, index_JobStatus as JobStatus, index_OrchestratorAdapterConfig as OrchestratorAdapterConfig, index_OrchestratorClient as OrchestratorClient, index_OrchestratorConfig as OrchestratorConfig, index_OrchestratorEvent as OrchestratorEvent, index_OrchestratorEventCallback as OrchestratorEventCallback, index_OrchestratorEventType as OrchestratorEventType, index_OrchestratorHealth as OrchestratorHealth, index_OrchestratorMode as OrchestratorMode, index_OrchestratorService as OrchestratorService, index_SendMessageResult as SendMessageResult, type index_SessionPromptGoal as SessionPromptGoal, type index_SessionPromptInput as SessionPromptInput, type index_SessionPromptPredecessor as SessionPromptPredecessor, type index_SessionReporting as SessionReporting, index_SessionTransport as SessionTransport, index_StatusPoller as StatusPoller, type index_StatusPollerConfig as StatusPollerConfig, index_StatusUpdate as StatusUpdate, index_TaskIsolation as TaskIsolation, index_TaskSpec as TaskSpec, index_buildDispatchRequest as buildDispatchRequest, index_buildSessionPrompt as buildSessionPrompt, index_createAoCliAdapter as createAoCliAdapter, index_createClaudeSessionAdapter as createClaudeSessionAdapter, index_createDbStatusPollerCallbacks as createDbStatusPollerCallbacks, index_getOrchestratorClient as getOrchestratorClient, index_getOrchestratorService as getOrchestratorService, index_getOrchestratorServiceOrNull as getOrchestratorServiceOrNull, index_getStatusPoller as getStatusPoller, index_getStatusPollerOrNull as getStatusPollerOrNull, index_initOrchestratorClient as initOrchestratorClient, index_initOrchestratorService as initOrchestratorService, index_initStatusPoller as initStatusPoller, index_isOrchestratorConfigured as isOrchestratorConfigured, index_isOrchestratorServiceInitialized as isOrchestratorServiceInitialized, index_isPushCapableAdapter as isPushCapableAdapter, index_isStatusPollerInitialized as isStatusPollerInitialized, index_sessionReportingForMode as sessionReportingForMode };
+  export { index_AoCliAdapter as AoCliAdapter, index_CODE_GRAPH_CAPABILITY as CODE_GRAPH_CAPABILITY, index_ClaudeSessionAdapter as ClaudeSessionAdapter, index_CompletionReport as CompletionReport, index_CreateSessionParams as CreateSessionParams, index_CreateSessionResult as CreateSessionResult, index_DispatchRequest as DispatchRequest, index_DispatchResponse as DispatchResponse, index_GRAPH_TIMEOUT_MS as GRAPH_TIMEOUT_MS, index_GraphAffectedTestsOutcome as GraphAffectedTestsOutcome, index_GraphAffectedTestsRequest as GraphAffectedTestsRequest, index_GraphDependentsOutcome as GraphDependentsOutcome, index_GraphDependentsRequest as GraphDependentsRequest, index_HttpSessionTransport as HttpSessionTransport, index_IOrchestratorAdapter as IOrchestratorAdapter, index_IPushCapableAdapter as IPushCapableAdapter, index_ISOLATION_CAPABILITY as ISOLATION_CAPABILITY, index_IntegrateOutcome as IntegrateOutcome, index_IntegrateRequest as IntegrateRequest, index_IntegrationResult as IntegrationResult, index_IsolationSupport as IsolationSupport, index_JobStatus as JobStatus, index_MAX_REACHED_TESTS_LISTED as MAX_REACHED_TESTS_LISTED, index_OrchestratorAdapterConfig as OrchestratorAdapterConfig, index_OrchestratorClient as OrchestratorClient, index_OrchestratorConfig as OrchestratorConfig, index_OrchestratorEvent as OrchestratorEvent, index_OrchestratorEventCallback as OrchestratorEventCallback, index_OrchestratorEventType as OrchestratorEventType, index_OrchestratorHealth as OrchestratorHealth, index_OrchestratorMode as OrchestratorMode, index_OrchestratorService as OrchestratorService, index_SendMessageResult as SendMessageResult, type index_SessionPromptGoal as SessionPromptGoal, type index_SessionPromptInput as SessionPromptInput, type index_SessionPromptPredecessor as SessionPromptPredecessor, type index_SessionReporting as SessionReporting, index_SessionTransport as SessionTransport, index_StatusPoller as StatusPoller, type index_StatusPollerConfig as StatusPollerConfig, index_StatusUpdate as StatusUpdate, index_TaskIsolation as TaskIsolation, index_TaskSpec as TaskSpec, index_buildDispatchRequest as buildDispatchRequest, index_buildSessionPrompt as buildSessionPrompt, index_createAoCliAdapter as createAoCliAdapter, index_createClaudeSessionAdapter as createClaudeSessionAdapter, index_createDbStatusPollerCallbacks as createDbStatusPollerCallbacks, index_getOrchestratorClient as getOrchestratorClient, index_getOrchestratorService as getOrchestratorService, index_getOrchestratorServiceOrNull as getOrchestratorServiceOrNull, index_getStatusPoller as getStatusPoller, index_getStatusPollerOrNull as getStatusPollerOrNull, index_initOrchestratorClient as initOrchestratorClient, index_initOrchestratorService as initOrchestratorService, index_initStatusPoller as initStatusPoller, index_isOrchestratorConfigured as isOrchestratorConfigured, index_isOrchestratorServiceInitialized as isOrchestratorServiceInitialized, index_isPushCapableAdapter as isPushCapableAdapter, index_isStatusPollerInitialized as isStatusPollerInitialized, index_sessionReportingForMode as sessionReportingForMode };
 }
 
-export { AoCliAdapter as A, OrchestratorClient as O, type SessionPromptGoal as S, type SessionPromptInput as a, type SessionPromptPredecessor as b, type SessionReporting as c, StatusPoller as d, type StatusPollerConfig as e, buildDispatchRequest as f, buildSessionPrompt as g, createAoCliAdapter as h, index as i, createDbStatusPollerCallbacks as j, getOrchestratorClient as k, getStatusPoller as l, getStatusPollerOrNull as m, initOrchestratorClient as n, initStatusPoller as o, isOrchestratorConfigured as p, isStatusPollerInitialized as q, sessionReportingForMode as s };
+export { AoCliAdapter as A, MAX_REACHED_TESTS_LISTED as M, OrchestratorClient as O, type SessionPromptGoal as S, type SessionPromptInput as a, type SessionPromptPredecessor as b, type SessionReporting as c, StatusPoller as d, type StatusPollerConfig as e, buildDispatchRequest as f, buildSessionPrompt as g, createAoCliAdapter as h, index as i, createDbStatusPollerCallbacks as j, getOrchestratorClient as k, getStatusPoller as l, getStatusPollerOrNull as m, initOrchestratorClient as n, initStatusPoller as o, isOrchestratorConfigured as p, isStatusPollerInitialized as q, sessionReportingForMode as s };

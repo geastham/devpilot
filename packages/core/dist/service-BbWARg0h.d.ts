@@ -1,201 +1,4 @@
-/**
- * Orchestrator bridge type definitions
- * Defines the contract between DevPilot and the external agent-orchestrator
- */
-interface OrchestratorConfig {
-    url: string;
-    apiKey?: string;
-    callbackUrl: string;
-    timeout?: number;
-}
-/**
- * Request sent to orchestrator when dispatching work
- */
-interface DispatchRequest {
-    sessionId: string;
-    repo: string;
-    taskSpec: TaskSpec;
-    linearTicketId?: string;
-    callbackUrl: string;
-    /**
-     * Run this session as one task of a run, in its own git worktree, on its own
-     * branch. Set by the wave dispatcher for a task of an isolated plan, and by
-     * nothing else: a single dispatch from the fleet has no run to belong to.
-     *
-     * Only the `claude-session` adapter acts on it. The other modes do not
-     * isolate, and the dispatcher never sets it for them.
-     */
-    isolation?: TaskIsolation;
-    metadata?: Record<string, unknown>;
-}
-/** Which run a task belongs to, and which task of it this is. */
-interface TaskIsolation {
-    /** Groups the tasks of one run; the runner names the run branch after it. */
-    runId: string;
-    /** The task within the run, e.g. `2.1`; the runner names the task branch after it. */
-    taskCode: string;
-    /** One line describing the task, for the commit the runner makes. */
-    title?: string;
-}
-/** `POST /v1/integrate`: merge these tasks' branches into the run branch. */
-interface IntegrateRequest {
-    repo: string;
-    runId: string;
-    /** Merged in this order, each on its own. */
-    taskCodes: string[];
-}
-/** What the runner answers when a merge was carried out. */
-interface IntegrationResult {
-    runBranch: string;
-    /** The run branch's head after the tasks that could be merged were. */
-    headSha: string;
-    merged: {
-        taskCode: string;
-        branch: string;
-        commitSha: string;
-        alreadyMerged: boolean;
-    }[];
-    /** Tasks whose branch did not merge. The run branch does not contain them. */
-    conflicts: {
-        taskCode: string;
-        branch: string;
-        files: string[];
-    }[];
-    /** Tasks the runner has no branch for. */
-    missing: string[];
-}
-/**
- * The answer to an integrate call.
- *
- * `ok: false` is a failure of the merge itself — the run branch is checked out
- * somewhere, the runner is gone, git refused — as opposed to a task whose
- * branch conflicted, which is a successful answer with `conflicts` in it. The
- * difference matters to the caller: a conflict is one task's problem and that
- * task is retried, while this is nobody's task's fault and ends the run with
- * `message`, which is written for the person who has to act on it.
- */
-type IntegrateOutcome = {
-    ok: true;
-    result: IntegrationResult;
-} | {
-    ok: false;
-    code: string;
-    message: string;
-};
-/** Whether tasks dispatched now can be isolated, and if not, why not. */
-interface IsolationSupport {
-    supported: boolean;
-    /** Present when `supported` is false. Recorded on the plan and shown to a person. */
-    reason?: string;
-}
-interface TaskSpec {
-    prompt: string;
-    filePaths: string[];
-    model: 'haiku' | 'sonnet' | 'opus';
-    workstream?: string;
-    acceptanceCriteria?: string[];
-    constraints?: string[];
-    estimatedMinutes?: number;
-}
-/**
- * Status update received from orchestrator during execution
- */
-interface StatusUpdate {
-    sessionId: string;
-    status: 'queued' | 'running' | 'waiting' | 'complete' | 'error' | 'cancelled';
-    progressPercent: number;
-    currentStep?: string;
-    currentFile?: string;
-    message?: string;
-    filesModified?: string[];
-    tokensUsed?: number;
-    /**
-     * Live picture of what the agent is doing, when the runner can supply one.
-     *
-     * Optional because this contract predates it: a runner built before
-     * `stream-json` reports status without telemetry, and the cockpit must keep
-     * accepting those rather than treating a missing instrument as an error.
-     */
-    telemetry?: {
-        toolCalls?: number;
-        filesTouched?: string[];
-        filesRead?: string[];
-        commands?: string[];
-        lastText?: string;
-        lastAction?: {
-            tool: string;
-            path?: string;
-            atMs: number;
-        };
-        actions?: {
-            tool: string;
-            path?: string;
-            atMs: number;
-        }[];
-        costUsd?: number;
-        tokensIn?: number;
-        tokensOut?: number;
-        turns?: number;
-        elapsedMs?: number;
-        idleMs?: number;
-    };
-    timestamp: string;
-}
-/**
- * Completion report received when orchestrator finishes a task
- */
-interface CompletionReport {
-    sessionId: string;
-    success: boolean;
-    prUrl?: string;
-    /**
-     * For an isolated task, the head of its branch. Otherwise the checkout's
-     * HEAD when the session ended, which the session may or may not have moved.
-     */
-    commitSha?: string;
-    /** The task's branch. Present only when the task was isolated. */
-    branch?: string;
-    /** The commit the task's branch was cut from. Present only when isolated. */
-    baseSha?: string;
-    /**
-     * For an isolated task these three are git's diff from `baseSha` to
-     * `commitSha` and are exact. Otherwise the runner compares two `git status`
-     * readings of a checkout other agents may be writing to.
-     */
-    filesModified: string[];
-    filesCreated: string[];
-    filesDeleted: string[];
-    summary: string;
-    tokensUsed: number;
-    costUsd: number;
-    durationMinutes: number;
-    error?: {
-        code: string;
-        message: string;
-        recoverable: boolean;
-    };
-    metadata?: Record<string, unknown>;
-}
-/**
- * Response from orchestrator when dispatch is accepted
- */
-interface DispatchResponse {
-    accepted: boolean;
-    orchestratorJobId?: string;
-    estimatedStartTime?: string;
-    queuePosition?: number;
-    error?: string;
-}
-/**
- * Health check response from orchestrator
- */
-interface OrchestratorHealth {
-    status: 'healthy' | 'degraded' | 'down';
-    version: string;
-    activeJobs: number;
-    queueLength: number;
-    availableWorkers: number;
-}
+import { O as OrchestratorHealth, D as DispatchRequest, a as DispatchResponse, C as CompletionReport, I as IsolationSupport, b as IntegrateRequest, c as IntegrateOutcome, G as GraphDependentsRequest, d as GraphDependentsOutcome, e as GraphAffectedTestsRequest, f as GraphAffectedTestsOutcome, S as StatusUpdate, T as TaskIsolation } from './types-CbuwQ_x5.js';
 
 /**
  * Orchestrator Adapter Interface
@@ -317,6 +120,16 @@ interface IOrchestratorAdapter {
      */
     integrate?(request: IntegrateRequest): Promise<IntegrateOutcome>;
     /**
+     * What depends on these files, from the repository's code graph index.
+     *
+     * Optional, and absent means there is none to read: only `claude-session`
+     * implements it, because only a session runner has a checkout to read an
+     * index from. Must not reject; "no index" is `available: false`.
+     */
+    graphDependents?(request: GraphDependentsRequest): Promise<GraphDependentsOutcome>;
+    /** The test files reached from these files. Same terms as `graphDependents`. */
+    graphAffectedTests?(request: GraphAffectedTestsRequest): Promise<GraphAffectedTestsOutcome>;
+    /**
      * Stop polling/cleanup resources
      */
     shutdown?(): Promise<void>;
@@ -379,6 +192,12 @@ declare function isPushCapableAdapter(adapter: IOrchestratorAdapter): adapter is
 
 /** The `/v1/health` capability a runner reports when it can isolate a task. */
 declare const ISOLATION_CAPABILITY = "isolation";
+/**
+ * The `/v1/health` capability a runner reports when it can read a code graph
+ * index. It says the runner has the routes — not that any repository has an
+ * index, which is answered per call.
+ */
+declare const CODE_GRAPH_CAPABILITY = "code-graph";
 /**
  * Parameters for creating a session-native dispatch.
  */
@@ -449,7 +268,26 @@ interface SessionTransport {
      * an answer (`ok: false`), because the caller has to do something with it.
      */
     integrate?(request: IntegrateRequest): Promise<IntegrateOutcome>;
+    /**
+     * Optional. What depends on these files (`POST /v1/graph/dependents`).
+     * Never rejects: every way of not having an answer is `available: false`
+     * with the reason, because the caller's plan is produced regardless.
+     */
+    graphDependents?(request: GraphDependentsRequest): Promise<GraphDependentsOutcome>;
+    /** Optional. The tests reached from these files (`POST /v1/graph/affected-tests`). Never rejects. */
+    graphAffectedTests?(request: GraphAffectedTestsRequest): Promise<GraphAffectedTestsOutcome>;
 }
+/**
+ * How long a code graph read may take before this side goes without it.
+ *
+ * Deliberately short — a sixth of a create. The read behind the route is a
+ * local SQLite query (the reader itself took 50 ms for five files of this
+ * repository's index, measured in process; the route is the runner's and was
+ * not), so five seconds is not a budget for the work. It is how long a hung
+ * runner may hold up a plan, or a task about to be dispatched, for the sake of
+ * something neither of them needs.
+ */
+declare const GRAPH_TIMEOUT_MS = 5000;
 /**
  * Default transport speaking the §7.1 dispatcher API over HTTP. All routes are
  * versioned under `/v1`; auth is `Authorization: Bearer <sessionApiKey>`.
@@ -458,6 +296,8 @@ declare class HttpSessionTransport implements SessionTransport {
     private readonly baseUrl;
     private readonly apiKey?;
     private readonly timeoutMs;
+    /** How long a code graph read may take. A parameter so a test need not wait five seconds to see it expire. */
+    private readonly graphTimeoutMs;
     /**
      * The runner's capabilities, once it has told us.
      *
@@ -470,13 +310,47 @@ declare class HttpSessionTransport implements SessionTransport {
      * process that may no longer exist. A read that fails is never cached.
      */
     private knownCapabilities;
-    constructor(baseUrl: string, apiKey?: string | undefined, timeoutMs?: number);
+    constructor(baseUrl: string, apiKey?: string | undefined, timeoutMs?: number, 
+    /** How long a code graph read may take. A parameter so a test need not wait five seconds to see it expire. */
+    graphTimeoutMs?: number);
     /** Extract the runner's session id from a create/idempotent response body. */
     private static readExternalId;
     capabilities(): Promise<string[] | null>;
+    /**
+     * `capabilities`, with a say over how long `/v1/health` may take. The code
+     * graph reads pass their own, much shorter, limit: they are optional, and
+     * must not wait the thirty seconds a dispatch is allowed.
+     */
+    private readCapabilities;
     createSession(params: CreateSessionParams): Promise<CreateSessionResult>;
     private static readRefusal;
     integrate(request: IntegrateRequest): Promise<IntegrateOutcome>;
+    /**
+     * Ask the runner's code graph a question, or say why there is no answer.
+     *
+     * The same question is asked first as for isolation — does this runner say
+     * it can? — and for the same reason: a runner from before the capability
+     * answers an unknown route with a bare 404, which says nothing a person can
+     * act on, while "the runner predates the code graph" does.
+     *
+     * Unlike a refused create, none of the unhappy paths here is a failure of
+     * anything. They all come back as `available: false`, and nothing is retried.
+     * The capability cache is dropped on each of them all the same, including
+     * "not listed": the capability arrives with a runner upgrade, the cockpit
+     * outlives the runner it started beside, and asking `/v1/health` again is a
+     * cheap way not to go on quoting a runner that has been replaced. The cost
+     * is one extra local GET per question for as long as the runner is an older
+     * one — per plan, and per task dispatched.
+     */
+    private askGraph;
+    graphDependents(request: GraphDependentsRequest): Promise<GraphDependentsOutcome>;
+    graphAffectedTests(request: GraphAffectedTestsRequest): Promise<GraphAffectedTestsOutcome>;
+    /**
+     * `{ file: [file, …] }`, if that is what the value is. Shape-checked because
+     * it is acted on — these lists decide which tasks share a wave — and a list
+     * that is not a list of strings is dropped whole rather than half-read.
+     */
+    private static readFileLists;
     /** A merge result, if that is what the body is. Shape-checked: it is acted on. */
     private static readIntegration;
     sendMessage(externalSessionId: string, message: string): Promise<{
@@ -533,6 +407,14 @@ declare class ClaudeSessionAdapter implements IOrchestratorAdapter, IPushCapable
      */
     isolationSupport(): Promise<IsolationSupport>;
     integrate(request: IntegrateRequest): Promise<IntegrateOutcome>;
+    /**
+     * What depends on these files, from the runner's code graph index.
+     *
+     * A transport with no way to ask answers for itself here, in words, the same
+     * as `isolationSupport` does: a custom transport is not a runner that failed.
+     */
+    graphDependents(request: GraphDependentsRequest): Promise<GraphDependentsOutcome>;
+    graphAffectedTests(request: GraphAffectedTestsRequest): Promise<GraphAffectedTestsOutcome>;
     shutdown(): Promise<void>;
     /**
      * Feed a pushed status update (from the session's POST to
@@ -661,6 +543,20 @@ declare class OrchestratorService {
      */
     integrate(request: IntegrateRequest): Promise<IntegrateOutcome>;
     /**
+     * What depends on these files, read from the repository's code graph index
+     * by whatever runs the sessions.
+     *
+     * Never rejects, and `available: false` is not a failure — see
+     * `GraphDependentsOutcome`. `http`, `ao-cli` and `disabled` have no runner
+     * with a checkout to read, and are answered for here with the mode named, so
+     * a plan that says "made without the code graph" also says why.
+     */
+    graphDependents(request: GraphDependentsRequest): Promise<GraphDependentsOutcome>;
+    /** The test files reached from these files. Same terms as `graphDependents`. */
+    graphAffectedTests(request: GraphAffectedTestsRequest): Promise<GraphAffectedTestsOutcome>;
+    private noGraphInThisMode;
+    private graphFault;
+    /**
      * Ingest a pushed status update from a session callback
      * (`/api/orchestrator/status`). For push-based adapters this replaces the
      * poll loop: the payload is cached on the adapter and re-emitted as a
@@ -722,4 +618,4 @@ declare function isOrchestratorServiceInitialized(): boolean;
  */
 declare function getOrchestratorServiceOrNull(): OrchestratorService | null;
 
-export { type CompletionReport as C, type DispatchRequest as D, HttpSessionTransport as H, type IOrchestratorAdapter as I, type JobStatus as J, type OrchestratorConfig as O, type SendMessageResult as S, type TaskIsolation as T, type OrchestratorHealth as a, type DispatchResponse as b, type OrchestratorMode as c, type OrchestratorAdapterConfig as d, OrchestratorService as e, ClaudeSessionAdapter as f, type CreateSessionParams as g, type CreateSessionResult as h, type IPushCapableAdapter as i, ISOLATION_CAPABILITY as j, type IntegrateOutcome as k, type IntegrateRequest as l, type IntegrationResult as m, type IsolationSupport as n, type OrchestratorEvent as o, type OrchestratorEventCallback as p, type OrchestratorEventType as q, type SessionTransport as r, type StatusUpdate as s, type TaskSpec as t, createClaudeSessionAdapter as u, getOrchestratorService as v, getOrchestratorServiceOrNull as w, initOrchestratorService as x, isOrchestratorServiceInitialized as y, isPushCapableAdapter as z };
+export { CODE_GRAPH_CAPABILITY as C, GRAPH_TIMEOUT_MS as G, HttpSessionTransport as H, type IOrchestratorAdapter as I, type JobStatus as J, type OrchestratorMode as O, type SendMessageResult as S, type OrchestratorAdapterConfig as a, OrchestratorService as b, ClaudeSessionAdapter as c, type CreateSessionParams as d, type CreateSessionResult as e, type IPushCapableAdapter as f, ISOLATION_CAPABILITY as g, type OrchestratorEvent as h, type OrchestratorEventCallback as i, type OrchestratorEventType as j, type SessionTransport as k, createClaudeSessionAdapter as l, getOrchestratorService as m, getOrchestratorServiceOrNull as n, initOrchestratorService as o, isOrchestratorServiceInitialized as p, isPushCapableAdapter as q };

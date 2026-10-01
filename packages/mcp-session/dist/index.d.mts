@@ -9,7 +9,7 @@ interface Clipboard {
 }
 
 declare const SERVER_NAME = "devpilot-session";
-declare const SERVER_VERSION = "0.3.0";
+declare const SERVER_VERSION = "0.4.0";
 /** Everything the tools reach outside this process for. Injected in tests. */
 interface ToolDeps {
     env: NodeJS.ProcessEnv;
@@ -103,8 +103,67 @@ declare function createTools(overrides?: Partial<ToolDeps>): {
             text: string;
         }[];
     }>;
+    /**
+     * What earlier tasks did to these files — from the local cockpit.
+     *
+     * This is the one thing an agent cannot work out from the repository: that
+     * the last task to change a file had to be redone because it collided with
+     * another, or failed, or what its agent said it did. A code graph has none
+     * of it; the cockpit's own database has all of it.
+     *
+     * LOCAL. It asks the cockpit running on this machine and nothing else —
+     * no bridge, no hosted plane, no credentials. Where no cockpit answers, it
+     * says so rather than failing the agent's turn.
+     *
+     * WHAT COMES BACK IS UNTRUSTED TEXT. Summaries and errors were written by
+     * earlier agents about this code. They are presented inside a labelled
+     * block and described as notes, never as instructions.
+     */
+    history(input: {
+        paths: string[];
+        repo?: string;
+        limit?: number;
+    }): Promise<{
+        content: {
+            type: "text";
+            text: string;
+        }[];
+    }>;
 };
+/** One entry of `/api/history`, as the cockpit returns it. */
+interface HistoryEntry {
+    taskCode: string;
+    task: string;
+    item: string;
+    ticketId: string | null;
+    status: string;
+    at: string;
+    matchedOn: 'changed' | 'planned';
+    retried: boolean;
+    attempts: number;
+    error: string | null;
+    conflicted: boolean;
+    summary: string | null;
+    summaryTruncated?: boolean;
+    costUsd: number | null;
+}
+/**
+ * Work history for a model to read: facts first (which task, how it ended,
+ * whether it collided), then what its agent said — inside a block that says
+ * what it is.
+ */
+declare function renderHistory(paths: string[], byPath: Record<string, HistoryEntry[]>, totals: Record<string, number>): string;
+/**
+ * Which groups of tools this process offers: `DEVPILOT_MCP_TOOLS=session`,
+ * `history`, or both (the default, and what anything unrecognised means).
+ *
+ * Every tool a server registers is a schema in the agent's context on every
+ * turn, whether or not the agent may call it. A worker given work history but
+ * dispatched into no shared session should not carry six session tools it will
+ * be refused, so the runner names the group it wants.
+ */
+declare function toolGroups(env: NodeJS.ProcessEnv): Set<'session' | 'history'>;
 declare function createServer(overrides?: Partial<ToolDeps>): McpServer;
 declare function main(): Promise<void>;
 
-export { SERVER_NAME, SERVER_VERSION, type ToolDeps, createServer, createTools, main, renderTranscript };
+export { SERVER_NAME, SERVER_VERSION, type ToolDeps, createServer, createTools, main, renderHistory, renderTranscript, toolGroups };
