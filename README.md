@@ -181,6 +181,23 @@ horizon items into Linear tickets via the hosted bridge in
 **[docs/LINEAR-BRIDGE.md](docs/LINEAR-BRIDGE.md)**. Copy `.env.example` to `.env` for API
 keys.
 
+`devpilot bridge connect` is the process that connects a machine to the hosted bridge and
+reports the Claude Code sessions running on it. It runs in the foreground; to keep it
+running without a terminal:
+
+```bash
+devpilot bridge start --token <token>   # in the background, until the machine restarts
+devpilot bridge install                 # as a login service (launchd / systemd): survives a restart
+devpilot bridge status                  # is one running, and how; exit code 0 if so
+devpilot bridge logs -f
+devpilot bridge stop                    # or: devpilot bridge uninstall
+```
+
+`start` and `install` take the same options as `connect`. The token is saved to
+`~/.devpilot/bridge.json` and is not put on the bridge's command line or in the service
+file. Details, and how to upgrade the CLI under a running bridge, in
+**[docs/BRIDGE.md](docs/BRIDGE.md)**.
+
 </details>
 
 <br>
@@ -361,6 +378,7 @@ to contribute something that matters.
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Current state and prioritized next work |
 | [docs/AO-INTEGRATION.md](docs/AO-INTEGRATION.md) | Wiring an agent orchestrator |
 | [docs/LINEAR-BRIDGE.md](docs/LINEAR-BRIDGE.md) | Linear sync via the hosted bridge |
+| [docs/BRIDGE.md](docs/BRIDGE.md) | Keeping the bridge running: foreground, background, login service; state, logs, upgrading |
 | [docs/ADOPTION.md](docs/ADOPTION.md) | Introspecting agent sessions DevPilot didn't start, and putting them on the board |
 | [spec/DESIGN.md](spec/DESIGN.md) | The full TRD — mental model, data model, every surface |
 | [spec/WAVE-PLANNER.md](spec/WAVE-PLANNER.md) | Wave planning algorithm and phases |
