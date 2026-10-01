@@ -138,6 +138,34 @@ export interface MirroredTelemetry {
   harness?: string;
   elapsedMs?: number;
   idleMs?: number;
+  /** Human prompts in the session. A count. */
+  prompts?: number;
+  /**
+   * From Claude Code's status line input, recorded on the machine by
+   * `devpilot statusline`. Absent where that is not installed.
+   *
+   * `windowUsed*` is the ACCOUNT's subscription window at the session's last
+   * reading, not a property of the session. `windowDelta*` is an estimate: the
+   * points the window moved while this machine was taking readings, shared
+   * among the sessions it metered in proportion to their API-rate cost.
+   */
+  windowUsed5h?: number;
+  windowUsed7d?: number;
+  /** ISO-8601: when each window resets. */
+  windowResets5h?: string;
+  windowResets7d?: string;
+  windowDelta5h?: number;
+  windowDelta7d?: number;
+  /** Prompt-cache misses in the main conversation, as diagnosed by the client. */
+  cacheMisses?: number;
+  /** Cause name → count, from the client's own closed list. */
+  cacheMissCauses?: Record<string, number>;
+  /** Input tokens re-written to the cache because of those misses. */
+  cacheRecacheTokens?: number;
+  /** What re-writing them cost over reading them, at API list rates. */
+  cacheMissCostUsd?: number;
+  /** Highest context-window percentage seen. */
+  contextPeakPct?: number;
 }
 
 export class BridgeClient {

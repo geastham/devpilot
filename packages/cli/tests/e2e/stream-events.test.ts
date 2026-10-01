@@ -369,3 +369,52 @@ describe('file paths are relative to the repo', () => {
     expect(c.snapshot().filesTouched).toEqual(['/abs/path/file.ts']);
   });
 });
+
+/**
+ * A dispatched agent has no status line, but it spends the same subscription
+ * windows. The stream reports them; the shape below is from a real run.
+ */
+describe('the account’s windows, from the stream', () => {
+  const rateLimit = (five: number, seven: number) =>
+    JSON.stringify({
+      type: 'rate_limit_event',
+      session_id: 'ec88c0dc-cf72-4fb4-89d5-11d8d257d4a9',
+      rate_limit_info: {
+        status: 'allowed',
+        rateLimitType: 'five_hour',
+        unifiedWindows: {
+          five_hour: { utilization: five, resetsAt: 1790851200 },
+          seven_day: { utilization: seven, resetsAt: 1791219600 },
+        },
+      },
+    });
+
+  it('has nothing to report before the stream has said anything', () => {
+    expect(new TelemetryCollector().windowReading()).toBeNull();
+  });
+
+  it('reports them as percentages, with the session and what it has cost so far', () => {
+    const c = new TelemetryCollector(() => 1_000);
+    c.ingestLine(rateLimit(0.15, 0.41));
+    expect(c.windowReading()).toEqual({
+      t: 1_000,
+      s: 'ec88c0dc-cf72-4fb4-89d5-11d8d257d4a9',
+      c: 0,
+      five: { used: 15, resetsAt: 1790851200 },
+      seven: { used: 41, resetsAt: 1791219600 },
+    });
+  });
+
+  it('keeps the last reading of a window the next event leaves out', () => {
+    const c = new TelemetryCollector(() => 1_000);
+    c.ingestLine(rateLimit(0.15, 0.41));
+    c.ingestLine(
+      JSON.stringify({
+        type: 'rate_limit_event',
+        session_id: 'ec88c0dc-cf72-4fb4-89d5-11d8d257d4a9',
+        rate_limit_info: { unifiedWindows: { seven_day: { utilization: 0.42, resetsAt: 1791219600 } } },
+      })
+    );
+    expect(c.windowReading()).toMatchObject({ five: { used: 15 }, seven: { used: 42 } });
+  });
+});

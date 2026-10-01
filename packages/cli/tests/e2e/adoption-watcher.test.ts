@@ -468,6 +468,7 @@ describe('AdoptionWatcher telemetry', () => {
     expect(telemetry[0]).toMatchObject({ toolCalls: 1, tokensOut: 200 });
   });
 
+  // `prompts` is a count of how many times a person prompted the session.
   it('carries no field that could hold content', async () => {
     const { watcher } = setup(reply('msg_1', [edit('a.ts')]));
     await watcher.sweep();
@@ -480,6 +481,7 @@ describe('AdoptionWatcher telemetry', () => {
       'elapsedMs',
       'filesTouched',
       'idleMs',
+      'prompts',
       'tokensCacheRead',
       'tokensCacheWrite',
       'tokensIn',

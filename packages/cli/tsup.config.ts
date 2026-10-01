@@ -1,7 +1,9 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/index.ts', 'src/cli.ts'],
+  // `statusline-fast` is its own entry on purpose: it must not pull in the
+  // rest of the CLI. See src/statusline-fast.ts.
+  entry: ['src/index.ts', 'src/cli.ts', 'src/statusline-fast.ts'],
   format: ['cjs', 'esm'],
   dts: true,
   splitting: false,

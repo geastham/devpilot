@@ -83,6 +83,13 @@ export interface TailState {
    * recent tail of — a long session would lose its early edits from the count.
    */
   writeCalls?: number;
+  /**
+   * How many times a person prompted the session. A count: nothing of what
+   * they said is read. It is the denominator of "responses per prompt" — how
+   * much the agent does, on its own initiative, per thing asked — which is the
+   * term a harness or a plan is supposed to move.
+   */
+  prompts?: number;
 }
 
 export function initialTailState(): TailState {
@@ -95,7 +102,35 @@ export function initialTailState(): TailState {
     usage: initialUsageMeter(),
     written: [],
     writeCalls: 0,
+    prompts: 0,
   };
+}
+
+/**
+ * Is this transcript line a person's prompt?
+ *
+ * `user` lines are also how tool results, command echoes and client reminders
+ * are fed back into a conversation, so most of them are not. `origin.kind` is
+ * the client's own answer; transcripts from before that field are judged by
+ * shape, the same way the adoption scanner does it. Only the first characters
+ * of the text are looked at, to tell a prompt from a wrapper — nothing is kept.
+ */
+function isHumanPrompt(o: TranscriptLine): boolean {
+  if (o.type !== 'user' || o.isMeta || o.isSidechain) return false;
+  if (o.origin?.kind && o.origin.kind !== 'human') return false;
+
+  const content = o.message?.content as unknown;
+  let head = '';
+  if (typeof content === 'string') head = content;
+  else if (Array.isArray(content)) {
+    for (const block of content as { type?: string; text?: unknown }[]) {
+      if (block?.type === 'tool_result') return false;
+      if (block?.type === 'text' && typeof block.text === 'string' && !head) head = block.text;
+    }
+  }
+  head = head.trimStart();
+  if (!head) return false;
+  return !/^<(command-name|local-command-stdout|local-command-caveat|system-reminder|task-notification)>/.test(head);
 }
 
 /** Recover a path from a Bash command without keeping the command. */
@@ -108,6 +143,11 @@ function pathFromCommand(command: unknown): string | null {
 interface TranscriptLine {
   type?: string;
   timestamp?: string;
+  /** Client-injected lines (reminders, command output), not a person's. */
+  isMeta?: boolean;
+  /** A subagent's conversation, written into the same file. */
+  isSidechain?: boolean;
+  origin?: { kind?: string };
   message?: {
     id?: string;
     model?: string;
@@ -172,6 +212,7 @@ function backfill(fd: number, state: TailState, cwd?: string | null): void {
   state.usage = initialUsageMeter();
   state.written = [];
   state.writeCalls = 0;
+  state.prompts = 0;
   if (state.byteOffset === 0) return;
 
   const buf = Buffer.alloc(state.byteOffset);
@@ -182,7 +223,9 @@ function backfill(fd: number, state: TailState, cwd?: string | null): void {
 
   for (const line of lines) {
     const o = parse(line);
-    if (!o || o.type !== 'assistant') continue;
+    if (!o) continue;
+    if (isHumanPrompt(o)) state.prompts = (state.prompts ?? 0) + 1;
+    if (o.type !== 'assistant') continue;
     countUsage(state.usage, o.message?.id, o.message?.usage, o.message?.model);
     for (const block of o.message?.content ?? []) {
       if (block.type !== 'tool_use' || !block.name) continue;
@@ -214,8 +257,11 @@ export function tailTranscript(
       state.usage = initialUsageMeter();
       state.written = [];
       state.writeCalls = 0;
+      state.prompts = 0;
     }
-    if (state.usage === undefined) backfill(fd, state, cwd);
+    // A ledger from before prompts were counted has usage but no prompt count;
+    // it is read once more for the same reason one with no usage is.
+    if (state.usage === undefined || state.prompts === undefined) backfill(fd, state, cwd);
     if (size === state.byteOffset) {
       return []; // the finally below owns the close
     }
@@ -236,7 +282,9 @@ export function tailTranscript(
   const events: DerivedEvent[] = [];
   for (const line of lines) {
     const o = parse(line);
-    if (!o || o.type !== 'assistant') continue;
+    if (!o) continue;
+    if (isHumanPrompt(o)) state.prompts = (state.prompts ?? 0) + 1;
+    if (o.type !== 'assistant') continue;
 
     // Before the timestamp check: usage is real whether or not the line can be
     // placed on a timeline.

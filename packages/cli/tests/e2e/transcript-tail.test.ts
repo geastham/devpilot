@@ -308,3 +308,54 @@ describe('written files', () => {
     expect(state.written).toEqual([]);
   });
 });
+
+/**
+ * "Responses per prompt" needs a count of prompts. `user` lines are also how
+ * tool results, command echoes and client reminders are fed back in, so most
+ * of them are not a person asking for something.
+ */
+describe('counting what a person asked', () => {
+  const user = (content: unknown, extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ type: 'user', message: { role: 'user', content }, ...extra }) + '\n';
+
+  it('counts prompts a person typed, in either shape the client writes them', () => {
+    const p = fresh(
+      user('add a retry to fetchWithRetry') +
+        line(0, [tool('Read', { file_path: `${CWD}/src/a.ts` })]) +
+        user([{ type: 'text', text: 'now add a test for it' }]) +
+        line(5, [tool('Edit', { file_path: `${CWD}/src/a.ts` })])
+    );
+    const state = initialTailState();
+    tailTranscript(p, state, CWD);
+    expect(state.prompts).toBe(2);
+  });
+
+  it('does not count tool results, command output, reminders, or a subagent’s turns', () => {
+    const p = fresh(
+      user('do the thing') +
+        user([{ type: 'tool_result', tool_use_id: 'x', content: 'file contents' }]) +
+        user('<local-command-stdout>ok</local-command-stdout>') +
+        user('<command-name>/compact</command-name>') +
+        user('<system-reminder>be careful</system-reminder>') +
+        user('injected by the client', { isMeta: true }) +
+        user('a subagent was asked this', { isSidechain: true }) +
+        user('a hook wrote this', { origin: { kind: 'hook' } }) +
+        user('   ')
+    );
+    const state = initialTailState();
+    tailTranscript(p, state, CWD);
+    expect(state.prompts).toBe(1);
+  });
+
+  it('keeps counting across reads, and keeps nothing of what was said', () => {
+    const p = fresh(user('first: the launch codes are 0000'));
+    const state = initialTailState();
+    tailTranscript(p, state, CWD);
+    appendFileSync(p, user('second'));
+    const events = tailTranscript(p, state, CWD);
+
+    expect(state.prompts).toBe(2);
+    expect(events).toEqual([]);
+    expect(JSON.stringify(state)).not.toContain('launch codes');
+  });
+});

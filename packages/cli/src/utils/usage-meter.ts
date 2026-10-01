@@ -237,6 +237,22 @@ export function priceMeter(state: UsageMeterState): number {
 }
 
 /**
+ * What a prompt-cache miss cost: the tokens that had to be written to the
+ * cache again, at the write rate, less what reading them would have cost.
+ *
+ * `tokens` is the client's own count of input re-written because of misses
+ * (`prompt_cache.miss_recache_tokens`), so this is a measurement of what
+ * happened and not an inference from gaps in a transcript. The write rate
+ * depends on the cache lifetime the session is using.
+ */
+export function cacheMissCost(tokens: number, model: string | null | undefined, ttl?: string | null): number {
+  if (!(tokens > 0)) return 0;
+  const p = priceFor(model);
+  const write = ttl === '1h' ? p.input * 2 : p.cacheWrite;
+  return (tokens * Math.max(0, write - p.cacheRead)) / 1_000_000;
+}
+
+/**
  * What the same tokens would have cost on the most expensive model.
  *
  * This is the baseline the Conductor Score's cost dimension is measured

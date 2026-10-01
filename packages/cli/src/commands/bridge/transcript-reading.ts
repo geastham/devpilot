@@ -1,6 +1,8 @@
 import type { BridgeClient } from '@devpilot.sh/bridge-client';
 import { tailTranscript, initialTailState, type TailState } from './transcript-tail.js';
-import { dominantModel, priceMeter, totalTokens } from '../../utils/usage-meter.js';
+import { basename } from 'path';
+import { cacheMissCost, dominantModel, priceMeter, totalTokens } from '../../utils/usage-meter.js';
+import { loadSessionStatus, statuslineDir, windowFieldsFor } from '../../utils/statusline-store.js';
 
 /**
  * One instrument reading from one transcript, sent up.
@@ -40,6 +42,31 @@ export interface ReadingTarget {
   readingOwed?: boolean;
 }
 
+/**
+ * What `devpilot statusline` recorded for the session this transcript belongs
+ * to, if it recorded anything.
+ *
+ * A transcript's file name is its Claude Code session id — the same id the
+ * status line is given — so the two are joined on it with no lookup. On a
+ * machine where the status line is not installed there is no record, this
+ * returns nothing, and the reading goes up exactly as it did before.
+ */
+function statusLineFields(transcriptPath: string, model: string | null, now: number, dir?: string) {
+  const sessionId = basename(transcriptPath, '.jsonl');
+  const store = dir ?? statuslineDir();
+  const fields = windowFieldsFor(store, sessionId, now);
+  if (fields.cacheRecacheTokens !== undefined) {
+    const status = loadSessionStatus(store, sessionId);
+    return {
+      ...fields,
+      cacheMissCostUsd: Number(
+        cacheMissCost(fields.cacheRecacheTokens, status?.model ?? model, status?.cacheTtl).toFixed(4)
+      ),
+    };
+  }
+  return fields;
+}
+
 type ReadingClient = Pick<BridgeClient, 'streamEvents' | 'reportTelemetry'>;
 
 /** An older installed bridge-client simply has no streaming. */
@@ -63,7 +90,7 @@ export type ReadingOutcome = 'sent' | 'nothing' | 'failed';
 export async function sendTranscriptReading(
   client: ReadingClient,
   target: ReadingTarget,
-  at: { now: number; mtimeMs: number },
+  at: { now: number; mtimeMs: number; /** Where status line records live; for tests. */ statuslineDir?: string },
   onLog?: (line: string) => void,
 ): Promise<ReadingOutcome> {
   const before = target.tail ? structuredClone(target.tail) : undefined;
@@ -139,6 +166,15 @@ export async function sendTranscriptReading(
     // mtimeMs is fractional on macOS; the schema's int() refuses a float and
     // the client swallows the 400 — a silently empty table.
     idleMs: Math.round(Math.max(0, at.now - at.mtimeMs)),
+    prompts: target.tail.prompts ?? 0,
+    // Subscription windows, cache misses and context peak, when the status
+    // line recorded them. Percentages, counts and cause names only.
+    ...statusLineFields(
+      target.transcriptPath,
+      target.tail.usage ? dominantModel(target.tail.usage) : null,
+      at.now,
+      at.statuslineDir
+    ),
   });
   target.readingOwed = !landed;
   if (!landed) {

@@ -3,6 +3,7 @@ import { promisify } from 'util';
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, mkdirSync } from 'fs';
 import { tmpdir, homedir } from 'os';
 import { join } from 'path';
+import { recordWindowReading, statuslineDir } from '../../utils/statusline-store.js';
 import { TelemetryCollector, type SessionTelemetry } from './stream-events';
 import type { Harness } from './harness';
 
@@ -279,6 +280,8 @@ export interface RunClaudeOptions {
    * `baseline`, which adds nothing to the invocation.
    */
   harness?: Harness;
+  /** Where window readings are logged. Defaults to `~/.devpilot/statusline`; set in tests. */
+  statuslineDir?: string;
   /**
    * Called as the agent works, with the running picture of what it is doing.
    *
@@ -379,6 +382,22 @@ export async function runClaudeSession(
     let timedOut = false;
     let killed = false;
 
+    /**
+     * Write the account's window readings into the same log the status line
+     * keeps, so this agent's share of the window is attributed to it and not
+     * to whatever else was running. Only when something moved: the stream
+     * reports on every response and most reports change nothing.
+     */
+    let loggedWindow = '';
+    const logWindow = () => {
+      const reading = collector.windowReading();
+      if (!reading) return;
+      const key = JSON.stringify([reading.five, reading.seven, reading.c]);
+      if (key === loggedWindow) return;
+      loggedWindow = key;
+      recordWindowReading(reading, options.statuslineDir ?? statuslineDir());
+    };
+
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill('SIGTERM');
@@ -407,6 +426,7 @@ export async function runClaudeSession(
       for (const line of lines) collector.ingestLine(line);
       if (lines.length > 0) {
         options.onTelemetry?.({ ...collector.snapshot(), harness: harness?.stamp });
+        logWindow();
       }
     });
     child.stderr.on('data', (chunk: Buffer) => {
