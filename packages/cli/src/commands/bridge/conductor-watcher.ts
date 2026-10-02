@@ -720,6 +720,11 @@ export class ConductorWatcher {
      */
     const summary = success ? successSummary(state) : failureSummary(state);
 
+    // The plan's figures, while the session is still open on the hosted plane.
+    // Idempotent there (one row per session), and never allowed to cost the
+    // run its completion report.
+    await this.mirrorPlannerFigures(run);
+
     // Remove BEFORE reporting: if the report throws, the run is not re-reported
     // on the next sweep. Linear comments are not idempotent, and a flapping
     // cockpit would otherwise post the same comment repeatedly.
@@ -735,6 +740,37 @@ export class ConductorWatcher {
     });
 
     this.log(`${run.linearIdentifier}: reported ${success ? 'complete' : 'failed'} to the bridge`);
+  }
+
+  /**
+   * Send the finished plan's figures to the hosted plane.
+   *
+   * The cockpit works them out (`GET /api/planner/figures`) and this passes
+   * them on unchanged: how many planner calls the plan took and their tokens,
+   * what a reviewer did, and how the plan ran. Numbers, flags and three
+   * identifiers. No text and no path — the type they are built from has no
+   * field for either, and the hosted route refuses any key it does not know.
+   *
+   * Off with `DEVPILOT_PLANNER_FIGURES=0`. Silent on every failure: an older
+   * cockpit has no such route, an older hosted plane has no such endpoint, and
+   * neither is a reason to say anything about a run that finished.
+   */
+  private async mirrorPlannerFigures(run: { sessionId: string; itemId: string; linearIdentifier: string }): Promise<void> {
+    if (!plannerFiguresEnabled()) return;
+    try {
+      const res = await this.doFetch(
+        `${this.base}/api/planner/figures?itemId=${encodeURIComponent(run.itemId)}`
+      );
+      if (!res.ok) return;
+      const body = (await res.json()) as { figures?: Record<string, number | boolean | string | null> | null };
+      if (!body.figures || typeof body.figures !== 'object') return;
+
+      if (await this.opts.client.mirrorPlannerFigures(run.sessionId, body.figures)) {
+        this.log(`${run.linearIdentifier}: plan figures sent to the hosted cockpit`);
+      }
+    } catch {
+      // Never in the way of the completion report that follows.
+    }
   }
 
   /**
@@ -780,4 +816,10 @@ export function programOf(command: string | undefined): string {
   // A path to a binary is shown by its name; the directory is the machine's.
   const name = program.split('/').pop() ?? program;
   return /^[\w.@+-]{1,40}$/.test(name) ? name : 'shell';
+}
+
+/** False when `DEVPILOT_PLANNER_FIGURES` says no. On by default. */
+export function plannerFiguresEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = (env.DEVPILOT_PLANNER_FIGURES ?? '').trim().toLowerCase();
+  return !['0', 'false', 'off', 'no'].includes(value);
 }

@@ -123,6 +123,10 @@ export interface PlanOutcome {
     retried: number;
     /** Ended on a branch that would not merge into the run branch. */
     conflicted: number;
+    /** Dispatched and ended, one way or another — what the first-attempt rate is out of. */
+    settled: number;
+    /** Of those, completed without a retry. */
+    firstAttempt: number;
   };
   /**
    * Of the tasks that were dispatched and have ended, the share that completed
@@ -246,6 +250,8 @@ export function planOutcome(plan: EpisodePlan): PlanOutcome {
       skipped: tasks.filter((t) => t.status === 'skipped').length,
       retried: tasks.filter((t) => t.attempts > 1).length,
       conflicted: conflicted.length,
+      settled: settled.length,
+      firstAttempt: firstTime.length,
     },
     firstAttemptPassRate: settled.length > 0 ? firstTime.length / settled.length : null,
     files:
@@ -458,5 +464,159 @@ export function summarizeCorpus(episodes: readonly PlannerEpisode[]): CorpusSumm
     filePrecision: planned > 0 ? both / planned : null,
     fileRecall: changed > 0 ? both / changed : null,
     sameWaveCollisions: collisions,
+  };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Figures: what may leave the machine
+// ───────────────────────────────────────────────────────────────────────────
+
+export const PLANNER_FIGURES_VERSION = 1;
+
+/**
+ * One plan as numbers: how it was made, what a reviewer did, how it ran.
+ *
+ * This is the part of an episode the hosted plane is sent. It is defined as
+ * its own type, field by field, rather than as "an episode with the text
+ * removed", so that what crosses is a list someone can read — and so that a
+ * field added to an episode later does not cross by default.
+ *
+ * WHAT IS NOT HERE, and has no field to be in: the prompt, the response, the
+ * specification, a task's description, a file path, a reviewer's words, an
+ * error message, an agent's summary. Every field is a count, a ratio's two
+ * halves, a duration, a cost, a flag, or one of three identifiers DevPilot or
+ * the model provider chose (template name, template version, model id).
+ *
+ * Rates are sent as their two counts, not as the quotient: figures from many
+ * plans are pooled by adding counts, and a mean of rates would let a plan of
+ * two tasks weigh the same as a plan of thirty.
+ */
+export interface PlannerFigures {
+  v: typeof PLANNER_FIGURES_VERSION;
+
+  // How the plan was made.
+  calls: number;
+  callsValid: number;
+  callsRejected: number;
+  callsFailed: number;
+  /** Calls cut off at the token ceiling. */
+  callsTruncated: number;
+  refinements: number;
+  /** Refinements that scored above the plan they were given. */
+  refinementsImproved: number;
+  tokensInput: number;
+  tokensOutput: number;
+  /** Time spent in planner calls, added up. Null when no call recorded one. */
+  planningMs: number | null;
+  /** The model that wrote the plan that was persisted. Null when no recorded call did. */
+  model: string | null;
+  template: string | null;
+  templateVersion: string | null;
+
+  // What a reviewer did.
+  reviewsApproved: number;
+  reviewsSentBack: number;
+  reviewsAbandoned: number;
+
+  // The plan.
+  tasks: number;
+  waves: number;
+  criticalPathLength: number;
+  parallelization: number;
+  codeGraphUsed: boolean | null;
+  /** Tasks the assigner moved, by reason. Null when the plan predates their being recorded. */
+  movedForSharedFile: number | null;
+  movedForDependency: number | null;
+  movedForCapacity: number | null;
+
+  // How it ran.
+  ended: PlanOutcome['ended'];
+  tasksDispatched: number;
+  tasksCompleted: number;
+  tasksFailed: number;
+  tasksSkipped: number;
+  tasksRetried: number;
+  tasksConflicted: number;
+  tasksSettled: number;
+  tasksFirstAttempt: number;
+  /** Planned-versus-changed files, over the tasks that recorded their changes. Counts only. */
+  filesTasksMeasured: number;
+  filesPlanned: number;
+  filesChanged: number;
+  filesBoth: number;
+  sameWaveCollisions: number;
+  wallClockMs: number | null;
+  costUsd: number | null;
+  tokens: number | null;
+}
+
+/** An identifier safe to send: short, and only the characters ids are made of. */
+function identifier(value: string | null | undefined, max: number): string | null {
+  if (!value) return null;
+  return /^[A-Za-z0-9._:@\/-]+$/.test(value) && value.length <= max ? value : null;
+}
+
+/**
+ * The figures for one episode, or null when it has no plan.
+ *
+ * Built by reading named fields, never by copying an object — the reason a
+ * string from an episode cannot arrive in the result by accident.
+ */
+export function planFigures(episode: PlannerEpisode): PlannerFigures | null {
+  const { plan, outcome, calls, reviews } = episode;
+  if (!plan || !outcome) return null;
+
+  const writer = calls.find((c) => c.chosen) ?? null;
+  const durations = calls.map((c) => c.durationMs).filter((n): n is number => n !== null);
+  const reviewCount = (action: string) => reviews.filter((r) => r.action === action).length;
+  const moved = (type: string) => (plan.adjustments ? (plan.adjustments[type] ?? 0) : null);
+
+  return {
+    v: PLANNER_FIGURES_VERSION,
+
+    calls: calls.length,
+    callsValid: calls.filter((c) => c.outcome === 'valid').length,
+    callsRejected: calls.filter((c) => c.outcome === 'invalid').length,
+    callsFailed: calls.filter((c) => c.outcome === 'error').length,
+    callsTruncated: calls.filter((c) => c.stopReason === 'max_tokens').length,
+    refinements: calls.filter((c) => c.kind === 'refine').length,
+    refinementsImproved: calls.filter((c) => c.kind === 'refine' && c.improved === true).length,
+    tokensInput: calls.reduce((sum, c) => sum + (c.tokensInput ?? 0), 0),
+    tokensOutput: calls.reduce((sum, c) => sum + (c.tokensOutput ?? 0), 0),
+    planningMs: durations.length > 0 ? durations.reduce((a, b) => a + b, 0) : null,
+    model: identifier(writer?.model, 80),
+    template: identifier(writer?.template, 40),
+    templateVersion: identifier(writer?.templateVersion, 20),
+
+    reviewsApproved: reviewCount('approve'),
+    reviewsSentBack: reviewCount('refine'),
+    reviewsAbandoned: reviewCount('abort'),
+
+    tasks: plan.tasks.length,
+    waves: plan.totalWaves,
+    criticalPathLength: plan.criticalPathLength,
+    parallelization: plan.parallelizationScore,
+    codeGraphUsed: plan.codeGraphUsed,
+    movedForSharedFile: moved('FILE_CONFLICT_BUMP'),
+    movedForDependency: moved('DEPENDENCY_CONFLICT_BUMP'),
+    movedForCapacity: moved('CAPACITY_SPLIT'),
+
+    ended: outcome.ended,
+    tasksDispatched: outcome.tasks.dispatched,
+    tasksCompleted: outcome.tasks.completed,
+    tasksFailed: outcome.tasks.failed,
+    tasksSkipped: outcome.tasks.skipped,
+    tasksRetried: outcome.tasks.retried,
+    tasksConflicted: outcome.tasks.conflicted,
+    tasksSettled: outcome.tasks.settled,
+    tasksFirstAttempt: outcome.tasks.firstAttempt,
+    filesTasksMeasured: outcome.files?.tasksMeasured ?? 0,
+    filesPlanned: outcome.files?.planned ?? 0,
+    filesChanged: outcome.files?.changed ?? 0,
+    filesBoth: outcome.files?.both ?? 0,
+    sameWaveCollisions: outcome.sameWaveCollisions,
+    wallClockMs: outcome.wallClockMs,
+    costUsd: outcome.costUsd,
+    tokens: outcome.tokens,
   };
 }

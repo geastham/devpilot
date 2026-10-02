@@ -440,7 +440,7 @@ code was right. The labels worth adding, in order of value:
 | Tier | What | Where | Default |
 |---|---|---|---|
 | 0 | Full episodes | the user's own machine | **on** (built) |
-| 1 | Shape and figures only — what `--no-text` leaves | hosted | a decision |
+| 1 | Figures only — counts, durations, cost, three identifiers | hosted | **on** (built; decided 2 October 2026) |
 | 2 | Full episodes, for that workspace's planner only | hosted, per workspace | **opt-in**; the enterprise product |
 | 3 | Contributed to a shared DevPilot corpus | hosted | **opt-in**, separate, revocable |
 
@@ -520,11 +520,19 @@ anyone's data but the customer's.
 
 ## 10. Open, and not verified
 
-**Decisions that are Garrett's:**
+**Decided, 2 October 2026:**
 
-- Whether shape-only planner figures (tier 1) go to the hosted plane, and what
-  the public statement then says.
-- Whether to open the Anthropic conversation in §9.1 now.
+- Tier 1 is on. A run's plan figures go to the hosted plane when it ends
+  (`PlannerFigures`; the website's `docs/PLANNER-FIGURES.md`), and the public
+  statement lists them. Off with `DEVPILOT_PLANNER_FIGURES=0`. Narrower than
+  "an episode with the text removed": the figures are their own type, built
+  field by field, so a field added to an episode later does not cross by
+  default.
+- The §9.1 conversation is not being opened. For now the record is collected
+  and used as it is.
+
+**Still open:**
+
 - A budget for replay evaluation (§7.6) — it is the gate for every prompt
   change.
 

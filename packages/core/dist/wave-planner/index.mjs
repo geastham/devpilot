@@ -4773,7 +4773,9 @@ function planOutcome(plan) {
       failed: failed.length,
       skipped: tasks2.filter((t) => t.status === "skipped").length,
       retried: tasks2.filter((t) => t.attempts > 1).length,
-      conflicted: conflicted.length
+      conflicted: conflicted.length,
+      settled: settled.length,
+      firstAttempt: firstTime.length
     },
     firstAttemptPassRate: settled.length > 0 ? firstTime.length / settled.length : null,
     files: tasksMeasured > 0 ? {
@@ -4911,6 +4913,63 @@ function summarizeCorpus(episodes) {
     filePrecision: planned > 0 ? both / planned : null,
     fileRecall: changed > 0 ? both / changed : null,
     sameWaveCollisions: collisions
+  };
+}
+var PLANNER_FIGURES_VERSION = 1;
+function identifier(value, max) {
+  if (!value) return null;
+  return /^[A-Za-z0-9._:@\/-]+$/.test(value) && value.length <= max ? value : null;
+}
+function planFigures(episode) {
+  const { plan, outcome, calls, reviews } = episode;
+  if (!plan || !outcome) return null;
+  const writer = calls.find((c) => c.chosen) ?? null;
+  const durations = calls.map((c) => c.durationMs).filter((n) => n !== null);
+  const reviewCount = (action) => reviews.filter((r) => r.action === action).length;
+  const moved = (type) => plan.adjustments ? plan.adjustments[type] ?? 0 : null;
+  return {
+    v: PLANNER_FIGURES_VERSION,
+    calls: calls.length,
+    callsValid: calls.filter((c) => c.outcome === "valid").length,
+    callsRejected: calls.filter((c) => c.outcome === "invalid").length,
+    callsFailed: calls.filter((c) => c.outcome === "error").length,
+    callsTruncated: calls.filter((c) => c.stopReason === "max_tokens").length,
+    refinements: calls.filter((c) => c.kind === "refine").length,
+    refinementsImproved: calls.filter((c) => c.kind === "refine" && c.improved === true).length,
+    tokensInput: calls.reduce((sum, c) => sum + (c.tokensInput ?? 0), 0),
+    tokensOutput: calls.reduce((sum, c) => sum + (c.tokensOutput ?? 0), 0),
+    planningMs: durations.length > 0 ? durations.reduce((a, b) => a + b, 0) : null,
+    model: identifier(writer?.model, 80),
+    template: identifier(writer?.template, 40),
+    templateVersion: identifier(writer?.templateVersion, 20),
+    reviewsApproved: reviewCount("approve"),
+    reviewsSentBack: reviewCount("refine"),
+    reviewsAbandoned: reviewCount("abort"),
+    tasks: plan.tasks.length,
+    waves: plan.totalWaves,
+    criticalPathLength: plan.criticalPathLength,
+    parallelization: plan.parallelizationScore,
+    codeGraphUsed: plan.codeGraphUsed,
+    movedForSharedFile: moved("FILE_CONFLICT_BUMP"),
+    movedForDependency: moved("DEPENDENCY_CONFLICT_BUMP"),
+    movedForCapacity: moved("CAPACITY_SPLIT"),
+    ended: outcome.ended,
+    tasksDispatched: outcome.tasks.dispatched,
+    tasksCompleted: outcome.tasks.completed,
+    tasksFailed: outcome.tasks.failed,
+    tasksSkipped: outcome.tasks.skipped,
+    tasksRetried: outcome.tasks.retried,
+    tasksConflicted: outcome.tasks.conflicted,
+    tasksSettled: outcome.tasks.settled,
+    tasksFirstAttempt: outcome.tasks.firstAttempt,
+    filesTasksMeasured: outcome.files?.tasksMeasured ?? 0,
+    filesPlanned: outcome.files?.planned ?? 0,
+    filesChanged: outcome.files?.changed ?? 0,
+    filesBoth: outcome.files?.both ?? 0,
+    sameWaveCollisions: outcome.sameWaveCollisions,
+    wallClockMs: outcome.wallClockMs,
+    costUsd: outcome.costUsd,
+    tokens: outcome.tokens
   };
 }
 
@@ -7655,6 +7714,7 @@ export {
   MAX_ITEM_DESCRIPTION_CHARS,
   MIN_TASKS_FOR_PARALLELIZATION_GATE,
   PLANNER_EPISODE_SCHEMA,
+  PLANNER_FIGURES_VERSION,
   PlanRefinementService,
   PlannerTruncatedError,
   PromptConstructor,
@@ -7711,6 +7771,7 @@ export {
   parseDependencies,
   parseFilePaths,
   parseWavePlanResponse,
+  planFigures,
   planOutcome,
   planSha,
   plannerTraceEnabled,

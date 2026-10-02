@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   PLANNER_EPISODE_SCHEMA,
   buildEpisodes,
+  planFigures,
   planOutcome,
   redactEpisode,
   summarizeCorpus,
@@ -316,5 +317,135 @@ describe('a corpus at a glance', () => {
 
   it('says nothing was measured rather than reporting zero', () => {
     expect(summarizeCorpus([])).toMatchObject({ episodes: 0, firstAttemptPassRate: null, filePrecision: null, fileRecall: null });
+  });
+});
+
+/**
+ * The figures are what is sent to the hosted plane. The test that matters is
+ * that nothing a person or a model wrote can be in them.
+ */
+describe('one plan as figures', () => {
+  const MARKER = 'ZZ_TEXT_THAT_MUST_NOT_CROSS';
+  const [episode] = buildEpisodes({
+    plans: [
+      {
+        ...plan(
+          [
+            task('1.1', { description: MARKER, summary: MARKER, filePaths: [`src/${MARKER}.ts`], filesChanged: [`src/${MARKER}.ts`, 'src/other.ts'] }),
+            task('1.2', { status: 'failed', attempts: 2, error: `merge conflict with the run branch in: ${MARKER}`, filesChanged: [`lib/${MARKER}.ts`] }),
+          ],
+          { failureReason: MARKER, status: 'failed', adjustments: { FILE_CONFLICT_BUMP: 2, CAPACITY_SPLIT: 1 }, codeGraphUsed: true }
+        ),
+        itemId: MARKER,
+        repo: `acme/${MARKER}`,
+      },
+    ],
+    calls: [
+      { ...call({ chosen: false, prompt: MARKER, response: MARKER, errors: [MARKER], warnings: [MARKER], constraints: [MARKER], durationMs: 20_000 }), itemId: MARKER, repo: MARKER, wavePlanId: 'wp_1' },
+      { ...call({ step: 1, kind: 'refine', improved: true, chosen: true, prompt: MARKER, response: MARKER, at: '2026-10-01T09:59:30.000Z', durationMs: 10_000 }), itemId: MARKER, repo: MARKER, wavePlanId: 'wp_1' },
+      { ...call({ step: 2, kind: 'refine', outcome: 'error', stopReason: 'max_tokens', improved: null, chosen: false, at: '2026-10-01T09:59:40.000Z' }), itemId: MARKER, repo: MARKER, wavePlanId: 'wp_1' },
+    ],
+    reviews: [
+      { at: '2026-10-01T09:59:45.000Z', action: 'refine', constraints: [MARKER], reason: MARKER, score: 0.5, itemId: MARKER, wavePlanId: 'wp_1' },
+      { at: '2026-10-01T09:59:50.000Z', action: 'approve', constraints: [], reason: null, score: 0.5, itemId: MARKER, wavePlanId: 'wp_1' },
+    ],
+  });
+  const figures = planFigures(episode)!;
+
+  it('holds nothing anyone wrote', () => {
+    expect(JSON.stringify(figures)).not.toContain(MARKER);
+    // Every value is a number, a boolean, null, or a short identifier.
+    for (const [key, value] of Object.entries(figures)) {
+      const ok =
+        value === null ||
+        typeof value === 'number' ||
+        typeof value === 'boolean' ||
+        (typeof value === 'string' && ['ended', 'model', 'template', 'templateVersion'].includes(key));
+      expect(ok, `${key} is ${typeof value}`).toBe(true);
+    }
+  });
+
+  /**
+   * THE CONTRACT with the hosted plane. Its request schema is strict — a key
+   * it does not list is refused — and its tests hold this same list
+   * (devpilot-website, tests/unit/planner-figures.test.ts). Changing what is
+   * sent means changing the list in both places, on purpose.
+   */
+  it('has exactly the keys the hosted plane accepts', () => {
+    expect(Object.keys(figures).sort()).toEqual(
+      [
+        'v',
+        'calls', 'callsValid', 'callsRejected', 'callsFailed', 'callsTruncated',
+        'refinements', 'refinementsImproved', 'tokensInput', 'tokensOutput', 'planningMs',
+        'model', 'template', 'templateVersion',
+        'reviewsApproved', 'reviewsSentBack', 'reviewsAbandoned',
+        'tasks', 'waves', 'criticalPathLength', 'parallelization', 'codeGraphUsed',
+        'movedForSharedFile', 'movedForDependency', 'movedForCapacity',
+        'ended',
+        'tasksDispatched', 'tasksCompleted', 'tasksFailed', 'tasksSkipped', 'tasksRetried', 'tasksConflicted',
+        'tasksSettled', 'tasksFirstAttempt',
+        'filesTasksMeasured', 'filesPlanned', 'filesChanged', 'filesBoth',
+        'sameWaveCollisions', 'wallClockMs', 'costUsd', 'tokens',
+      ].sort()
+    );
+  });
+
+  it('counts the calls, the reviews and the run', () => {
+    expect(figures).toMatchObject({
+      v: 1,
+      calls: 3,
+      callsValid: 2,
+      callsFailed: 1,
+      callsTruncated: 1,
+      refinements: 2,
+      refinementsImproved: 1,
+      tokensInput: 3600,
+      planningMs: 50_000,
+      model: 'claude-opus-5-20260101',
+      template: 'default',
+      templateVersion: '1.0.0',
+      reviewsApproved: 1,
+      reviewsSentBack: 1,
+      reviewsAbandoned: 0,
+      tasks: 2,
+      codeGraphUsed: true,
+      movedForSharedFile: 2,
+      movedForDependency: 0,
+      movedForCapacity: 1,
+      ended: 'failed',
+      tasksCompleted: 1,
+      tasksFailed: 1,
+      tasksRetried: 1,
+      tasksConflicted: 1,
+      tasksSettled: 2,
+      tasksFirstAttempt: 1,
+      filesTasksMeasured: 2,
+      filesPlanned: 2,
+      filesChanged: 3,
+      filesBoth: 1,
+    });
+  });
+
+  it('drops an identifier that is not shaped like one', () => {
+    const [odd] = buildEpisodes({
+      plans: [{ ...plan([task('1.1')]), itemId: 'i', repo: 'r' }],
+      calls: [{ ...call({ model: 'a model with spaces and words', template: 'x'.repeat(41) }), itemId: 'i', repo: 'r', wavePlanId: 'wp_1' }],
+      reviews: [],
+    });
+    expect(planFigures(odd)).toMatchObject({ model: null, template: null, templateVersion: '1.0.0' });
+  });
+
+  it('says a plan made before calls were recorded has no calls, and still reports the run', () => {
+    const [old] = buildEpisodes({ plans: [{ ...plan([task('1.1')]), itemId: 'i', repo: 'r' }], calls: [], reviews: [] });
+    expect(planFigures(old)).toMatchObject({ calls: 0, model: null, planningMs: null, tasksCompleted: 1, tasksFirstAttempt: 1 });
+  });
+
+  it('is nothing at all for a run that produced no plan', () => {
+    const [abandoned] = buildEpisodes({
+      plans: [],
+      calls: [{ ...call({ outcome: 'error', chosen: false }), itemId: 'i', repo: 'r', wavePlanId: null }],
+      reviews: [],
+    });
+    expect(planFigures(abandoned)).toBeNull();
   });
 });

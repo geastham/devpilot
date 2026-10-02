@@ -28,6 +28,7 @@ import {
   wavePlans,
   waveTasks,
   desc,
+  eq,
   gte,
   inArray,
 } from '@/lib/db';
@@ -55,20 +56,30 @@ function chunked<T>(values: T[]): T[][] {
  * its outcome is real, and outcomes are what a planner is calibrated against.
  */
 export async function loadPlannerEpisodes(
-  since: Date
+  filter: Date | { itemId: string }
 ): Promise<{ episodes: PlannerEpisode[]; truncated: boolean }> {
+  // Either everything since a date, or everything for one item.
+  const forItem = filter instanceof Date ? null : filter.itemId;
+  const since = filter instanceof Date ? filter : null;
+
   const planRows = await db
     .select()
     .from(wavePlans)
-    .where(gte(wavePlans.createdAt, since))
+    .where(forItem ? eq(wavePlans.horizonItemId, forItem) : gte(wavePlans.createdAt, since!))
     .orderBy(desc(wavePlans.createdAt))
     .limit(EPISODE_PLAN_LIMIT + 1);
   const truncated = planRows.length > EPISODE_PLAN_LIMIT;
   const keptPlans = planRows.slice(0, EPISODE_PLAN_LIMIT);
 
   const [callRows, reviewRows] = await Promise.all([
-    db.select().from(plannerTraces).where(gte(plannerTraces.createdAt, since)),
-    db.select().from(plannerReviews).where(gte(plannerReviews.createdAt, since)),
+    db
+      .select()
+      .from(plannerTraces)
+      .where(forItem ? eq(plannerTraces.itemId, forItem) : gte(plannerTraces.createdAt, since!)),
+    db
+      .select()
+      .from(plannerReviews)
+      .where(forItem ? eq(plannerReviews.itemId, forItem) : gte(plannerReviews.createdAt, since!)),
   ]);
 
   const tasks: (typeof waveTasks.$inferSelect)[] = [];

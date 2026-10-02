@@ -6,8 +6,14 @@ model, what came back, what a reviewer decided, and how the plan then ran.
 It exists so the planner can be judged by its results. Before it, the only
 thing kept of a planning call was the plan that won.
 
-**It stays on your machine.** The record is in the cockpit's own database
-(`.devpilot/data.db`). Nothing sends it to the hosted plane or anywhere else.
+**The record stays on your machine.** It is in the cockpit's own database
+(`.devpilot/data.db`). The prompts, the plans, what a reviewer wrote, what
+agents said — none of it is sent anywhere.
+
+**One thing derived from it is sent**, if this machine is connected to the
+hosted plane: when a run ends, a row of *figures* about its plan — counts,
+durations, cost. No text and no path. See [What goes to the hosted
+plane](#what-goes-to-the-hosted-plane).
 
 ---
 
@@ -80,6 +86,40 @@ The file is created readable only by you.
   path, and keeps shape and figures. Paths are replaced by placeholders, not
   hashes: a hash of a path is the path to anyone who can guess it.
 
+## What goes to the hosted plane
+
+When a run that came through the bridge ends, the bridge asks the cockpit for
+the plan's figures and passes them on. You can see exactly what would be sent:
+
+```
+curl 'http://127.0.0.1:3847/api/planner/figures?itemId=<item id>'
+```
+
+They are: how many planner calls the plan took (valid, rejected, failed, cut
+off) and their tokens; refinements and how many scored higher; how many times
+a reviewer approved it, sent it back or abandoned it; the plan's task and wave
+counts; how it ended; tasks completed, failed, retried, unmergeable, and how
+many finished first time; how many files the plan named, how many its tasks
+changed, and how many were both; same-wave collisions; wall clock, cost and
+tokens; and three identifiers — the model that wrote the plan, and the prompt
+template's name and version.
+
+They are not, and cannot be: the prompt, the planner's answer, the
+specification, a task's description, a file path, a reviewer's words, an error
+message or an agent's summary. `PlannerFigures` in
+`packages/core/src/wave-planner/planner-corpus.ts` is built field by field from
+counts and has no field for any of those; the hosted route refuses a body with
+any key it does not know, and its table has no column for text.
+
+To send nothing:
+
+```
+DEVPILOT_PLANNER_FIGURES=0
+```
+
+set where the bridge runs. This is separate from `DEVPILOT_PLANNER_TRACE`:
+that one stops the local record being written at all.
+
 ## The route
 
 `GET /api/planner/episodes?days=90&text=full|none` on the local cockpit returns
@@ -93,7 +133,8 @@ are included; `truncated` says when there were more.
 | `WAVE_PLANNER_MODEL` | `claude-opus-5` | the planning model |
 | `WAVE_PLANNER_MAX_TOKENS` | `16000` | output ceiling; it covers the model's thinking as well as the plan |
 | `WAVE_PLANNER_MIN_PARALLELIZATION` | `0.3` | a plan of four or more tasks scoring below this is sent back for refinement |
-| `DEVPILOT_PLANNER_TRACE` | on | `0` records nothing |
+| `DEVPILOT_PLANNER_TRACE` | on | `0` records nothing locally |
+| `DEVPILOT_PLANNER_FIGURES` | on | `0` sends no plan figures to the hosted plane (read by the bridge) |
 | `DEVPILOT_PLANNER_DUMP_DIR` | unset | also write each raw response to a file here |
 
 The design behind this, and what is planned next, is
