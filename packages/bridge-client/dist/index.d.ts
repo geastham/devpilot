@@ -17,6 +17,15 @@ declare class BridgeError extends Error {
  * Talks to *a* bridge, not *the* bridge: point `bridgeUrl` at devpilot.sh or at
  * any service implementing @devpilot.sh/bridge-protocol.
  */
+/**
+ * One plan as numbers: how it was made, what a reviewer did, how it ran.
+ *
+ * The cockpit builds it (`PlannerFigures` in @devpilot.sh/core) and the hosted
+ * route checks it key by key. Typed here only as what it is allowed to hold —
+ * numbers, flags, null, and three short identifiers (model, template, template
+ * version) — because this package does not depend on core.
+ */
+type MirroredPlannerFigures = Record<string, number | boolean | string | null>;
 /** What the hosted cockpit needs to render a plan. Structure, never source. */
 interface MirroredPlan {
     cockpitItemId?: string;
@@ -248,6 +257,19 @@ declare class BridgeClient {
      * Callers get a boolean and decide whether to mention it.
      */
     mirrorSessionPlan(sessionId: string, plan: MirroredPlan): Promise<boolean>;
+    /**
+     * Send a finished plan's figures to the hosted cockpit.
+     *
+     * Counts, durations, cost and flags — how many planner calls the plan took,
+     * what a reviewer did, how many tasks finished first time, how many of the
+     * files the plan named were the files its tasks changed. No prompt, no plan
+     * text, no path, no reviewer's words: the hosted route refuses a body with
+     * any key it does not know, and its table has no column for one.
+     *
+     * Best-effort, like the plan mirror: a figure that fails to upload must not
+     * cost a run its completion report.
+     */
+    mirrorPlannerFigures(sessionId: string, figures: MirroredPlannerFigures): Promise<boolean>;
     /**
      * Pending commands for this machine's sessions.
      *
@@ -641,4 +663,4 @@ declare class PubSubSubscriber {
     constructor();
 }
 
-export { BridgeClient, type BridgeClientConfig, type BridgeCredentials, BridgeError, DEFAULT_BRIDGE_URL, type DispatchHandler, DispatchLoop, type DispatchLoopConfig, type EntryStatus, type GraphCounts, type GraphManifest, type GraphManifestResult, type GraphSyncBatch, type HeartbeatConfig, HeartbeatService, type MirroredPlan, type MirroredTelemetry, PubSubSubscriber, RealtimeSubscriber, type RealtimeSubscriberConfig, type SessionCommandMessage, SharedSessionClient, type SharedSessionCreateOptions, type SharedSessionJoinOptions, type TranscriptEntry, bridgeCredentialsPath, clearBridgeCredentials, loadBridgeCredentials, resolveBridgeCredentials, saveBridgeCredentials };
+export { BridgeClient, type BridgeClientConfig, type BridgeCredentials, BridgeError, DEFAULT_BRIDGE_URL, type DispatchHandler, DispatchLoop, type DispatchLoopConfig, type EntryStatus, type GraphCounts, type GraphManifest, type GraphManifestResult, type GraphSyncBatch, type HeartbeatConfig, HeartbeatService, type MirroredPlan, type MirroredPlannerFigures, type MirroredTelemetry, PubSubSubscriber, RealtimeSubscriber, type RealtimeSubscriberConfig, type SessionCommandMessage, SharedSessionClient, type SharedSessionCreateOptions, type SharedSessionJoinOptions, type TranscriptEntry, bridgeCredentialsPath, clearBridgeCredentials, loadBridgeCredentials, resolveBridgeCredentials, saveBridgeCredentials };

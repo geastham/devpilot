@@ -153,6 +153,29 @@ var BridgeClient = class {
     }
   }
   /**
+   * Send a finished plan's figures to the hosted cockpit.
+   *
+   * Counts, durations, cost and flags — how many planner calls the plan took,
+   * what a reviewer did, how many tasks finished first time, how many of the
+   * files the plan named were the files its tasks changed. No prompt, no plan
+   * text, no path, no reviewer's words: the hosted route refuses a body with
+   * any key it does not know, and its table has no column for one.
+   *
+   * Best-effort, like the plan mirror: a figure that fails to upload must not
+   * cost a run its completion report.
+   */
+  async mirrorPlannerFigures(sessionId, figures) {
+    try {
+      await this.request(`/api/sessions/${sessionId}/planner`, {
+        method: "POST",
+        body: JSON.stringify(figures)
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  /**
    * Pending commands for this machine's sessions.
    *
    * The counterpart to everything else here: the hosted plane finally has a way

@@ -44,6 +44,16 @@ export class BridgeError extends Error {
  * Talks to *a* bridge, not *the* bridge: point `bridgeUrl` at devpilot.sh or at
  * any service implementing @devpilot.sh/bridge-protocol.
  */
+/**
+ * One plan as numbers: how it was made, what a reviewer did, how it ran.
+ *
+ * The cockpit builds it (`PlannerFigures` in @devpilot.sh/core) and the hosted
+ * route checks it key by key. Typed here only as what it is allowed to hold —
+ * numbers, flags, null, and three short identifiers (model, template, template
+ * version) — because this package does not depend on core.
+ */
+export type MirroredPlannerFigures = Record<string, number | boolean | string | null>;
+
 /** What the hosted cockpit needs to render a plan. Structure, never source. */
 export interface MirroredPlan {
   cockpitItemId?: string;
@@ -349,6 +359,30 @@ export class BridgeClient {
       await this.request(`/api/sessions/${sessionId}/plan`, {
         method: 'POST',
         body: JSON.stringify(plan),
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Send a finished plan's figures to the hosted cockpit.
+   *
+   * Counts, durations, cost and flags — how many planner calls the plan took,
+   * what a reviewer did, how many tasks finished first time, how many of the
+   * files the plan named were the files its tasks changed. No prompt, no plan
+   * text, no path, no reviewer's words: the hosted route refuses a body with
+   * any key it does not know, and its table has no column for one.
+   *
+   * Best-effort, like the plan mirror: a figure that fails to upload must not
+   * cost a run its completion report.
+   */
+  async mirrorPlannerFigures(sessionId: string, figures: MirroredPlannerFigures): Promise<boolean> {
+    try {
+      await this.request(`/api/sessions/${sessionId}/planner`, {
+        method: 'POST',
+        body: JSON.stringify(figures),
       });
       return true;
     } catch {

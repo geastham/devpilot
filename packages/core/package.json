@@ -1,6 +1,6 @@
 {
   "name": "@devpilot.sh/core",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Core library for DevPilot - database schemas, integrations, and utilities",
   "license": "MIT",
   "author": "DevPilot Team",

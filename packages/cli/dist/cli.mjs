@@ -338,7 +338,7 @@ import { Command as Command23 } from "commander";
 import updateNotifier from "update-notifier";
 
 // src/version.ts
-var VERSION = "0.8.1";
+var VERSION = "0.9.0";
 
 // src/commands/init.ts
 import { Command } from "commander";
@@ -2674,6 +2674,7 @@ var ConductorWatcher = class {
     const waves = state.completedWaves?.length ?? 0;
     const tasks = state.review?.plan?.waves?.reduce((n2, w) => n2 + (w.tasks?.length ?? 0), 0) ?? 0;
     const summary = success ? successSummary(state) : failureSummary(state);
+    await this.mirrorPlannerFigures(run);
     this.runs.delete(run.sessionId);
     this.reported.delete(run.sessionId);
     this.mirroredPlans.delete(run.sessionId);
@@ -2684,6 +2685,34 @@ var ConductorWatcher = class {
       ...success ? {} : { errorMessage: summary }
     });
     this.log(`${run.linearIdentifier}: reported ${success ? "complete" : "failed"} to the bridge`);
+  }
+  /**
+   * Send the finished plan's figures to the hosted plane.
+   *
+   * The cockpit works them out (`GET /api/planner/figures`) and this passes
+   * them on unchanged: how many planner calls the plan took and their tokens,
+   * what a reviewer did, and how the plan ran. Numbers, flags and three
+   * identifiers. No text and no path — the type they are built from has no
+   * field for either, and the hosted route refuses any key it does not know.
+   *
+   * Off with `DEVPILOT_PLANNER_FIGURES=0`. Silent on every failure: an older
+   * cockpit has no such route, an older hosted plane has no such endpoint, and
+   * neither is a reason to say anything about a run that finished.
+   */
+  async mirrorPlannerFigures(run) {
+    if (!plannerFiguresEnabled()) return;
+    try {
+      const res = await this.doFetch(
+        `${this.base}/api/planner/figures?itemId=${encodeURIComponent(run.itemId)}`
+      );
+      if (!res.ok) return;
+      const body = await res.json();
+      if (!body.figures || typeof body.figures !== "object") return;
+      if (await this.opts.client.mirrorPlannerFigures(run.sessionId, body.figures)) {
+        this.log(`${run.linearIdentifier}: plan figures sent to the hosted cockpit`);
+      }
+    } catch {
+    }
   }
   /**
    * The cockpit item a session's run belongs to, if this bridge is tracking it.
@@ -2707,6 +2736,10 @@ function programOf(command) {
   if (!program) return "shell";
   const name = program.split("/").pop() ?? program;
   return /^[\w.@+-]{1,40}$/.test(name) ? name : "shell";
+}
+function plannerFiguresEnabled(env = process.env) {
+  const value = (env.DEVPILOT_PLANNER_FIGURES ?? "").trim().toLowerCase();
+  return !["0", "false", "off", "no"].includes(value);
 }
 
 // src/commands/bridge/command-applier.ts
