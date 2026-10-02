@@ -30,7 +30,13 @@ export interface RefinementPromptTemplate extends PromptTemplate {
    * @param context - Base prompt context
    * @param currentPlan - The existing plan to improve (markdown format)
    * @param currentScore - Quality score of the current plan (0-1)
+   * @param targetScore - The threshold the plan is being held to (0-1), when the caller knows it
    * @returns Formatted refinement prompt
    */
-  renderRefinement(context: PromptContext, currentPlan: string, currentScore: number): string;
+  renderRefinement(
+    context: PromptContext,
+    currentPlan: string,
+    currentScore: number,
+    targetScore?: number
+  ): string;
 }

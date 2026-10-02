@@ -305,6 +305,60 @@ CREATE TABLE IF NOT EXISTS wave_plan_metrics (
   recorded_at INTEGER NOT NULL
 );
 
+-- Planner traces: one row per call to the planning model. Local only.
+CREATE TABLE IF NOT EXISTS planner_traces (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  step INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  wave_plan_id TEXT,
+  chosen INTEGER NOT NULL DEFAULT 0,
+  template TEXT NOT NULL,
+  template_version TEXT NOT NULL,
+  model_requested TEXT NOT NULL,
+  model TEXT,
+  prompt TEXT NOT NULL,
+  prompt_sha TEXT NOT NULL,
+  response TEXT,
+  response_sha TEXT,
+  based_on_sha TEXT,
+  stop_reason TEXT,
+  tokens_input INTEGER,
+  tokens_output INTEGER,
+  cache_read_tokens INTEGER,
+  cache_write_tokens INTEGER,
+  duration_ms INTEGER,
+  outcome TEXT NOT NULL,
+  errors TEXT,
+  warnings TEXT,
+  task_count INTEGER,
+  score REAL,
+  score_detail TEXT,
+  previous_score REAL,
+  improved INTEGER,
+  constraints TEXT,
+  created_at INTEGER NOT NULL
+);
+
+-- What a person decided about a plan they were shown.
+CREATE TABLE IF NOT EXISTS planner_reviews (
+  id TEXT PRIMARY KEY,
+  item_id TEXT NOT NULL,
+  plan_sha TEXT,
+  wave_plan_id TEXT,
+  action TEXT NOT NULL,
+  constraints TEXT,
+  reason TEXT,
+  score REAL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_planner_traces_item ON planner_traces(item_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_planner_traces_plan ON planner_traces(wave_plan_id);
+CREATE INDEX IF NOT EXISTS idx_planner_reviews_item ON planner_reviews(item_id, created_at);
+
 -- Create indexes
 CREATE INDEX IF NOT EXISTS idx_horizon_items_zone ON horizon_items(zone);
 CREATE INDEX IF NOT EXISTS idx_horizon_items_repo ON horizon_items(repo);

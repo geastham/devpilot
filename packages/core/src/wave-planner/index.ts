@@ -47,6 +47,10 @@ export * from './plan-refinement-service';
 // Wave plan generation
 export * from './generator';
 
+// The planner's record of itself, and the join to how each plan turned out
+export * from './trace';
+export * from './planner-corpus';
+
 // Plan projection (deterministic wave-plan → plans/workstreams/tasks projection)
 export * from './plan-projection';
 

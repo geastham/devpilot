@@ -141,6 +141,13 @@ var import_langgraph2 = require("@langchain/langgraph");
 function waveCount(state) {
   return state.totalWaves ?? state.plan?.waves.length ?? 0;
 }
+function taskCount(state) {
+  return state.plan?.waves.reduce((n, wave) => n + wave.tasks.length, 0) ?? 0;
+}
+function belowThreshold(state, config) {
+  if (taskCount(state) < config.minTasksForRefinement) return false;
+  return (state.score?.parallelizationScore ?? 0) < config.minParallelizationScore;
+}
 function usableWaveCount(value) {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
 }
@@ -197,7 +204,7 @@ function makeNodes(ports, config) {
       plan: state.plan,
       score: state.score,
       refinementIterations: state.refinementIterations,
-      belowThreshold: (state.score?.parallelizationScore ?? 0) < config.minParallelizationScore
+      belowThreshold: belowThreshold(state, config)
     };
     const decision = (0, import_langgraph2.interrupt)(request);
     if (decision.action === "abort") {
@@ -302,6 +309,7 @@ function makeNodes(ports, config) {
 // src/types.ts
 var DEFAULT_CONFIG = {
   minParallelizationScore: 0.7,
+  minTasksForRefinement: 4,
   maxRefinementIterations: 3,
   requireReview: true,
   failurePolicy: "halt",
@@ -316,9 +324,8 @@ function createConductorGraph(options) {
     return state.plan && state.wavePlanId ? "dispatch" : "generate";
   }
   function afterPlanning(state) {
-    const score = state.score?.parallelizationScore ?? 0;
     const canRefine = state.refinementIterations < config.maxRefinementIterations;
-    if (score < config.minParallelizationScore && canRefine) return "refine";
+    if (belowThreshold(state, config) && canRefine) return "refine";
     return config.requireReview ? "review" : "persist";
   }
   function afterReview(state) {

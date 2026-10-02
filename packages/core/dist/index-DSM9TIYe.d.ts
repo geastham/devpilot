@@ -1,9 +1,9 @@
 import { z } from 'zod';
 import { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
-import { C as Complexity, D as DependencyEdgeType, E as EventType, F as FileStatus, M as Model, O as OrchestratorMode, S as SessionStatus, b as WavePlanStatus, c as WaveStatus, d as WaveTaskStatus, W as WikiArticleStatus, e as WikiLogAction, a as WikiSourceType, Z as Zone, f as complexityValues, g as dependencyEdgeTypeValues, h as eventTypeValues, i as fileStatusValues, m as modelValues, o as orchestratorModeValues, s as sessionStatusValues, w as wavePlanStatusValues, j as waveStatusValues, k as waveTaskStatusValues, l as wikiArticleStatusValues, n as wikiLogActionValues, p as wikiSourceTypeValues, z as zoneValues } from './enums-CbVZMWqb.mjs';
+import { C as Complexity, D as DependencyEdgeType, E as EventType, F as FileStatus, M as Model, O as OrchestratorMode, S as SessionStatus, b as WavePlanStatus, c as WaveStatus, d as WaveTaskStatus, W as WikiArticleStatus, e as WikiLogAction, a as WikiSourceType, Z as Zone, f as complexityValues, g as dependencyEdgeTypeValues, h as eventTypeValues, i as fileStatusValues, m as modelValues, o as orchestratorModeValues, s as sessionStatusValues, w as wavePlanStatusValues, j as waveStatusValues, k as waveTaskStatusValues, l as wikiArticleStatusValues, n as wikiLogActionValues, p as wikiSourceTypeValues, z as zoneValues } from './enums-CbVZMWqb.js';
 import * as drizzle_orm from 'drizzle-orm';
 import * as drizzle_orm_sqlite_core from 'drizzle-orm/sqlite-core';
-import { G as GraphDependentsRequest, d as GraphDependentsOutcome } from './types-CbuwQ_x5.mjs';
+import { G as GraphDependentsRequest, d as GraphDependentsOutcome } from './types-CbuwQ_x5.js';
 
 declare const databaseConfigSchema: z.ZodObject<{
     type: z.ZodDefault<z.ZodEnum<["sqlite", "postgres"]>>;
@@ -1961,16 +1961,30 @@ interface RemainingWorkBlock {
         description: string;
         originalDependencies: string[];
         originalFiles: string[];
+        /**
+         * Present for a task that was attempted and did not finish: what its last
+         * attempt reported. Written by a runner or an agent about the user's code,
+         * so a template that prints it must present it as a report, not as an
+         * instruction.
+         */
+        lastError?: string;
     }[];
 }
 interface GenerationResult {
     content: string;
     tokensInput: number;
+    /**
+     * Everything billed as output — which includes the model's thinking as well
+     * as the plan text in `content`. On the planner's default model thinking is
+     * on unless switched off, so this is routinely larger than the plan.
+     */
     tokensOutput: number;
     cacheReadTokens: number;
     cacheWriteTokens: number;
     durationMs: number;
     model: string;
+    /** Why the model stopped: `end_turn`, or something a caller should know about. */
+    stopReason: string | null;
 }
 interface WaveDispatchRequest {
     wavePlanId: string;
@@ -3371,6 +3385,553 @@ declare const wavePlanMetrics: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
 declare const wavePlanMetricsRelations: drizzle_orm.Relations<"wave_plan_metrics", {
     wavePlan: drizzle_orm.One<"wave_plans", true>;
 }>;
+/**
+ * One call to the planning model: what it was asked, what it answered, and
+ * what was made of the answer.
+ *
+ * `wave_plans` keeps the plan that was chosen and nothing about how it came to
+ * be. The prompt that produced it, the plans that were tried and discarded on
+ * the way, the model, what it cost, why a response was rejected — all of it
+ * was computed, used once and dropped. That is the record a planner is
+ * improved from: a plan cannot be compared with its outcome if nobody kept
+ * what the planner had been told.
+ *
+ * One row per call, written whether the call produced a valid plan, an invalid
+ * one, or failed outright. The row is joined to what happened next through
+ * `wavePlanId`, which is set when a plan is persisted for the item — and from
+ * there to `wave_tasks`, where each task's ending already is.
+ *
+ * LOCAL. The prompt holds the specification, the repository's file tree and
+ * whatever memory was recalled; the response is the plan. These are the
+ * user's, about the user's code, and nothing sends this table anywhere. It is
+ * off when `DEVPILOT_PLANNER_TRACE=0`.
+ */
+declare const plannerTraces: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+    name: "planner_traces";
+    schema: undefined;
+    columns: {
+        id: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "id";
+            tableName: "planner_traces";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: true;
+            hasDefault: true;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        runId: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "run_id";
+            tableName: "planner_traces";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: true;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        step: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "step";
+            tableName: "planner_traces";
+            dataType: "number";
+            columnType: "SQLiteInteger";
+            data: number;
+            driverParam: number;
+            notNull: true;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        kind: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "kind";
+            tableName: "planner_traces";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: true;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        itemId: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "item_id";
+            tableName: "planner_traces";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: true;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        repo: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "repo";
+            tableName: "planner_traces";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: true;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        wavePlanId: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "wave_plan_id";
+            tableName: "planner_traces";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        chosen: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "chosen";
+            tableName: "planner_traces";
+            dataType: "boolean";
+            columnType: "SQLiteBoolean";
+            data: boolean;
+            driverParam: number;
+            notNull: true;
+            hasDefault: true;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        template: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "template";
+            tableName: "planner_traces";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: true;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        templateVersion: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "template_version";
+            tableName: "planner_traces";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: true;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        modelRequested: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "model_requested";
+            tableName: "planner_traces";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: true;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        model: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "model";
+            tableName: "planner_traces";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        prompt: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "prompt";
+            tableName: "planner_traces";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: true;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        promptSha: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "prompt_sha";
+            tableName: "planner_traces";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: true;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        response: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "response";
+            tableName: "planner_traces";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        responseSha: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "response_sha";
+            tableName: "planner_traces";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        basedOnSha: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "based_on_sha";
+            tableName: "planner_traces";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        stopReason: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "stop_reason";
+            tableName: "planner_traces";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        tokensInput: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "tokens_input";
+            tableName: "planner_traces";
+            dataType: "number";
+            columnType: "SQLiteInteger";
+            data: number;
+            driverParam: number;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        tokensOutput: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "tokens_output";
+            tableName: "planner_traces";
+            dataType: "number";
+            columnType: "SQLiteInteger";
+            data: number;
+            driverParam: number;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        cacheReadTokens: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "cache_read_tokens";
+            tableName: "planner_traces";
+            dataType: "number";
+            columnType: "SQLiteInteger";
+            data: number;
+            driverParam: number;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        cacheWriteTokens: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "cache_write_tokens";
+            tableName: "planner_traces";
+            dataType: "number";
+            columnType: "SQLiteInteger";
+            data: number;
+            driverParam: number;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        durationMs: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "duration_ms";
+            tableName: "planner_traces";
+            dataType: "number";
+            columnType: "SQLiteInteger";
+            data: number;
+            driverParam: number;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        outcome: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "outcome";
+            tableName: "planner_traces";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: true;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        errors: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "errors";
+            tableName: "planner_traces";
+            dataType: "json";
+            columnType: "SQLiteTextJson";
+            data: string[];
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        warnings: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "warnings";
+            tableName: "planner_traces";
+            dataType: "json";
+            columnType: "SQLiteTextJson";
+            data: string[];
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        taskCount: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "task_count";
+            tableName: "planner_traces";
+            dataType: "number";
+            columnType: "SQLiteInteger";
+            data: number;
+            driverParam: number;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        score: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "score";
+            tableName: "planner_traces";
+            dataType: "number";
+            columnType: "SQLiteReal";
+            data: number;
+            driverParam: number;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        scoreDetail: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "score_detail";
+            tableName: "planner_traces";
+            dataType: "json";
+            columnType: "SQLiteTextJson";
+            data: Record<string, unknown>;
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        previousScore: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "previous_score";
+            tableName: "planner_traces";
+            dataType: "number";
+            columnType: "SQLiteReal";
+            data: number;
+            driverParam: number;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        improved: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "improved";
+            tableName: "planner_traces";
+            dataType: "boolean";
+            columnType: "SQLiteBoolean";
+            data: boolean;
+            driverParam: number;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        constraints: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "constraints";
+            tableName: "planner_traces";
+            dataType: "json";
+            columnType: "SQLiteTextJson";
+            data: string[];
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        createdAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "created_at";
+            tableName: "planner_traces";
+            dataType: "date";
+            columnType: "SQLiteTimestamp";
+            data: Date;
+            driverParam: number;
+            notNull: true;
+            hasDefault: true;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+    };
+    dialect: "sqlite";
+}>;
+/**
+ * What a person decided about a plan they were shown.
+ *
+ * The one judgement of a plan made BEFORE it runs, by someone who knows the
+ * codebase: approved as it stood, sent back with constraints, or abandoned. A
+ * plan sent back says what was wrong with it in the reviewer's own words —
+ * which no outcome measured afterwards can.
+ */
+declare const plannerReviews: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+    name: "planner_reviews";
+    schema: undefined;
+    columns: {
+        id: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "id";
+            tableName: "planner_reviews";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: true;
+            hasDefault: true;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        itemId: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "item_id";
+            tableName: "planner_reviews";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: true;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        planSha: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "plan_sha";
+            tableName: "planner_reviews";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        wavePlanId: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "wave_plan_id";
+            tableName: "planner_reviews";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        action: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "action";
+            tableName: "planner_reviews";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: true;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        constraints: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "constraints";
+            tableName: "planner_reviews";
+            dataType: "json";
+            columnType: "SQLiteTextJson";
+            data: string[];
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        reason: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "reason";
+            tableName: "planner_reviews";
+            dataType: "string";
+            columnType: "SQLiteText";
+            data: string;
+            driverParam: string;
+            notNull: false;
+            hasDefault: false;
+            enumValues: [string, ...string[]];
+            baseColumn: never;
+        }, object>;
+        score: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "score";
+            tableName: "planner_reviews";
+            dataType: "number";
+            columnType: "SQLiteReal";
+            data: number;
+            driverParam: number;
+            notNull: false;
+            hasDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+        createdAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+            name: "created_at";
+            tableName: "planner_reviews";
+            dataType: "date";
+            columnType: "SQLiteTimestamp";
+            data: Date;
+            driverParam: number;
+            notNull: true;
+            hasDefault: true;
+            enumValues: undefined;
+            baseColumn: never;
+        }, object>;
+    };
+    dialect: "sqlite";
+}>;
 type WavePlan = typeof wavePlans.$inferSelect;
 type NewWavePlan = typeof wavePlans.$inferInsert;
 type Wave = typeof waves.$inferSelect;
@@ -3381,6 +3942,10 @@ type DependencyEdge = typeof dependencyEdges.$inferSelect;
 type NewDependencyEdge = typeof dependencyEdges.$inferInsert;
 type WavePlanMetric = typeof wavePlanMetrics.$inferSelect;
 type NewWavePlanMetric = typeof wavePlanMetrics.$inferInsert;
+type PlannerTrace = typeof plannerTraces.$inferSelect;
+type NewPlannerTrace = typeof plannerTraces.$inferInsert;
+type PlannerReview = typeof plannerReviews.$inferSelect;
+type NewPlannerReview = typeof plannerReviews.$inferInsert;
 
 /**
  * Raw source materials that feed the wiki compiler.
@@ -4639,6 +5204,8 @@ type schema_NewDependencyEdge = NewDependencyEdge;
 type schema_NewHorizonItem = NewHorizonItem;
 type schema_NewInFlightFile = NewInFlightFile;
 type schema_NewPlan = NewPlan;
+type schema_NewPlannerReview = NewPlannerReview;
+type schema_NewPlannerTrace = NewPlannerTrace;
 type schema_NewRufloSession = NewRufloSession;
 type schema_NewRunwaySampleRow = NewRunwaySampleRow;
 type schema_NewScoreHistory = NewScoreHistory;
@@ -4652,6 +5219,8 @@ type schema_NewWaveTask = NewWaveTask;
 type schema_NewWorkstream = NewWorkstream;
 declare const schema_OrchestratorMode: typeof OrchestratorMode;
 type schema_Plan = Plan;
+type schema_PlannerReview = PlannerReview;
+type schema_PlannerTrace = PlannerTrace;
 type schema_RufloSession = RufloSession;
 type schema_RunwaySampleRow = RunwaySampleRow;
 type schema_ScoreHistory = ScoreHistory;
@@ -4702,6 +5271,8 @@ declare const schema_palaceRoomsRelations: typeof palaceRoomsRelations;
 declare const schema_palaceTunnels: typeof palaceTunnels;
 declare const schema_palaceWings: typeof palaceWings;
 declare const schema_palaceWingsRelations: typeof palaceWingsRelations;
+declare const schema_plannerReviews: typeof plannerReviews;
+declare const schema_plannerTraces: typeof plannerTraces;
 declare const schema_plans: typeof plans;
 declare const schema_plansRelations: typeof plansRelations;
 declare const schema_rufloSessions: typeof rufloSessions;
@@ -4739,7 +5310,7 @@ declare const schema_workstreams: typeof workstreams;
 declare const schema_workstreamsRelations: typeof workstreamsRelations;
 declare const schema_zoneValues: typeof zoneValues;
 declare namespace schema {
-  export { type schema_ActivityEvent as ActivityEvent, type schema_CompletedTask as CompletedTask, schema_Complexity as Complexity, type schema_ConductorScore as ConductorScore, type schema_ConflictingFile as ConflictingFile, type schema_DependencyEdge as DependencyEdge, schema_DependencyEdgeType as DependencyEdgeType, schema_EventType as EventType, schema_FileStatus as FileStatus, type schema_HorizonItem as HorizonItem, type schema_InFlightFile as InFlightFile, schema_Model as Model, type schema_NewActivityEvent as NewActivityEvent, type schema_NewCompletedTask as NewCompletedTask, type schema_NewConductorScore as NewConductorScore, type schema_NewConflictingFile as NewConflictingFile, type schema_NewDependencyEdge as NewDependencyEdge, type schema_NewHorizonItem as NewHorizonItem, type schema_NewInFlightFile as NewInFlightFile, type schema_NewPlan as NewPlan, type schema_NewRufloSession as NewRufloSession, type schema_NewRunwaySampleRow as NewRunwaySampleRow, type schema_NewScoreHistory as NewScoreHistory, type schema_NewScoreReading as NewScoreReading, type schema_NewTask as NewTask, type schema_NewTouchedFile as NewTouchedFile, type schema_NewWave as NewWave, type schema_NewWavePlan as NewWavePlan, type schema_NewWavePlanMetric as NewWavePlanMetric, type schema_NewWaveTask as NewWaveTask, type schema_NewWorkstream as NewWorkstream, schema_OrchestratorMode as OrchestratorMode, type schema_Plan as Plan, type schema_RufloSession as RufloSession, type schema_RunwaySampleRow as RunwaySampleRow, type schema_ScoreHistory as ScoreHistory, type schema_ScoreReading as ScoreReading, schema_SessionStatus as SessionStatus, type schema_Task as Task, type schema_TouchedFile as TouchedFile, type schema_Wave as Wave, type schema_WavePlan as WavePlan, type schema_WavePlanMetric as WavePlanMetric, schema_WavePlanStatus as WavePlanStatus, schema_WaveStatus as WaveStatus, type schema_WaveTask as WaveTask, schema_WaveTaskStatus as WaveTaskStatus, schema_WikiArticleStatus as WikiArticleStatus, schema_WikiLogAction as WikiLogAction, schema_WikiSourceType as WikiSourceType, type schema_Workstream as Workstream, schema_Zone as Zone, schema_activityEvents as activityEvents, schema_completedTasks as completedTasks, schema_completedTasksRelations as completedTasksRelations, schema_complexityValues as complexityValues, schema_conductorScores as conductorScores, schema_conductorScoresRelations as conductorScoresRelations, schema_conflictingFiles as conflictingFiles, schema_conflictingFilesRelations as conflictingFilesRelations, schema_dependencyEdgeTypeValues as dependencyEdgeTypeValues, schema_dependencyEdges as dependencyEdges, schema_dependencyEdgesRelations as dependencyEdgesRelations, schema_eventTypeValues as eventTypeValues, schema_fileStatusValues as fileStatusValues, schema_horizonItems as horizonItems, schema_horizonItemsRelations as horizonItemsRelations, schema_inFlightFiles as inFlightFiles, schema_inFlightFilesRelations as inFlightFilesRelations, schema_modelValues as modelValues, schema_orchestratorModeValues as orchestratorModeValues, schema_palaceClosets as palaceClosets, schema_palaceClosetsRelations as palaceClosetsRelations, schema_palaceDiary as palaceDiary, schema_palaceDrawers as palaceDrawers, schema_palaceDrawersRelations as palaceDrawersRelations, schema_palaceHalls as palaceHalls, schema_palaceKgTriples as palaceKgTriples, schema_palaceRooms as palaceRooms, schema_palaceRoomsRelations as palaceRoomsRelations, schema_palaceTunnels as palaceTunnels, schema_palaceWings as palaceWings, schema_palaceWingsRelations as palaceWingsRelations, schema_plans as plans, schema_plansRelations as plansRelations, schema_rufloSessions as rufloSessions, schema_rufloSessionsRelations as rufloSessionsRelations, schema_runwaySamples as runwaySamples, schema_scoreHistory as scoreHistory, schema_scoreHistoryRelations as scoreHistoryRelations, schema_scoreReadings as scoreReadings, schema_sessionStatusValues as sessionStatusValues, schema_tasks as tasks, schema_tasksRelations as tasksRelations, schema_touchedFiles as touchedFiles, schema_touchedFilesRelations as touchedFilesRelations, schema_wavePlanMetrics as wavePlanMetrics, schema_wavePlanMetricsRelations as wavePlanMetricsRelations, schema_wavePlanStatusValues as wavePlanStatusValues, schema_wavePlans as wavePlans, schema_wavePlansRelations as wavePlansRelations, schema_waveStatusValues as waveStatusValues, schema_waveTaskStatusValues as waveTaskStatusValues, schema_waveTasks as waveTasks, schema_waveTasksRelations as waveTasksRelations, schema_waves as waves, schema_wavesRelations as wavesRelations, schema_wikiArticleStatusValues as wikiArticleStatusValues, schema_wikiArticles as wikiArticles, schema_wikiArticlesRelations as wikiArticlesRelations, schema_wikiLog as wikiLog, schema_wikiLogActionValues as wikiLogActionValues, schema_wikiLogRelations as wikiLogRelations, schema_wikiSourceTypeValues as wikiSourceTypeValues, schema_wikiSources as wikiSources, schema_wikiSourcesRelations as wikiSourcesRelations, schema_workstreams as workstreams, schema_workstreamsRelations as workstreamsRelations, schema_zoneValues as zoneValues };
+  export { type schema_ActivityEvent as ActivityEvent, type schema_CompletedTask as CompletedTask, schema_Complexity as Complexity, type schema_ConductorScore as ConductorScore, type schema_ConflictingFile as ConflictingFile, type schema_DependencyEdge as DependencyEdge, schema_DependencyEdgeType as DependencyEdgeType, schema_EventType as EventType, schema_FileStatus as FileStatus, type schema_HorizonItem as HorizonItem, type schema_InFlightFile as InFlightFile, schema_Model as Model, type schema_NewActivityEvent as NewActivityEvent, type schema_NewCompletedTask as NewCompletedTask, type schema_NewConductorScore as NewConductorScore, type schema_NewConflictingFile as NewConflictingFile, type schema_NewDependencyEdge as NewDependencyEdge, type schema_NewHorizonItem as NewHorizonItem, type schema_NewInFlightFile as NewInFlightFile, type schema_NewPlan as NewPlan, type schema_NewPlannerReview as NewPlannerReview, type schema_NewPlannerTrace as NewPlannerTrace, type schema_NewRufloSession as NewRufloSession, type schema_NewRunwaySampleRow as NewRunwaySampleRow, type schema_NewScoreHistory as NewScoreHistory, type schema_NewScoreReading as NewScoreReading, type schema_NewTask as NewTask, type schema_NewTouchedFile as NewTouchedFile, type schema_NewWave as NewWave, type schema_NewWavePlan as NewWavePlan, type schema_NewWavePlanMetric as NewWavePlanMetric, type schema_NewWaveTask as NewWaveTask, type schema_NewWorkstream as NewWorkstream, schema_OrchestratorMode as OrchestratorMode, type schema_Plan as Plan, type schema_PlannerReview as PlannerReview, type schema_PlannerTrace as PlannerTrace, type schema_RufloSession as RufloSession, type schema_RunwaySampleRow as RunwaySampleRow, type schema_ScoreHistory as ScoreHistory, type schema_ScoreReading as ScoreReading, schema_SessionStatus as SessionStatus, type schema_Task as Task, type schema_TouchedFile as TouchedFile, type schema_Wave as Wave, type schema_WavePlan as WavePlan, type schema_WavePlanMetric as WavePlanMetric, schema_WavePlanStatus as WavePlanStatus, schema_WaveStatus as WaveStatus, type schema_WaveTask as WaveTask, schema_WaveTaskStatus as WaveTaskStatus, schema_WikiArticleStatus as WikiArticleStatus, schema_WikiLogAction as WikiLogAction, schema_WikiSourceType as WikiSourceType, type schema_Workstream as Workstream, schema_Zone as Zone, schema_activityEvents as activityEvents, schema_completedTasks as completedTasks, schema_completedTasksRelations as completedTasksRelations, schema_complexityValues as complexityValues, schema_conductorScores as conductorScores, schema_conductorScoresRelations as conductorScoresRelations, schema_conflictingFiles as conflictingFiles, schema_conflictingFilesRelations as conflictingFilesRelations, schema_dependencyEdgeTypeValues as dependencyEdgeTypeValues, schema_dependencyEdges as dependencyEdges, schema_dependencyEdgesRelations as dependencyEdgesRelations, schema_eventTypeValues as eventTypeValues, schema_fileStatusValues as fileStatusValues, schema_horizonItems as horizonItems, schema_horizonItemsRelations as horizonItemsRelations, schema_inFlightFiles as inFlightFiles, schema_inFlightFilesRelations as inFlightFilesRelations, schema_modelValues as modelValues, schema_orchestratorModeValues as orchestratorModeValues, schema_palaceClosets as palaceClosets, schema_palaceClosetsRelations as palaceClosetsRelations, schema_palaceDiary as palaceDiary, schema_palaceDrawers as palaceDrawers, schema_palaceDrawersRelations as palaceDrawersRelations, schema_palaceHalls as palaceHalls, schema_palaceKgTriples as palaceKgTriples, schema_palaceRooms as palaceRooms, schema_palaceRoomsRelations as palaceRoomsRelations, schema_palaceTunnels as palaceTunnels, schema_palaceWings as palaceWings, schema_palaceWingsRelations as palaceWingsRelations, schema_plannerReviews as plannerReviews, schema_plannerTraces as plannerTraces, schema_plans as plans, schema_plansRelations as plansRelations, schema_rufloSessions as rufloSessions, schema_rufloSessionsRelations as rufloSessionsRelations, schema_runwaySamples as runwaySamples, schema_scoreHistory as scoreHistory, schema_scoreHistoryRelations as scoreHistoryRelations, schema_scoreReadings as scoreReadings, schema_sessionStatusValues as sessionStatusValues, schema_tasks as tasks, schema_tasksRelations as tasksRelations, schema_touchedFiles as touchedFiles, schema_touchedFilesRelations as touchedFilesRelations, schema_wavePlanMetrics as wavePlanMetrics, schema_wavePlanMetricsRelations as wavePlanMetricsRelations, schema_wavePlanStatusValues as wavePlanStatusValues, schema_wavePlans as wavePlans, schema_wavePlansRelations as wavePlansRelations, schema_waveStatusValues as waveStatusValues, schema_waveTaskStatusValues as waveTaskStatusValues, schema_waveTasks as waveTasks, schema_waveTasksRelations as waveTasksRelations, schema_waves as waves, schema_wavesRelations as wavesRelations, schema_wikiArticleStatusValues as wikiArticleStatusValues, schema_wikiArticles as wikiArticles, schema_wikiArticlesRelations as wikiArticlesRelations, schema_wikiLog as wikiLog, schema_wikiLogActionValues as wikiLogActionValues, schema_wikiLogRelations as wikiLogRelations, schema_wikiSourceTypeValues as wikiSourceTypeValues, schema_wikiSources as wikiSources, schema_wikiSourcesRelations as wikiSourcesRelations, schema_workstreams as workstreams, schema_workstreamsRelations as workstreamsRelations, schema_zoneValues as zoneValues };
 }
 
 type SQLiteDatabase = BetterSQLite3Database<typeof schema>;
@@ -4748,4 +5319,4 @@ type Database = SQLiteDatabase;
 declare function createDatabase(config: DatabaseConfig): Database;
 declare function closeDatabase(config: DatabaseConfig): Promise<void>;
 
-export { getDatabaseConfig as $, type ActivityEvent as A, type WavePlan as B, type CompletedTask as C, type Database as D, type WavePlanMetric as E, type WaveTask as F, type Workstream as G, type HorizonItem as H, type InFlightFile as I, activityEvents as J, closeDatabase as K, completedTasks as L, completedTasksRelations as M, type NewActivityEvent as N, conductorScores as O, type Plan as P, conductorScoresRelations as Q, type RufloSession as R, type SQLiteDatabase as S, type Task as T, conflictingFiles as U, conflictingFilesRelations as V, type Wave as W, createDatabase as X, databaseConfigSchema as Y, dependencyEdges as Z, dependencyEdgesRelations as _, type ConductorScore as a, type AssignedWave as a$, horizonItems as a0, horizonItemsRelations as a1, inFlightFiles as a2, inFlightFilesRelations as a3, palaceClosets as a4, palaceClosetsRelations as a5, palaceDiary as a6, palaceDrawers as a7, palaceDrawersRelations as a8, palaceHalls as a9, wikiArticles as aA, wikiArticlesRelations as aB, wikiLog as aC, wikiLogRelations as aD, wikiSources as aE, wikiSourcesRelations as aF, workstreams as aG, workstreamsRelations as aH, type ParsedTask as aI, type DAGNode as aJ, type TopologicalSortResult as aK, type ParsedWavePlan as aL, type ParsedEdge as aM, type ValidationResult as aN, type CriticalPathResult as aO, type WaveAssignmentResult as aP, type PlanScore as aQ, type GenerationResult as aR, type FleetContextBlock as aS, type CodebaseContextBlock as aT, type PromptContext as aU, type PlanCodeGraph as aV, type WaveAssignerConfig as aW, type WaveSSEEvent as aX, type ActiveTaskInfo as aY, type PredecessorSummary as aZ, type WaveDispatchRequest as a_, palaceKgTriples as aa, palaceRooms as ab, palaceRoomsRelations as ac, palaceTunnels as ad, palaceWings as ae, palaceWingsRelations as af, plans as ag, plansRelations as ah, rufloSessions as ai, rufloSessionsRelations as aj, runwaySamples as ak, scoreHistory as al, scoreHistoryRelations as am, scoreReadings as an, tasks as ao, tasksRelations as ap, touchedFiles as aq, touchedFilesRelations as ar, wavePlanMetrics as as, wavePlanMetricsRelations as at, wavePlans as au, wavePlansRelations as av, waveTasks as aw, waveTasksRelations as ax, waves as ay, wavesRelations as az, type ConflictingFile as b, BLAST_RADIUS_LISTED as b0, type BlastRadiusLine as b1, type CodeGraphReview as b2, type CompletedWorkBlock as b3, type ConfidenceSignalUpdate as b4, type ConstraintBlock as b5, type CriticalPathAnnotation as b6, type DependentClaim as b7, type GraphDependentsSource as b8, MAX_DEPENDENT_CLAIMS_PER_TASK as b9, type MemoryContextBlock as ba, type OptimizationResult as bb, type ParsedStatistics as bc, type ParsedWave as bd, type RemainingWorkBlock as be, type SelectedDependentClaims as bf, type SequencedLine as bg, type TaskBlastRadius as bh, type ValidationError as bi, type ValidationErrorCode as bj, type ValidationWarning as bk, type ValidationWarningCode as bl, type WaveAdjustment as bm, type WavePlanExecutionState as bn, type WavePlannerConfig as bo, assignWaves as bp, blastRadiusOf as bq, codeGraphOf as br, dependentClaimsOf as bs, describeCodeGraph as bt, isPlanCodeGraph as bu, readPlanCodeGraph as bv, selectDependentClaims as bw, withCodeGraph as bx, schema as by, type DatabaseConfig as c, type DependencyEdge as d, type NewCompletedTask as e, type NewConductorScore as f, type NewConflictingFile as g, type NewDependencyEdge as h, type NewHorizonItem as i, type NewInFlightFile as j, type NewPlan as k, type NewRufloSession as l, type NewRunwaySampleRow as m, type NewScoreHistory as n, type NewScoreReading as o, type NewTask as p, type NewTouchedFile as q, type NewWave as r, type NewWavePlan as s, type NewWavePlanMetric as t, type NewWaveTask as u, type NewWorkstream as v, type RunwaySampleRow as w, type ScoreHistory as x, type ScoreReading as y, type TouchedFile as z };
+export { createDatabase as $, type ActivityEvent as A, type RunwaySampleRow as B, type CompletedTask as C, type Database as D, type ScoreHistory as E, type ScoreReading as F, type TouchedFile as G, type HorizonItem as H, type InFlightFile as I, type WavePlan as J, type WavePlanMetric as K, type WaveTask as L, type Workstream as M, type NewActivityEvent as N, activityEvents as O, type Plan as P, closeDatabase as Q, type RufloSession as R, type SQLiteDatabase as S, type Task as T, completedTasks as U, completedTasksRelations as V, type Wave as W, conductorScores as X, conductorScoresRelations as Y, conflictingFiles as Z, conflictingFilesRelations as _, type ConductorScore as a, type CompletedWorkBlock as a$, databaseConfigSchema as a0, dependencyEdges as a1, dependencyEdgesRelations as a2, getDatabaseConfig as a3, horizonItems as a4, horizonItemsRelations as a5, inFlightFiles as a6, inFlightFilesRelations as a7, palaceClosets as a8, palaceClosetsRelations as a9, wavePlans as aA, wavePlansRelations as aB, waveTasks as aC, waveTasksRelations as aD, waves as aE, wavesRelations as aF, wikiArticles as aG, wikiArticlesRelations as aH, wikiLog as aI, wikiLogRelations as aJ, wikiSources as aK, wikiSourcesRelations as aL, workstreams as aM, workstreamsRelations as aN, type ParsedTask as aO, type DAGNode as aP, type TopologicalSortResult as aQ, type ParsedWavePlan as aR, type ParsedEdge as aS, type ValidationResult as aT, type CriticalPathResult as aU, type WaveAssignmentResult as aV, type PlanScore as aW, type GenerationResult as aX, type FleetContextBlock as aY, type CodebaseContextBlock as aZ, type PromptContext as a_, palaceDiary as aa, palaceDrawers as ab, palaceDrawersRelations as ac, palaceHalls as ad, palaceKgTriples as ae, palaceRooms as af, palaceRoomsRelations as ag, palaceTunnels as ah, palaceWings as ai, palaceWingsRelations as aj, plannerReviews as ak, plannerTraces as al, plans as am, plansRelations as an, rufloSessions as ao, rufloSessionsRelations as ap, runwaySamples as aq, scoreHistory as ar, scoreHistoryRelations as as, scoreReadings as at, tasks as au, tasksRelations as av, touchedFiles as aw, touchedFilesRelations as ax, wavePlanMetrics as ay, wavePlanMetricsRelations as az, type ConflictingFile as b, type RemainingWorkBlock as b0, type PlanCodeGraph as b1, type WaveAssignerConfig as b2, type WaveSSEEvent as b3, type ActiveTaskInfo as b4, type PredecessorSummary as b5, type WaveDispatchRequest as b6, type AssignedWave as b7, BLAST_RADIUS_LISTED as b8, type BlastRadiusLine as b9, isPlanCodeGraph as bA, readPlanCodeGraph as bB, selectDependentClaims as bC, withCodeGraph as bD, schema as bE, type CodeGraphReview as ba, type ConfidenceSignalUpdate as bb, type ConstraintBlock as bc, type CriticalPathAnnotation as bd, type DependentClaim as be, type GraphDependentsSource as bf, MAX_DEPENDENT_CLAIMS_PER_TASK as bg, type MemoryContextBlock as bh, type OptimizationResult as bi, type ParsedStatistics as bj, type ParsedWave as bk, type SelectedDependentClaims as bl, type SequencedLine as bm, type TaskBlastRadius as bn, type ValidationError as bo, type ValidationErrorCode as bp, type ValidationWarning as bq, type ValidationWarningCode as br, type WaveAdjustment as bs, type WavePlanExecutionState as bt, type WavePlannerConfig as bu, assignWaves as bv, blastRadiusOf as bw, codeGraphOf as bx, dependentClaimsOf as by, describeCodeGraph as bz, type DatabaseConfig as c, type DependencyEdge as d, type NewCompletedTask as e, type NewConductorScore as f, type NewConflictingFile as g, type NewDependencyEdge as h, type NewHorizonItem as i, type NewInFlightFile as j, type NewPlan as k, type NewPlannerReview as l, type NewPlannerTrace as m, type NewRufloSession as n, type NewRunwaySampleRow as o, type NewScoreHistory as p, type NewScoreReading as q, type NewTask as r, type NewTouchedFile as s, type NewWave as t, type NewWavePlan as u, type NewWavePlanMetric as v, type NewWaveTask as w, type NewWorkstream as x, type PlannerReview as y, type PlannerTrace as z };

@@ -49,6 +49,8 @@ export const {
   waveTasks,
   dependencyEdges,
   wavePlanMetrics,
+  plannerTraces,
+  plannerReviews,
 } = schema;
 
 // Re-export enums for API routes

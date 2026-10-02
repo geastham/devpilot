@@ -34,6 +34,8 @@ import {
   codeGraphOf,
   readPlanCodeGraph,
   resolvePlannerModel,
+  resolvePlannerMaxTokens,
+  resolveMinParallelizationScore,
   withCodeGraph,
 } from '@devpilot.sh/core/wave-planner';
 import type {
@@ -86,9 +88,11 @@ export function createDevPilotPorts(options: DevPilotPortsOptions): ConductorPor
     {
       apiKey: options.apiKey,
       model: resolvePlannerModel(options.model),
-      maxTokens: 8192,
+      maxTokens: resolvePlannerMaxTokens(),
     },
-    {}
+    // The same threshold the graph gates on, so the refinement prompt names
+    // the target the plan is actually held to.
+    { minParallelizationScore: resolveMinParallelizationScore() }
   );
 
   // Attach recall to the very constructor the planner will use.

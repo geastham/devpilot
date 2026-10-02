@@ -12,6 +12,8 @@ import {
 import {
   WavePlanGenerator,
   resolvePlannerModel,
+  resolvePlannerMaxTokens,
+  resolveMinParallelizationScore,
   buildSpecContentForItem,
 } from '@devpilot.sh/core/wave-planner';
 import { getServerOrchestrator } from '@/lib/orchestrator';
@@ -134,12 +136,10 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       aiClient: {
         apiKey,
         model: resolvePlannerModel(),
-        maxTokens: parseInt(process.env.WAVE_PLANNER_MAX_TOKENS || '8192', 10),
+        maxTokens: resolvePlannerMaxTokens(),
       },
       refinement: {
-        minParallelizationScore: parseFloat(
-          process.env.WAVE_PLANNER_MIN_PARALLELIZATION || '0.3'
-        ),
+        minParallelizationScore: resolveMinParallelizationScore(),
         maxRefinementIterations: 2,
       },
       autoPersist: true,

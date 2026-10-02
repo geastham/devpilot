@@ -53,7 +53,29 @@ function dumpRawResponse(text: string, model: string): void {
   }
 }
 
+/**
+ * The model answered, and the answer was cut off at the token ceiling.
+ *
+ * Its own type for two reasons. It carries what was received, so the record of
+ * the call can say how many tokens were spent and that this is why it failed —
+ * a truncated plan used to be indistinguishable, afterwards, from a network
+ * error. And it is not retried: the same prompt against the same ceiling is
+ * cut off in the same place, and it was being sent four times, with backoff,
+ * before the failure was reported.
+ */
+export class PlannerTruncatedError extends Error {
+  readonly retryable = false;
+  constructor(
+    message: string,
+    readonly generation: GenerationResult
+  ) {
+    super(message);
+    this.name = 'PlannerTruncatedError';
+  }
+}
+
 function isRetryable(error: unknown): boolean {
+  if ((error as { retryable?: boolean } | null)?.retryable === false) return false;
   const status = (error as { status?: number } | null)?.status;
   if (typeof status !== 'number') return true; // network/unknown — worth a retry
   return !NON_RETRYABLE_STATUS.has(status);
@@ -66,6 +88,11 @@ function isRetryable(error: unknown): boolean {
 export class WavePlannerAIClient {
   private client: Anthropic;
   private config: AIClientConfig;
+
+  /** The model this client asks for — which may be an alias the API resolves. */
+  get modelRequested(): string {
+    return this.config.model;
+  }
 
   constructor(config: AIClientConfig) {
     this.config = config;
@@ -122,23 +149,38 @@ export class WavePlannerAIClient {
        * was being ignored. Refusing here means the caller's retry/refinement
        * path sees a real failure rather than a quietly shorter plan.
        */
-      if (response.stop_reason === 'max_tokens') {
-        throw new Error(
-          `Planner response hit the ${this.config.maxTokens}-token ceiling and was ` +
-            `truncated mid-plan. Raise WAVE_PLANNER_MAX_TOKENS, or narrow the spec.`
-        );
-      }
-
-      return {
+      const generation: GenerationResult = {
         content: textContent,
         tokensInput: response.usage.input_tokens,
         tokensOutput: response.usage.output_tokens,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
+        // Reported, not assumed. These were hard-coded to 0, which was true
+        // only because nothing asks for caching yet — and would have gone on
+        // saying 0 after something did.
+        cacheReadTokens: response.usage.cache_read_input_tokens ?? 0,
+        cacheWriteTokens: response.usage.cache_creation_input_tokens ?? 0,
         durationMs,
         model: response.model,
+        stopReason: response.stop_reason ?? null,
       };
+
+      if (response.stop_reason === 'max_tokens') {
+        // The ceiling covers the model's thinking as well as the plan, and on
+        // the planner's default model thinking is on unless switched off — so
+        // the plan gets what the thinking left of it.
+        throw new PlannerTruncatedError(
+          `Planner response hit the ${this.config.maxTokens}-token ceiling and was ` +
+            `truncated mid-plan (the ceiling covers the model's thinking as well as the plan). ` +
+            `Raise WAVE_PLANNER_MAX_TOKENS, or narrow the spec.`,
+          generation
+        );
+      }
+
+      return generation;
     } catch (error) {
+      // An answer that was cut off is not a failed call, and must not be
+      // reported as one.
+      if (error instanceof PlannerTruncatedError) throw error;
+
       const durationMs = Date.now() - startTime;
       const wrapped = new Error(
         `Claude API call failed after ${durationMs}ms: ${error instanceof Error ? error.message : String(error)}`

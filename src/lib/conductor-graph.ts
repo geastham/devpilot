@@ -24,6 +24,8 @@ import {
   type ParsedWavePlan,
   type PlanScore,
   resolvePlannerModel,
+  resolvePlannerMaxTokens,
+  resolveMinParallelizationScore,
 } from '@devpilot.sh/core/wave-planner';
 import { db, activityEvents, plans, wavePlans } from '@/lib/db';
 import { eq } from 'drizzle-orm';
@@ -61,7 +63,7 @@ async function persistPlan(
     aiClient: {
       apiKey: process.env.ANTHROPIC_API_KEY ?? '',
       model: resolvePlannerModel(),
-      maxTokens: 8192,
+      maxTokens: resolvePlannerMaxTokens(),
     },
   });
 
@@ -256,6 +258,17 @@ export function getConductorGraph(): ConductorGraph {
       onEvent: recordEvent,
     }),
     config: {
+      /**
+       * The refinement gate's threshold, from the one place it is configured.
+       *
+       * The graph used to take its own default, 0.7, and read no setting —
+       * while the route that plans directly used
+       * `WAVE_PLANNER_MIN_PARALLELIZATION` and 0.3. Every ticket from the
+       * bridge comes this way, so every one of them was held to the stricter
+       * figure: a ten-task plan in four waves scores 0.6 and was sent back,
+       * twice, to a prompt that advises cutting tasks smaller.
+       */
+      minParallelizationScore: resolveMinParallelizationScore(),
       requireReview: process.env.DEVPILOT_CONDUCTOR_AUTO_APPROVE === 'true' ? false : true,
       /**
        * No wave-level retry, and the same failure policy the controller uses.

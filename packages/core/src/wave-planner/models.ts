@@ -44,6 +44,30 @@ export function resolvePlannerModel(explicit?: string): string {
 }
 
 /**
+ * The planner's output ceiling: 16,000 tokens.
+ *
+ * It was 8,192, written in three places. The ceiling is not the plan's alone:
+ * it covers the model's thinking too, and on the default planner model
+ * thinking is on unless a request switches it off — which no request here
+ * does. So a plan had whatever of 8,192 the thinking left, and a plan that ran
+ * out was refused as truncated (correctly — see `ai-client.ts`) and the run
+ * fell back to a flat list.
+ *
+ * 16,000 is headroom, not spend: output is billed as generated. It is also
+ * under the size at which the SDK refuses a non-streaming request (above
+ * 21,333 tokens it requires streaming), so this needs no change to how the
+ * call is made.
+ */
+export const DEFAULT_PLANNER_MAX_TOKENS = 16_000;
+
+/** Resolve the ceiling: explicit argument → `WAVE_PLANNER_MAX_TOKENS` → default. */
+export function resolvePlannerMaxTokens(explicit?: number, env: NodeJS.ProcessEnv = process.env): number {
+  if (typeof explicit === 'number' && Number.isFinite(explicit) && explicit > 0) return Math.floor(explicit);
+  const fromEnv = parseInt(env.WAVE_PLANNER_MAX_TOKENS ?? '', 10);
+  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : DEFAULT_PLANNER_MAX_TOKENS;
+}
+
+/**
  * Resolve the wiki model: explicit argument → env override → default.
  */
 export function resolveWikiModel(explicit?: string): string {

@@ -8,7 +8,8 @@ import type { PromptContext } from '../types';
  */
 export const refinementTemplate: RefinementPromptTemplate = {
   name: 'refinement',
-  version: '1.0.0',
+  // 1.1.0: the target in the prompt is the threshold the plan is held to.
+  version: '1.1.0',
 
   render(context: PromptContext): string {
     // For standalone rendering, use a basic optimization prompt
@@ -31,7 +32,14 @@ ${context.specContent}
 Generate an optimized wave plan following the standard format.`;
   },
 
-  renderRefinement(context: PromptContext, currentPlan: string, currentScore: number): string {
+  renderRefinement(context: PromptContext, currentPlan: string, currentScore: number, targetScore?: number): string {
+    // The plan was told "Target: 80%+" whatever it was being held to — 30% on
+    // one path, 70% on another. A target the gate does not use only asks the
+    // model for more splitting than anything will check.
+    const target =
+      typeof targetScore === 'number' && Number.isFinite(targetScore)
+        ? `${(targetScore * 100).toFixed(0)}%`
+        : 'higher';
     return `# Improve Wave Execution Plan
 
 You are refining an existing wave execution plan to increase parallelization and reduce execution time.
@@ -48,7 +56,7 @@ ${currentPlan}
 
 ## Current Quality Metrics
 
-**Overall Score**: ${(currentScore * 100).toFixed(1)}% (Target: 80%+)
+**Parallelization score**: ${(currentScore * 100).toFixed(1)}% (Target: ${target}). This is one minus the critical path's share of the tasks. Raise it by removing dependencies that are not real and by running separable work side by side — not by cutting one coherent change into pieces.
 
 The current plan has optimization opportunities. Your goal is to improve parallelization while maintaining correctness.
 

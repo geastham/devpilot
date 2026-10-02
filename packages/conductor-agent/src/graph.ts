@@ -1,7 +1,7 @@
 import { StateGraph, START, END } from '@langchain/langgraph';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import { ConductorState, type ConductorStateType } from './state';
-import { makeNodes, waveCount } from './nodes';
+import { belowThreshold, makeNodes, waveCount } from './nodes';
 import { DEFAULT_CONFIG, type ConductorConfig, type ConductorPorts } from './types';
 
 /**
@@ -63,10 +63,9 @@ export function createConductorGraph(options: ConductorAgentOptions) {
 
   /** After scoring: refine, or move on to review. */
   function afterPlanning(state: ConductorStateType): 'refine' | 'review' | 'persist' {
-    const score = state.score?.parallelizationScore ?? 0;
     const canRefine = state.refinementIterations < config.maxRefinementIterations;
 
-    if (score < config.minParallelizationScore && canRefine) return 'refine';
+    if (belowThreshold(state, config) && canRefine) return 'refine';
     // Skipping review means dispatching a plan no human has seen — allowed, but
     // only because a host explicitly asked for it.
     return config.requireReview ? 'review' : 'persist';

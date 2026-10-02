@@ -18,11 +18,11 @@ import type {
  * hard to provoke (a wave failing twice, a conductor rejecting a plan).
  */
 
-function planWith(waveCount: number): WavePlanShape {
+function planWith(waveCount: number, tasksPerWave = 1): WavePlanShape {
   return {
     waves: Array.from({ length: waveCount }, (_, i) => ({
       waveNumber: i,
-      tasks: [{ taskCode: `${i}.1` }],
+      tasks: Array.from({ length: tasksPerWave }, (_, t) => ({ taskCode: `${i}.${t + 1}` })),
     })),
     dependencyEdges: [],
   };
@@ -32,6 +32,12 @@ interface StubOptions {
   scores?: number[];
   waveOutcomes?: WaveOutcome[];
   waveCount?: number;
+  /**
+   * Tasks in each wave of the stub plan. One by default — which is a plan too
+   * small to be held to the parallelization threshold, so a test about the
+   * refinement loop has to ask for a plan big enough to be refined.
+   */
+  tasksPerWave?: number;
   /**
    * What `dispatchWave` returns, call by call; the last entry repeats. Lets a
    * test say "this dispatch found the wave already over".
@@ -51,6 +57,7 @@ function stubPorts(options: StubOptions = {}) {
    */
   const scores = options.scores ?? [0.9];
   const waveCount = options.waveCount ?? 1;
+  const tasksPerWave = options.tasksPerWave ?? 1;
   const outcomes = options.waveOutcomes ?? [];
   const events: ConductorEvent[] = [];
 
@@ -69,12 +76,12 @@ function stubPorts(options: StubOptions = {}) {
   const ports: ConductorPorts = {
     async generatePlan() {
       calls.generate++;
-      return { plan: planWith(waveCount), tokensUsed: 100 };
+      return { plan: planWith(waveCount, tasksPerWave), tokensUsed: 100 };
     },
     async refinePlan(input) {
       calls.refine++;
       calls.constraintsSeen.push(input.constraints ?? []);
-      return { plan: planWith(waveCount), tokensUsed: 50 };
+      return { plan: planWith(waveCount, tasksPerWave), tokensUsed: 50 };
     },
     scorePlan() {
       // Walk the script, then hold the last value.
@@ -132,7 +139,7 @@ describe('conductor graph — planning', () => {
   });
 
   it('refines until the score clears the threshold', async () => {
-    const { ports, calls } = stubPorts({ scores: [0.4, 0.55, 0.85] });
+    const { ports, calls } = stubPorts({ scores: [0.4, 0.55, 0.85], tasksPerWave: 4 });
     const graph = createConductorGraph({ ports, config: { requireReview: false } });
 
     await graph.invoke(input, thread('t2'));
@@ -141,7 +148,7 @@ describe('conductor graph — planning', () => {
   });
 
   it('gives up after maxRefinementIterations rather than looping forever', async () => {
-    const { ports, calls } = stubPorts({ scores: [0.1] });
+    const { ports, calls } = stubPorts({ scores: [0.1], tasksPerWave: 4 });
     const graph = createConductorGraph({
       ports,
       config: { requireReview: false, maxRefinementIterations: 3 },
@@ -156,7 +163,7 @@ describe('conductor graph — planning', () => {
 
   it('keeps the better plan when a refinement scores worse', async () => {
     // Initial 50, refinement 20: the refinement must be discarded.
-    const { ports } = stubPorts({ scores: [0.5, 0.2, 0.2] });
+    const { ports } = stubPorts({ scores: [0.5, 0.2, 0.2], tasksPerWave: 4 });
     const graph = createConductorGraph({
       ports,
       config: { requireReview: false, maxRefinementIterations: 2 },
@@ -165,6 +172,68 @@ describe('conductor graph — planning', () => {
     const result = await graph.invoke(input, thread('t4'));
 
     expect(result.score?.parallelizationScore).toBe(0.5);
+  });
+});
+
+/**
+ * The score is one minus the critical path's share of the tasks. A plan of one
+ * task scores 0; so do two or three in sequence. Each used to be sent back to
+ * be cut smaller, to the iteration limit — and a refinement is kept whenever
+ * it scores higher, which splitting a task always does.
+ */
+describe('conductor graph — a plan too small for the threshold', () => {
+  it('is not sent back for scoring 0', async () => {
+    // One wave, one task: nothing to parallelize, and nothing wrong with it.
+    const { ports, calls } = stubPorts({ scores: [0] });
+    const graph = createConductorGraph({ ports, config: { requireReview: false } });
+
+    const result = await graph.invoke(input, thread('s1'));
+
+    expect(calls.generate).toBe(1);
+    expect(calls.refine).toBe(0);
+    expect(result.status).toBe('complete');
+  });
+
+  it('is not shown to the reviewer as below the threshold', async () => {
+    const { ports } = stubPorts({ scores: [0], waveCount: 3 });
+    const graph = createConductorGraph({ ports, config: { requireReview: true }, checkpointer: new MemorySaver() });
+
+    const paused = await graph.invoke(input, thread('s2'));
+
+    expect((paused as any).__interrupt__?.[0]?.value?.belowThreshold).toBe(false);
+  });
+
+  it('can still be sent back by the reviewer', async () => {
+    const { ports, calls } = stubPorts({ scores: [0, 0] });
+    const graph = createConductorGraph({ ports, config: { requireReview: true }, checkpointer: new MemorySaver() });
+    const cfg = thread('s3');
+
+    await graph.invoke(input, cfg);
+    await graph.invoke(new Command({ resume: { action: 'refine', constraints: ['split the migration out'] } }), cfg);
+
+    expect(calls.refine).toBe(1);
+  });
+
+  it('is held to the threshold once it has enough tasks to have one', async () => {
+    // Four tasks in sequence, score 0: this one is refined.
+    const { ports, calls } = stubPorts({ scores: [0, 0.8], waveCount: 4 });
+    const graph = createConductorGraph({ ports, config: { requireReview: false } });
+
+    await graph.invoke(input, thread('s4'));
+
+    expect(calls.refine).toBe(1);
+  });
+
+  it('follows the host when it sets the size', async () => {
+    const { ports, calls } = stubPorts({ scores: [0, 0.8] });
+    const graph = createConductorGraph({
+      ports,
+      config: { requireReview: false, minTasksForRefinement: 1 },
+    });
+
+    await graph.invoke(input, thread('s5'));
+
+    expect(calls.refine).toBe(1);
   });
 });
 
@@ -490,7 +559,7 @@ describe('conductor graph — ending a run', () => {
 
 describe('conductor graph — accounting', () => {
   it('accumulates tokens across generation and refinement', async () => {
-    const { ports } = stubPorts({ scores: [0.4, 0.85] });
+    const { ports } = stubPorts({ scores: [0.4, 0.85], tasksPerWave: 4 });
     const graph = createConductorGraph({ ports, config: { requireReview: false } });
 
     const result = await graph.invoke(input, thread('a1'));

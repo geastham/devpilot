@@ -376,7 +376,12 @@ function renderWorkContext(context: PromptContext): string {
     context.remainingWork.tasks.forEach((task) => {
       output += `**${task.taskCode}**: ${task.description}\n`;
       output += `- Original dependencies: ${task.originalDependencies.join(', ') || 'None'}\n`;
-      output += `- Original files: ${task.originalFiles.join(', ')}\n\n`;
+      output += `- Original files: ${task.originalFiles.join(', ')}\n`;
+      if (task.lastError) {
+        // A report from the runner or the agent, quoted as one.
+        output += `- Its last attempt did not finish. It reported: "${task.lastError.replace(/\s+/g, ' ').slice(0, 300)}"\n`;
+      }
+      output += '\n';
     });
 
     output += 'Adjust dependencies based on completed work and current codebase state.\n\n';

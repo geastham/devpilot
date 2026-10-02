@@ -1,6 +1,6 @@
 {
   "name": "@devpilot.sh/conductor-agent",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "The DevPilot conductor as a LangGraph agent — plan, review, dispatch and advance a wave plan as one resumable graph",
   "license": "MIT",
   "author": "DevPilot Team",
