@@ -1,12 +1,13 @@
-import type { ParsedWavePlan, PlanScore, OptimizationResult } from './types';
+import type { ParsedWavePlan, PlanScore, OptimizationResult, GenerationResult } from './types';
 import { PromptConstructor, PromptConstructorConfig } from './prompt-constructor';
-import { WavePlannerAIClient, AIClientConfig } from './ai-client';
+import { WavePlannerAIClient, AIClientConfig, PlannerTruncatedError } from './ai-client';
 import { parseWavePlanResponse } from './parser';
 import { validateDAG } from './dag-validator';
 import { computeCriticalPath } from './critical-path';
 import { assignWaves } from './wave-assigner';
 import { scorePlan } from './plan-scorer';
 import { createFlatPlan } from './fallback';
+import { newPlannerRunId, recordPlannerTrace, type PlannerTraceRecord } from './trace';
 
 // ============================================================================
 // Plan Refinement Service Configuration
@@ -23,8 +24,52 @@ export interface PlanRefinementConfig {
   maxTasksPerWave?: number;
 }
 
+/**
+ * The refinement gate's threshold, for every path that plans.
+ *
+ * There were two. The route that generates a plan directly read
+ * `WAVE_PLANNER_MIN_PARALLELIZATION` and defaulted to 0.3; the conductor graph
+ * — the path every ticket from the bridge takes — had its own default of 0.7
+ * and read no setting at all. So the same specification was held to "the
+ * critical path is at most 70% of the tasks" on one path and "at most 30%" on
+ * the other, and on the stricter one a plan of ten tasks in four waves (0.6)
+ * was sent back twice to be cut smaller.
+ *
+ * One function, read by both. 0.3 is the looser of the two and is kept as the
+ * default because the gate's number is a ratio of counts, not a measurement
+ * of plans that went well — see `parallelizationGateApplies`. Until there is
+ * such a measurement the gate should spend as few model calls as it can.
+ */
+export const DEFAULT_MIN_PARALLELIZATION_SCORE = 0.3;
+
+export function resolveMinParallelizationScore(explicit?: number, env: NodeJS.ProcessEnv = process.env): number {
+  if (typeof explicit === 'number' && Number.isFinite(explicit)) return explicit;
+  const fromEnv = parseFloat(env.WAVE_PLANNER_MIN_PARALLELIZATION ?? '');
+  return Number.isFinite(fromEnv) && fromEnv >= 0 && fromEnv <= 1 ? fromEnv : DEFAULT_MIN_PARALLELIZATION_SCORE;
+}
+
+/**
+ * Plans smaller than this are not held to the parallelization gate.
+ *
+ * The score is `1 - criticalPath / tasks`. For a plan of one task that is 0;
+ * for two or three tasks in sequence it is 0. None of those is a bad plan — a
+ * specification that is one change is one task — but each was below any
+ * threshold, so each was sent back to a prompt whose advice is to break work
+ * into smaller pieces, up to the iteration limit, and a refinement was kept
+ * whenever it scored higher, which splitting always does. The gate was
+ * manufacturing tasks out of work that did not have them.
+ *
+ * With fewer than four tasks there is not enough plan for the ratio to say
+ * anything, so the gate is not asked.
+ */
+export const MIN_TASKS_FOR_PARALLELIZATION_GATE = 4;
+
+export function parallelizationGateApplies(taskCount: number): boolean {
+  return taskCount >= MIN_TASKS_FOR_PARALLELIZATION_GATE;
+}
+
 const DEFAULT_REFINEMENT_CONFIG: PlanRefinementConfig = {
-  minParallelizationScore: 0.3,
+  minParallelizationScore: DEFAULT_MIN_PARALLELIZATION_SCORE,
   maxRefinementIterations: 2,
   useSimplifiedOnRetry: true,
   maxTasksPerWave: undefined,
@@ -81,6 +126,15 @@ export class PlanRefinementService {
    */
   lastRefinementError?: string;
 
+  /**
+   * The planning run a call belongs to, for its trace: an initial plan starts
+   * one and its refinements continue it. A service built fresh after a restart
+   * starts a new run for a refinement; the trace's `basedOnSha` still says
+   * which plan it was refining.
+   */
+  private runId = newPlannerRunId();
+  private step = 0;
+
   constructor(
     aiClientConfig: AIClientConfig,
     refinementConfig?: Partial<PlanRefinementConfig>
@@ -127,8 +181,13 @@ export class PlanRefinementService {
       totalTokensUsed += initialResult.tokensUsed;
       iterationsPerformed = 1;
 
-      // Check if initial plan meets threshold
-      if (currentScore.parallelizationScore >= this.config.minParallelizationScore) {
+      // Check if initial plan meets threshold — or is too small for the
+      // threshold to mean anything.
+      const taskCount = currentPlan.waves.reduce((n, w) => n + w.tasks.length, 0);
+      if (
+        !parallelizationGateApplies(taskCount) ||
+        currentScore.parallelizationScore >= this.config.minParallelizationScore
+      ) {
         return {
           plan: currentPlan,
           score: currentScore,
@@ -229,20 +288,45 @@ export class PlanRefinementService {
       constructorConfig
     );
 
+    // A new planning run. Everything below is recorded against it, whichever
+    // way it ends.
+    this.runId = newPlannerRunId();
+    this.step = 0;
+    const trace = this.traceBase(
+      constructorConfig.completedWork || constructorConfig.remainingWork ? 'reoptimize' : 'initial',
+      constructorConfig.template || 'default',
+      itemId,
+      repo,
+      prompt,
+      constructorConfig
+    );
+
     // Generate plan via AI
-    const response = await this.aiClient.generateWithRetry(prompt);
+    let response: GenerationResult;
+    try {
+      response = await this.aiClient.generateWithRetry(prompt);
+    } catch (error) {
+      await recordPlannerTrace({ ...trace, ...answeredBeforeFailing(error), outcome: 'error', errors: [messageOf(error)] });
+      throw error;
+    }
     const tokensUsed = response.tokensInput + response.tokensOutput;
 
     // Parse response
     const plan = parseWavePlanResponse(response.content);
+    const tasks = plan.waves.flatMap(w => w.tasks);
 
     // Validate DAG
-    const validation = validateDAG(
-      plan.waves.flatMap(w => w.tasks),
-      plan.dependencyEdges
-    );
+    const validation = validateDAG(tasks, plan.dependencyEdges);
 
     if (!validation.valid) {
+      await recordPlannerTrace({
+        ...trace,
+        response,
+        outcome: 'invalid',
+        errors: validation.errors.map(e => e.message),
+        warnings: validation.warnings.map(w => w.message),
+        taskCount: tasks.length,
+      });
       throw new Error(
         `Generated plan has validation errors: ${validation.errors.map(e => e.message).join('; ')}`
       );
@@ -251,7 +335,40 @@ export class PlanRefinementService {
     // Compute score
     const score = this.scorePlan(plan);
 
+    await recordPlannerTrace({
+      ...trace,
+      response,
+      outcome: 'valid',
+      warnings: validation.warnings.map(w => w.message),
+      taskCount: tasks.length,
+      score,
+    });
+
     return { plan, score, tokensUsed };
+  }
+
+  /** What every trace of a call carries, before the call has an answer. */
+  private traceBase(
+    kind: PlannerTraceRecord['kind'],
+    templateName: string,
+    itemId: string,
+    repo: string,
+    prompt: string,
+    constructorConfig: PromptConstructorConfig
+  ): Omit<PlannerTraceRecord, 'outcome'> {
+    const template = this.promptConstructor.templateInfo(templateName);
+    return {
+      runId: this.runId,
+      step: this.step++,
+      kind,
+      itemId,
+      repo,
+      template: template.name,
+      templateVersion: template.version,
+      modelRequested: this.aiClient.modelRequested,
+      prompt,
+      constraints: constructorConfig.customConstraints,
+    };
   }
 
   /**
@@ -275,23 +392,41 @@ export class PlanRefinementService {
       repo,
       constructorConfig,
       currentPlan.rawMarkdown,
-      currentScore
+      currentScore,
+      this.config.minParallelizationScore
     );
 
+    const trace = {
+      ...this.traceBase('refine', 'refinement', itemId, repo, prompt, constructorConfig),
+      basedOn: { rawMarkdown: currentPlan.rawMarkdown, score: currentScore },
+    };
+
     // Generate refined plan via AI
-    const response = await this.aiClient.generateWithRetry(prompt);
+    let response: GenerationResult;
+    try {
+      response = await this.aiClient.generateWithRetry(prompt);
+    } catch (error) {
+      await recordPlannerTrace({ ...trace, ...answeredBeforeFailing(error), outcome: 'error', errors: [messageOf(error)] });
+      throw error;
+    }
     const tokensUsed = response.tokensInput + response.tokensOutput;
 
     // Parse response
     const plan = parseWavePlanResponse(response.content);
+    const tasks = plan.waves.flatMap(w => w.tasks);
 
     // Validate DAG
-    const validation = validateDAG(
-      plan.waves.flatMap(w => w.tasks),
-      plan.dependencyEdges
-    );
+    const validation = validateDAG(tasks, plan.dependencyEdges);
 
     if (!validation.valid) {
+      await recordPlannerTrace({
+        ...trace,
+        response,
+        outcome: 'invalid',
+        errors: validation.errors.map(e => e.message),
+        warnings: validation.warnings.map(w => w.message),
+        taskCount: tasks.length,
+      });
       // Refinement is an *optimisation pass*, not a correctness gate: we already
       // hold a validated plan. Throwing here discarded that good plan and failed
       // the entire conductor run — the caller never got the chance to keep what
@@ -313,6 +448,15 @@ export class PlanRefinementService {
 
     // Compute score
     const score = this.scorePlan(plan);
+
+    await recordPlannerTrace({
+      ...trace,
+      response,
+      outcome: 'valid',
+      warnings: validation.warnings.map(w => w.message),
+      taskCount: tasks.length,
+      score,
+    });
 
     return { plan, score, tokensUsed };
   }
@@ -416,4 +560,17 @@ export function createPlanRefinementService(
   refinementConfig?: Partial<PlanRefinementConfig>
 ): PlanRefinementService {
   return new PlanRefinementService(aiClientConfig, refinementConfig);
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * What the model sent before the call was counted as failed — a response cut
+ * off at the token ceiling. Recorded with the failure, so the record says what
+ * the attempt cost and why it ended.
+ */
+function answeredBeforeFailing(error: unknown): { response?: GenerationResult } {
+  return error instanceof PlannerTruncatedError ? { response: error.generation } : {};
 }

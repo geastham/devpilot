@@ -90,23 +90,33 @@ export async function collectFinalMetrics(wavePlanId: string): Promise<void> {
 
   const wavesExecutedCount = completedWaves.length;
 
-  // Insert metrics. `wave_plan_id` is UNIQUE, and a duplicate must be a no-op
-  // rather than a constraint error surfacing from a plan's completion.
+  // Write the run's figures onto the plan's metrics row.
+  //
+  // `wave_plan_id` is UNIQUE and `persistWavePlan` writes a row of zeros for
+  // every plan when it is created. This used to be an insert that did nothing
+  // on a conflict — so for every plan made by the generator the conflict was
+  // certain, nothing was written, and the row said "0 tasks completed, no
+  // wall-clock time" for ever, about runs that had finished. The only test of
+  // it seeded a plan with no initial row.
+  //
+  // An upsert. `fileConflictsAvoided` is left out of the update on purpose:
+  // it is counted when the plan is assigned, and a run's ending has no better
+  // figure to replace it with.
+  const measured = {
+    totalWallClockMs,
+    theoreticalMinMs,
+    parallelizationEfficiency,
+    wavesExecuted: wavesExecutedCount,
+    tasksCompleted,
+    tasksFailed,
+    tasksRetried,
+    avgTaskDurationMs,
+    maxWaveWaitMs: null, // TODO: Calculate from wave timings
+    reOptimizationCount: wavePlan.version - 1,
+    recordedAt: new Date(),
+  };
   await (db as any)
     .insert(wavePlanMetrics)
-    .values({
-      wavePlanId,
-      totalWallClockMs,
-      theoreticalMinMs,
-      parallelizationEfficiency,
-      wavesExecuted: wavesExecutedCount,
-      tasksCompleted,
-      tasksFailed,
-      tasksRetried,
-      avgTaskDurationMs,
-      maxWaveWaitMs: null, // TODO: Calculate from wave timings
-      fileConflictsAvoided: 0, // TODO: Track during execution
-      reOptimizationCount: wavePlan.version - 1,
-    })
-    .onConflictDoNothing({ target: wavePlanMetrics.wavePlanId });
+    .values({ wavePlanId, ...measured, fileConflictsAvoided: 0 })
+    .onConflictDoUpdate({ target: wavePlanMetrics.wavePlanId, set: measured });
 }

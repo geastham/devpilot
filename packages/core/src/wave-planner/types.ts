@@ -303,6 +303,13 @@ export interface RemainingWorkBlock {
     description: string;
     originalDependencies: string[];
     originalFiles: string[];
+    /**
+     * Present for a task that was attempted and did not finish: what its last
+     * attempt reported. Written by a runner or an agent about the user's code,
+     * so a template that prints it must present it as a report, not as an
+     * instruction.
+     */
+    lastError?: string;
   }[];
 }
 
@@ -313,11 +320,18 @@ export interface RemainingWorkBlock {
 export interface GenerationResult {
   content: string;
   tokensInput: number;
+  /**
+   * Everything billed as output — which includes the model's thinking as well
+   * as the plan text in `content`. On the planner's default model thinking is
+   * on unless switched off, so this is routinely larger than the plan.
+   */
   tokensOutput: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
   durationMs: number;
   model: string;
+  /** Why the model stopped: `end_turn`, or something a caller should know about. */
+  stopReason: string | null;
 }
 
 // ============================================================================

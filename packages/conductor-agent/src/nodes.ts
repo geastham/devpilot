@@ -26,6 +26,22 @@ export function waveCount(state: ConductorStateType): number {
   return state.totalWaves ?? state.plan?.waves.length ?? 0;
 }
 
+/** How many tasks the plan in hand has. */
+export function taskCount(state: ConductorStateType): number {
+  return state.plan?.waves.reduce((n, wave) => n + wave.tasks.length, 0) ?? 0;
+}
+
+/**
+ * Whether the plan is below the parallelization threshold AND large enough
+ * for the threshold to mean something. The one place this is decided: the
+ * branch after planning and the `belowThreshold` a reviewer is shown must
+ * agree, or a one-task plan is waved through and then presented as deficient.
+ */
+export function belowThreshold(state: ConductorStateType, config: ConductorConfig): boolean {
+  if (taskCount(state) < config.minTasksForRefinement) return false;
+  return (state.score?.parallelizationScore ?? 0) < config.minParallelizationScore;
+}
+
 function usableWaveCount(value: unknown): number | null {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
 }
@@ -112,8 +128,7 @@ export function makeNodes(ports: ConductorPorts, config: ConductorConfig) {
       plan: state.plan!,
       score: state.score!,
       refinementIterations: state.refinementIterations,
-      belowThreshold:
-        (state.score?.parallelizationScore ?? 0) < config.minParallelizationScore,
+      belowThreshold: belowThreshold(state, config),
     };
 
     const decision = interrupt<ReviewRequest, ReviewDecision>(request);

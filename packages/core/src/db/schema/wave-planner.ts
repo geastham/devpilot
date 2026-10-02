@@ -305,6 +305,111 @@ export const wavePlanMetricsRelations = relations(wavePlanMetrics, ({ one }) => 
 }));
 
 // ============================================================================
+// Planner Traces
+// ============================================================================
+
+/**
+ * One call to the planning model: what it was asked, what it answered, and
+ * what was made of the answer.
+ *
+ * `wave_plans` keeps the plan that was chosen and nothing about how it came to
+ * be. The prompt that produced it, the plans that were tried and discarded on
+ * the way, the model, what it cost, why a response was rejected — all of it
+ * was computed, used once and dropped. That is the record a planner is
+ * improved from: a plan cannot be compared with its outcome if nobody kept
+ * what the planner had been told.
+ *
+ * One row per call, written whether the call produced a valid plan, an invalid
+ * one, or failed outright. The row is joined to what happened next through
+ * `wavePlanId`, which is set when a plan is persisted for the item — and from
+ * there to `wave_tasks`, where each task's ending already is.
+ *
+ * LOCAL. The prompt holds the specification, the repository's file tree and
+ * whatever memory was recalled; the response is the plan. These are the
+ * user's, about the user's code, and nothing sends this table anywhere. It is
+ * off when `DEVPILOT_PLANNER_TRACE=0`.
+ */
+export const plannerTraces = sqliteTable('planner_traces', {
+  id: text('id').primaryKey().$defaultFn(() => createId()),
+  /** The steps of one planning run share this: an initial plan and its refinements. */
+  runId: text('run_id').notNull(),
+  /** 0 for the run's first call, counting up. */
+  step: integer('step').notNull(),
+  /** `initial`, `refine`, or `reoptimize` (an initial plan made mid-run, with work already done). */
+  kind: text('kind').notNull(),
+  itemId: text('item_id').notNull(),
+  repo: text('repo').notNull(),
+  /**
+   * The plan this call led to. NULL until a plan is persisted for the item;
+   * then every call since the previous persisted plan carries its id, and
+   * `chosen` says which one's response it was.
+   */
+  wavePlanId: text('wave_plan_id'),
+  chosen: integer('chosen', { mode: 'boolean' }).notNull().default(false),
+  template: text('template').notNull(),
+  templateVersion: text('template_version').notNull(),
+  /** The model asked for, and the one that answered (an alias resolves to a dated id). */
+  modelRequested: text('model_requested').notNull(),
+  model: text('model'),
+  prompt: text('prompt').notNull(),
+  promptSha: text('prompt_sha').notNull(),
+  /** NULL when the call failed before an answer. */
+  response: text('response'),
+  responseSha: text('response_sha'),
+  /** For a refinement: the hash of the plan it was asked to improve. */
+  basedOnSha: text('based_on_sha'),
+  stopReason: text('stop_reason'),
+  tokensInput: integer('tokens_input'),
+  /** Includes the model's thinking, which is billed as output and is not in `response`. */
+  tokensOutput: integer('tokens_output'),
+  cacheReadTokens: integer('cache_read_tokens'),
+  cacheWriteTokens: integer('cache_write_tokens'),
+  durationMs: integer('duration_ms'),
+  /** `valid` (parsed and passed validation), `invalid` (answered, rejected), `error` (no answer). */
+  outcome: text('outcome').notNull(),
+  /** Validation errors, or the error message. */
+  errors: text('errors', { mode: 'json' }).$type<string[]>(),
+  warnings: text('warnings', { mode: 'json' }).$type<string[]>(),
+  taskCount: integer('task_count'),
+  /** The score the refinement gate read, and the rest of what the scorer said. */
+  score: real('score'),
+  scoreDetail: text('score_detail', { mode: 'json' }).$type<Record<string, unknown>>(),
+  /** For a refinement: the score it had to beat, and whether it did. */
+  previousScore: real('previous_score'),
+  improved: integer('improved', { mode: 'boolean' }),
+  /** The constraints the prompt carried — a reviewer's, when they asked for changes. */
+  constraints: text('constraints', { mode: 'json' }).$type<string[]>(),
+  createdAt: integer('created_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+/**
+ * What a person decided about a plan they were shown.
+ *
+ * The one judgement of a plan made BEFORE it runs, by someone who knows the
+ * codebase: approved as it stood, sent back with constraints, or abandoned. A
+ * plan sent back says what was wrong with it in the reviewer's own words —
+ * which no outcome measured afterwards can.
+ */
+export const plannerReviews = sqliteTable('planner_reviews', {
+  id: text('id').primaryKey().$defaultFn(() => createId()),
+  itemId: text('item_id').notNull(),
+  /** The hash of the plan that was on screen. Matches `planner_traces.response_sha`. */
+  planSha: text('plan_sha'),
+  wavePlanId: text('wave_plan_id'),
+  /** `approve`, `refine`, or `abort`. */
+  action: text('action').notNull(),
+  constraints: text('constraints', { mode: 'json' }).$type<string[]>(),
+  reason: text('reason'),
+  /** The score the reviewer was shown. */
+  score: real('score'),
+  createdAt: integer('created_at', { mode: 'timestamp' })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// ============================================================================
 // Type Exports
 // ============================================================================
 
@@ -322,3 +427,9 @@ export type NewDependencyEdge = typeof dependencyEdges.$inferInsert;
 
 export type WavePlanMetric = typeof wavePlanMetrics.$inferSelect;
 export type NewWavePlanMetric = typeof wavePlanMetrics.$inferInsert;
+
+export type PlannerTrace = typeof plannerTraces.$inferSelect;
+export type NewPlannerTrace = typeof plannerTraces.$inferInsert;
+
+export type PlannerReview = typeof plannerReviews.$inferSelect;
+export type NewPlannerReview = typeof plannerReviews.$inferInsert;

@@ -1,7 +1,7 @@
-import { aI as ParsedTask, aJ as DAGNode, aK as TopologicalSortResult, aL as ParsedWavePlan, aM as ParsedEdge, aN as ValidationResult, aO as CriticalPathResult, aP as WaveAssignmentResult, aQ as PlanScore, aR as GenerationResult, aS as FleetContextBlock, aT as CodebaseContextBlock, aU as PromptContext, aV as PlanCodeGraph, aW as WaveAssignerConfig, aX as WaveSSEEvent, D as Database, aY as ActiveTaskInfo, F as WaveTask, aZ as PredecessorSummary, a_ as WaveDispatchRequest, a$ as AssignedWave, b0 as BLAST_RADIUS_LISTED, b1 as BlastRadiusLine, b2 as CodeGraphReview, b3 as CompletedWorkBlock, b4 as ConfidenceSignalUpdate, b5 as ConstraintBlock, b6 as CriticalPathAnnotation, b7 as DependentClaim, b8 as GraphDependentsSource, b9 as MAX_DEPENDENT_CLAIMS_PER_TASK, ba as MemoryContextBlock, bb as OptimizationResult, bc as ParsedStatistics, bd as ParsedWave, be as RemainingWorkBlock, bf as SelectedDependentClaims, bg as SequencedLine, bh as TaskBlastRadius, bi as ValidationError, bj as ValidationErrorCode, bk as ValidationWarning, bl as ValidationWarningCode, bm as WaveAdjustment, bn as WavePlanExecutionState, bo as WavePlannerConfig, bp as assignWaves, bq as blastRadiusOf, br as codeGraphOf, bs as dependentClaimsOf, bt as describeCodeGraph, bu as isPlanCodeGraph, bv as readPlanCodeGraph, bw as selectDependentClaims, bx as withCodeGraph } from './index-a-xL_x66.js';
-import { E as EventType } from './enums-CbVZMWqb.js';
+import { aO as ParsedTask, aP as DAGNode, aQ as TopologicalSortResult, aR as ParsedWavePlan, aS as ParsedEdge, aT as ValidationResult, aU as CriticalPathResult, aV as WaveAssignmentResult, aW as PlanScore, aX as GenerationResult, aY as FleetContextBlock, aZ as CodebaseContextBlock, a_ as PromptContext, a$ as CompletedWorkBlock, b0 as RemainingWorkBlock, b1 as PlanCodeGraph, b2 as WaveAssignerConfig, b3 as WaveSSEEvent, D as Database, b4 as ActiveTaskInfo, L as WaveTask, b5 as PredecessorSummary, b6 as WaveDispatchRequest, b7 as AssignedWave, b8 as BLAST_RADIUS_LISTED, b9 as BlastRadiusLine, ba as CodeGraphReview, bb as ConfidenceSignalUpdate, bc as ConstraintBlock, bd as CriticalPathAnnotation, be as DependentClaim, bf as GraphDependentsSource, bg as MAX_DEPENDENT_CLAIMS_PER_TASK, bh as MemoryContextBlock, bi as OptimizationResult, bj as ParsedStatistics, bk as ParsedWave, bl as SelectedDependentClaims, bm as SequencedLine, bn as TaskBlastRadius, bo as ValidationError, bp as ValidationErrorCode, bq as ValidationWarning, br as ValidationWarningCode, bs as WaveAdjustment, bt as WavePlanExecutionState, bu as WavePlannerConfig, bv as assignWaves, bw as blastRadiusOf, bx as codeGraphOf, by as dependentClaimsOf, bz as describeCodeGraph, bA as isPlanCodeGraph, bB as readPlanCodeGraph, bC as selectDependentClaims, bD as withCodeGraph } from './index-CdxAc_j3.mjs';
+import { E as EventType } from './enums-CbVZMWqb.mjs';
 import { SQL } from 'drizzle-orm';
-import { b as OrchestratorService, h as OrchestratorEvent } from './service-BbWARg0h.js';
+import { b as OrchestratorService, h as OrchestratorEvent } from './service-D5M864nu.mjs';
 
 /**
  * Topological sort using Kahn's algorithm.
@@ -183,6 +183,24 @@ declare const DEFAULT_WIKI_MODEL = "claude-sonnet-5";
  */
 declare function resolvePlannerModel(explicit?: string): string;
 /**
+ * The planner's output ceiling: 16,000 tokens.
+ *
+ * It was 8,192, written in three places. The ceiling is not the plan's alone:
+ * it covers the model's thinking too, and on the default planner model
+ * thinking is on unless a request switches it off — which no request here
+ * does. So a plan had whatever of 8,192 the thinking left, and a plan that ran
+ * out was refused as truncated (correctly — see `ai-client.ts`) and the run
+ * fell back to a flat list.
+ *
+ * 16,000 is headroom, not spend: output is billed as generated. It is also
+ * under the size at which the SDK refuses a non-streaming request (above
+ * 21,333 tokens it requires streaming), so this needs no change to how the
+ * call is made.
+ */
+declare const DEFAULT_PLANNER_MAX_TOKENS = 16000;
+/** Resolve the ceiling: explicit argument → `WAVE_PLANNER_MAX_TOKENS` → default. */
+declare function resolvePlannerMaxTokens(explicit?: number, env?: NodeJS.ProcessEnv): number;
+/**
  * Resolve the wiki model: explicit argument → env override → default.
  */
 declare function resolveWikiModel(explicit?: string): string;
@@ -194,9 +212,26 @@ interface AIClientConfig {
     maxTokens: number;
     timeout?: number;
 }
+/**
+ * The model answered, and the answer was cut off at the token ceiling.
+ *
+ * Its own type for two reasons. It carries what was received, so the record of
+ * the call can say how many tokens were spent and that this is why it failed —
+ * a truncated plan used to be indistinguishable, afterwards, from a network
+ * error. And it is not retried: the same prompt against the same ceiling is
+ * cut off in the same place, and it was being sent four times, with backoff,
+ * before the failure was reported.
+ */
+declare class PlannerTruncatedError extends Error {
+    readonly generation: GenerationResult;
+    readonly retryable = false;
+    constructor(message: string, generation: GenerationResult);
+}
 declare class WavePlannerAIClient {
     private client;
     private config;
+    /** The model this client asks for — which may be an alias the API resolves. */
+    get modelRequested(): string;
     constructor(config: AIClientConfig);
     /**
      * Generate a wave plan by calling Claude API
@@ -322,9 +357,10 @@ interface RefinementPromptTemplate extends PromptTemplate {
      * @param context - Base prompt context
      * @param currentPlan - The existing plan to improve (markdown format)
      * @param currentScore - Quality score of the current plan (0-1)
+     * @param targetScore - The threshold the plan is being held to (0-1), when the caller knows it
      * @returns Formatted refinement prompt
      */
-    renderRefinement(context: PromptContext, currentPlan: string, currentScore: number): string;
+    renderRefinement(context: PromptContext, currentPlan: string, currentScore: number, targetScore?: number): string;
 }
 
 /** Memory tier for the L0-L3 loading stack. */
@@ -784,6 +820,17 @@ interface PromptConstructorConfig {
      * Token budget for MemPalace context block. Defaults to 2000.
      */
     memPalaceMaxTokens?: number;
+    /**
+     * For a plan made mid-run: what has already been done, and what is left.
+     *
+     * The templates have always been able to render these (`renderWorkContext`),
+     * and `PromptContext` has always had the fields. Nothing set them: a
+     * re-plan told the model "N tasks are already complete" as a sentence and
+     * gave it none of them, so it planned the whole specification again without
+     * knowing which files had changed or what had failed.
+     */
+    completedWork?: CompletedWorkBlock;
+    remainingWork?: RemainingWorkBlock;
 }
 /**
  * PromptConstructor assembles complete prompt context from various services
@@ -820,6 +867,15 @@ declare class PromptConstructor {
      */
     assembleContext(specContent: string, itemTitle: string, itemId: string, repo: string, config: PromptConstructorConfig): Promise<PromptContext>;
     /**
+     * A template's name and version, for the record of a planner call. A prompt
+     * is only comparable with another made from the same template at the same
+     * version; without this a trace would say what was sent and not what wrote it.
+     */
+    templateInfo(name: string): {
+        name: string;
+        version: string;
+    };
+    /**
      * Assemble MemoryContextBlock. Currently produces only the palace
      * portion; the legacy `relevantSessions` list is left empty for
      * callers that don't supply one (the wave planner then only renders
@@ -853,7 +909,7 @@ declare class PromptConstructor {
      * @param currentScore - Current parallelization score (0-1)
      * @returns Rendered refinement prompt
      */
-    constructRefinementPrompt(specContent: string, itemTitle: string, itemId: string, repo: string, config: PromptConstructorConfig, currentPlan: string, currentScore: number): Promise<string>;
+    constructRefinementPrompt(specContent: string, itemTitle: string, itemId: string, repo: string, config: PromptConstructorConfig, currentPlan: string, currentScore: number, targetScore?: number): Promise<string>;
     /**
      * Construct a reoptimization prompt for mid-execution replanning.
      *
@@ -904,6 +960,40 @@ interface PlanRefinementConfig {
     /** Maximum tasks per wave for capacity constraints */
     maxTasksPerWave?: number;
 }
+/**
+ * The refinement gate's threshold, for every path that plans.
+ *
+ * There were two. The route that generates a plan directly read
+ * `WAVE_PLANNER_MIN_PARALLELIZATION` and defaulted to 0.3; the conductor graph
+ * — the path every ticket from the bridge takes — had its own default of 0.7
+ * and read no setting at all. So the same specification was held to "the
+ * critical path is at most 70% of the tasks" on one path and "at most 30%" on
+ * the other, and on the stricter one a plan of ten tasks in four waves (0.6)
+ * was sent back twice to be cut smaller.
+ *
+ * One function, read by both. 0.3 is the looser of the two and is kept as the
+ * default because the gate's number is a ratio of counts, not a measurement
+ * of plans that went well — see `parallelizationGateApplies`. Until there is
+ * such a measurement the gate should spend as few model calls as it can.
+ */
+declare const DEFAULT_MIN_PARALLELIZATION_SCORE = 0.3;
+declare function resolveMinParallelizationScore(explicit?: number, env?: NodeJS.ProcessEnv): number;
+/**
+ * Plans smaller than this are not held to the parallelization gate.
+ *
+ * The score is `1 - criticalPath / tasks`. For a plan of one task that is 0;
+ * for two or three tasks in sequence it is 0. None of those is a bad plan — a
+ * specification that is one change is one task — but each was below any
+ * threshold, so each was sent back to a prompt whose advice is to break work
+ * into smaller pieces, up to the iteration limit, and a refinement was kept
+ * whenever it scored higher, which splitting always does. The gate was
+ * manufacturing tasks out of work that did not have them.
+ *
+ * With fewer than four tasks there is not enough plan for the ratio to say
+ * anything, so the gate is not asked.
+ */
+declare const MIN_TASKS_FOR_PARALLELIZATION_GATE = 4;
+declare function parallelizationGateApplies(taskCount: number): boolean;
 interface RefinementResult {
     /** Final optimized plan */
     plan: ParsedWavePlan;
@@ -944,6 +1034,14 @@ declare class PlanRefinementService {
      * per iteration and report an unchanged score with no reason given.
      */
     lastRefinementError?: string;
+    /**
+     * The planning run a call belongs to, for its trace: an initial plan starts
+     * one and its refinements continue it. A service built fresh after a restart
+     * starts a new run for a refinement; the trace's `basedOnSha` still says
+     * which plan it was refining.
+     */
+    private runId;
+    private step;
     constructor(aiClientConfig: AIClientConfig, refinementConfig?: Partial<PlanRefinementConfig>);
     /**
      * Generate and refine a wave plan until quality threshold is met.
@@ -970,6 +1068,8 @@ declare class PlanRefinementService {
         score: PlanScore;
         tokensUsed: number;
     }>;
+    /** What every trace of a call carries, before the call has an answer. */
+    private traceBase;
     /**
      * Refine an existing plan to improve parallelization.
      */
@@ -1111,6 +1211,337 @@ declare function createWavePlanGenerator(config: WavePlanGeneratorConfig): WaveP
  * Convenience function for simple use cases.
  */
 declare function generateWavePlan(horizonItemId: string, planId: string, specContent: string, itemTitle: string, repo: string, workingDir: string, apiKey: string): Promise<WavePlanGenerationResult>;
+
+/**
+ * The planner's record of itself: every call to the planning model, and every
+ * decision a person made about a plan.
+ *
+ * A plan is the most leveraged thing DevPilot produces — one model call that
+ * then governs a fleet of sessions — and until this file the only thing kept
+ * of that call was the answer that was chosen. Not what the model had been
+ * told, not the plans tried and discarded on the way, not what a reviewer
+ * sent back or why. A planner cannot be improved from that: there is nothing
+ * to hold a plan's outcome against.
+ *
+ * So each call writes a row (`planner_traces`), each review writes a row
+ * (`planner_reviews`), and when a plan is persisted every row that led to it
+ * is given its id. From there the outcome is already recorded, task by task,
+ * in `wave_tasks`. `planner-corpus.ts` joins the two.
+ *
+ * ## Three rules
+ *
+ * NEVER IN THE WAY. Every function here catches everything. A record that can
+ * fail a planning run is worse than no record, and a database that is locked
+ * or missing a table must cost a plan nothing.
+ *
+ * LOCAL. A prompt holds the specification, the repository's file tree and any
+ * memory that was recalled; a response is the plan. They are written to the
+ * cockpit's own database, on the machine the cockpit runs on, and nothing in
+ * DevPilot sends them anywhere. Whether any of it should ever leave is a
+ * decision for the person whose code it is, and is not made here.
+ *
+ * OFF IS OFF. `DEVPILOT_PLANNER_TRACE=0` records nothing.
+ */
+
+type PlannerTraceKind = 'initial' | 'refine' | 'reoptimize';
+type PlannerTraceOutcome = 'valid' | 'invalid' | 'error';
+interface PlannerTraceRecord {
+    runId: string;
+    step: number;
+    kind: PlannerTraceKind;
+    itemId: string;
+    repo: string;
+    template: string;
+    templateVersion: string;
+    modelRequested: string;
+    prompt: string;
+    constraints?: string[];
+    /** What the model answered, when it did. */
+    response?: {
+        content: string;
+        model: string;
+        stopReason: string | null;
+        tokensInput: number;
+        tokensOutput: number;
+        cacheReadTokens: number;
+        cacheWriteTokens: number;
+        durationMs: number;
+    };
+    /** For a refinement: the plan it was asked to improve, and the score to beat. */
+    basedOn?: {
+        rawMarkdown: string;
+        score: number;
+    };
+    outcome: PlannerTraceOutcome;
+    errors?: string[];
+    warnings?: string[];
+    taskCount?: number;
+    score?: PlanScore;
+}
+interface PlanReviewRecord {
+    itemId: string;
+    /** The plan that was on screen, as the planner wrote it. */
+    rawMarkdown?: string | null;
+    action: 'approve' | 'refine' | 'abort';
+    constraints?: string[];
+    reason?: string;
+    score?: number | null;
+}
+/** False when `DEVPILOT_PLANNER_TRACE` says no. On by default. */
+declare function plannerTraceEnabled(env?: NodeJS.ProcessEnv): boolean;
+/** A plan's identity: the hash of its text exactly as the model wrote it. */
+declare function planSha(text: string): string;
+declare function newPlannerRunId(): string;
+/** Record one call to the planning model. Never throws. */
+declare function recordPlannerTrace(record: PlannerTraceRecord): Promise<void>;
+/** Record what a person decided about a plan they were shown. Never throws. */
+declare function recordPlanReview(review: PlanReviewRecord): Promise<void>;
+/**
+ * A plan has been persisted for the item: give its id to everything that led
+ * to it.
+ *
+ * "Everything that led to it" is every call and every review for the item not
+ * already claimed by an earlier plan — the initial attempt, the refinements
+ * that were kept and the ones that were not, the review that sent it back.
+ * The one call whose answer IS this plan is marked `chosen`, matched on the
+ * hash of the text; a fallback plan, which no model wrote, has none.
+ *
+ * Never throws.
+ */
+declare function linkTracesToPlan(itemId: string, rawMarkdown: string | null | undefined, wavePlanId: string): Promise<void>;
+/** For tests: forget that a warning was printed. */
+declare function resetPlannerTraceWarning(): void;
+
+/**
+ * A planning episode: what the planner was told, what it answered, what a
+ * person said about it, and how the plan turned out.
+ *
+ * `trace.ts` writes the first three as they happen. The fourth was already
+ * being recorded, task by task, by the execution side — status, attempts,
+ * errors, the files each task really changed, when it merged, what its session
+ * cost. This file is the join, and the handful of figures that turn a finished
+ * run into something a plan can be judged by.
+ *
+ * It is the half that decides what counts, on plain rows: no database, no
+ * clock. The loader that fills the rows is column mappings.
+ *
+ * ## What an outcome is, and is not
+ *
+ * Everything here is about how the plan RAN: did its tasks finish, first time,
+ * without colliding, on the files it said they would touch. Nothing here knows
+ * whether the code was right. A plan whose every task finished cleanly and
+ * built the wrong thing scores perfectly, and a reader must not take these
+ * figures for a measure of quality. They are the part of quality a planner is
+ * directly responsible for.
+ *
+ * ## Local
+ *
+ * An episode holds a specification, a file tree, a plan and what agents said
+ * they did. `redactEpisode` produces the same episode with every piece of text
+ * and every path removed, leaving shape and figures.
+ */
+declare const PLANNER_EPISODE_SCHEMA = "devpilot.planner-episode/1";
+interface EpisodeCall {
+    step: number;
+    kind: string;
+    at: string;
+    template: string;
+    templateVersion: string;
+    modelRequested: string;
+    model: string | null;
+    prompt: string | null;
+    response: string | null;
+    /** `valid`, `invalid` or `error`. */
+    outcome: string;
+    errors: string[];
+    warnings: string[];
+    taskCount: number | null;
+    score: number | null;
+    previousScore: number | null;
+    /** For a refinement: whether it scored above the plan it was given. */
+    improved: boolean | null;
+    /** Whether this call's answer is the plan that was persisted. */
+    chosen: boolean;
+    stopReason: string | null;
+    tokensInput: number | null;
+    tokensOutput: number | null;
+    cacheReadTokens: number | null;
+    cacheWriteTokens: number | null;
+    durationMs: number | null;
+    constraints: string[];
+}
+interface EpisodeReview {
+    at: string;
+    action: string;
+    constraints: string[];
+    reason: string | null;
+    score: number | null;
+}
+interface EpisodeTask {
+    taskCode: string;
+    waveIndex: number;
+    description: string | null;
+    /** The files the plan said the task would touch. */
+    filePaths: string[];
+    dependencies: string[];
+    complexity: string | null;
+    recommendedModel: string | null;
+    status: string;
+    attempts: number;
+    error: string | null;
+    summary: string | null;
+    /** The files the task's latest attempt changed. Null is "not recorded", not "none". */
+    filesChanged: string[] | null;
+    startedAt: number | null;
+    completedAt: number | null;
+    merged: boolean;
+    /** The latest attempt's session, when it ended and reported. */
+    costUsd: number | null;
+    tokens: number | null;
+}
+interface EpisodePlan {
+    wavePlanId: string;
+    status: string;
+    failureReason: string | null;
+    version: number;
+    totalWaves: number;
+    totalTasks: number;
+    criticalPathLength: number;
+    parallelizationScore: number;
+    isolated: boolean | null;
+    /** How many tasks the assigner moved, by reason. Null when it was not recorded. */
+    adjustments: Record<string, number> | null;
+    codeGraphUsed: boolean | null;
+    createdAt: number;
+    startedAt: number | null;
+    completedAt: number | null;
+    tasks: EpisodeTask[];
+}
+interface PlanOutcome {
+    /** How the run ended: `completed`, `failed`, `running`, or `not-run` (never dispatched). */
+    ended: 'completed' | 'failed' | 'running' | 'not-run';
+    tasks: {
+        total: number;
+        /** Tasks that were dispatched at least once. */
+        dispatched: number;
+        completed: number;
+        failed: number;
+        skipped: number;
+        /** Needed more than one attempt, however they ended. */
+        retried: number;
+        /** Ended on a branch that would not merge into the run branch. */
+        conflicted: number;
+    };
+    /**
+     * Of the tasks that were dispatched and have ended, the share that completed
+     * on their first attempt. Null when none has ended.
+     */
+    firstAttemptPassRate: number | null;
+    /**
+     * How well the plan predicted which files each task would touch — the
+     * prediction every conflict check rests on. Over tasks whose changes were
+     * recorded:
+     *
+     *   precision  of the files the plan named, the share that were changed
+     *   recall     of the files that were changed, the share the plan named
+     *
+     * Null when no task recorded its changes.
+     */
+    files: {
+        tasksMeasured: number;
+        planned: number;
+        changed: number;
+        both: number;
+        precision: number | null;
+        recall: number | null;
+    } | null;
+    /**
+     * Pairs of tasks that ran in the same wave and changed the same file — the
+     * collision the wave layout exists to prevent, counted from what was
+     * actually changed rather than what was planned.
+     */
+    sameWaveCollisions: number;
+    /** First dispatch to last ending. Null until the run has both. */
+    wallClockMs: number | null;
+    /** Added over the tasks whose session reported one. Latest attempt only. */
+    costUsd: number | null;
+    tokens: number | null;
+}
+interface PlannerEpisode {
+    schema: typeof PLANNER_EPISODE_SCHEMA;
+    itemId: string;
+    repo: string | null;
+    calls: EpisodeCall[];
+    reviews: EpisodeReview[];
+    /** Null when no plan was persisted: the run was abandoned at review, or every call failed. */
+    plan: EpisodePlan | null;
+    outcome: PlanOutcome | null;
+}
+/** The figures a finished — or unfinished — run is judged by. */
+declare function planOutcome(plan: EpisodePlan): PlanOutcome;
+/**
+ * Group calls, reviews and plans into episodes.
+ *
+ * One episode per persisted plan, holding the calls and reviews that carry its
+ * id. Calls and reviews that never led to a plan — a run abandoned at review,
+ * or one where every call failed — are one episode per item, with no plan. A
+ * plan with no recorded calls (made before calls were recorded) is still an
+ * episode: its outcome is real, and it is what calibration is drawn from.
+ *
+ * Newest first, by the plan's creation or the first call.
+ */
+declare function buildEpisodes(input: {
+    calls: (EpisodeCall & {
+        itemId: string;
+        repo: string;
+        wavePlanId: string | null;
+    })[];
+    reviews: (EpisodeReview & {
+        itemId: string;
+        wavePlanId: string | null;
+    })[];
+    plans: (EpisodePlan & {
+        itemId: string;
+        repo: string | null;
+    })[];
+}): PlannerEpisode[];
+/**
+ * The same episode with every piece of text and every path taken out.
+ *
+ * What is left is shape and figures: how many calls, which template and model,
+ * token counts, scores, whether each call was valid, what the reviewer chose
+ * (not what they wrote), each task's wave, complexity, attempts and ending,
+ * how many files it named and changed, and the outcome. It is what could be
+ * compared across workspaces without any of them showing another its code.
+ *
+ * Counts replace lists. Nothing is hashed: a hash of a file path is a path to
+ * anyone who can guess the path.
+ */
+declare function redactEpisode(episode: PlannerEpisode): PlannerEpisode;
+interface CorpusSummary {
+    episodes: number;
+    withPlan: number;
+    /** Plans whose run has ended, one way or the other. */
+    ended: number;
+    calls: number;
+    /** Calls by how they ended. */
+    callOutcomes: Record<string, number>;
+    /** Refinement calls, and how many scored above the plan they were given. */
+    refinements: number;
+    refinementsImproved: number;
+    /** Calls that stopped at the token ceiling. */
+    truncated: number;
+    reviews: Record<string, number>;
+    tokensInput: number;
+    tokensOutput: number;
+    /** Over ended runs. */
+    firstAttemptPassRate: number | null;
+    filePrecision: number | null;
+    fileRecall: number | null;
+    sameWaveCollisions: number;
+}
+/** A corpus at a glance: how the planner is doing, on this machine's own runs. */
+declare function summarizeCorpus(episodes: readonly PlannerEpisode[]): CorpusSummary;
 
 interface ProjectedPlanIds {
     planId: string;
@@ -2767,11 +3198,14 @@ type index_ConcurrencyManager = ConcurrencyManager;
 declare const index_ConcurrencyManager: typeof ConcurrencyManager;
 declare const index_ConfidenceSignalUpdate: typeof ConfidenceSignalUpdate;
 declare const index_ConstraintBlock: typeof ConstraintBlock;
+type index_CorpusSummary = CorpusSummary;
 declare const index_CriticalPathAnnotation: typeof CriticalPathAnnotation;
 declare const index_CriticalPathResult: typeof CriticalPathResult;
 declare const index_DAGNode: typeof DAGNode;
 type index_DAGValidatorConfig = DAGValidatorConfig;
 declare const index_DEFAULT_HISTORY_LIMIT: typeof DEFAULT_HISTORY_LIMIT;
+declare const index_DEFAULT_MIN_PARALLELIZATION_SCORE: typeof DEFAULT_MIN_PARALLELIZATION_SCORE;
+declare const index_DEFAULT_PLANNER_MAX_TOKENS: typeof DEFAULT_PLANNER_MAX_TOKENS;
 declare const index_DEFAULT_PLANNER_MODEL: typeof DEFAULT_PLANNER_MODEL;
 declare const index_DEFAULT_RECONCILE_INTERVAL_MS: typeof DEFAULT_RECONCILE_INTERVAL_MS;
 declare const index_DEFAULT_RECONCILE_STALL_MS: typeof DEFAULT_RECONCILE_STALL_MS;
@@ -2783,6 +3217,10 @@ type index_DispatchError = DispatchError;
 type index_DispatchLimits = DispatchLimits;
 type index_DispatchResult = DispatchResult;
 type index_DrivenWave = DrivenWave;
+type index_EpisodeCall = EpisodeCall;
+type index_EpisodePlan = EpisodePlan;
+type index_EpisodeReview = EpisodeReview;
+type index_EpisodeTask = EpisodeTask;
 type index_ExecutionBridge = ExecutionBridge;
 declare const index_ExecutionBridge: typeof ExecutionBridge;
 type index_ExecutionBridgeOptions = ExecutionBridgeOptions;
@@ -2796,18 +3234,28 @@ declare const index_IN_FLIGHT_WAVE_TASK_STATUSES: typeof IN_FLIGHT_WAVE_TASK_STA
 declare const index_MAX_DEPENDENT_CLAIMS_PER_TASK: typeof MAX_DEPENDENT_CLAIMS_PER_TASK;
 declare const index_MAX_HISTORY_LIMIT: typeof MAX_HISTORY_LIMIT;
 declare const index_MAX_ITEM_DESCRIPTION_CHARS: typeof MAX_ITEM_DESCRIPTION_CHARS;
+declare const index_MIN_TASKS_FOR_PARALLELIZATION_GATE: typeof MIN_TASKS_FOR_PARALLELIZATION_GATE;
 declare const index_MemoryContextBlock: typeof MemoryContextBlock;
 declare const index_OptimizationResult: typeof OptimizationResult;
+declare const index_PLANNER_EPISODE_SCHEMA: typeof PLANNER_EPISODE_SCHEMA;
 declare const index_ParsedEdge: typeof ParsedEdge;
 declare const index_ParsedStatistics: typeof ParsedStatistics;
 declare const index_ParsedTask: typeof ParsedTask;
 declare const index_ParsedWave: typeof ParsedWave;
 declare const index_ParsedWavePlan: typeof ParsedWavePlan;
 declare const index_PlanCodeGraph: typeof PlanCodeGraph;
+type index_PlanOutcome = PlanOutcome;
 type index_PlanRefinementConfig = PlanRefinementConfig;
 type index_PlanRefinementService = PlanRefinementService;
 declare const index_PlanRefinementService: typeof PlanRefinementService;
+type index_PlanReviewRecord = PlanReviewRecord;
 declare const index_PlanScore: typeof PlanScore;
+type index_PlannerEpisode = PlannerEpisode;
+type index_PlannerTraceKind = PlannerTraceKind;
+type index_PlannerTraceOutcome = PlannerTraceOutcome;
+type index_PlannerTraceRecord = PlannerTraceRecord;
+type index_PlannerTruncatedError = PlannerTruncatedError;
+declare const index_PlannerTruncatedError: typeof PlannerTruncatedError;
 declare const index_PredecessorSummary: typeof PredecessorSummary;
 type index_ProjectedPlanIds = ProjectedPlanIds;
 type index_PromptConstructor = PromptConstructor;
@@ -2867,6 +3315,7 @@ type index_WorkHistoryRow = WorkHistoryRow;
 declare const index_assignWaves: typeof assignWaves;
 declare const index_blastRadiusOf: typeof blastRadiusOf;
 declare const index_buildDAGGraph: typeof buildDAGGraph;
+declare const index_buildEpisodes: typeof buildEpisodes;
 declare const index_buildSpecContentForItem: typeof buildSpecContentForItem;
 declare const index_codeGraphOf: typeof codeGraphOf;
 declare const index_collectFinalMetrics: typeof collectFinalMetrics;
@@ -2900,18 +3349,30 @@ declare const index_isPlanCodeGraph: typeof isPlanCodeGraph;
 declare const index_isTerminalWavePlanStatus: typeof isTerminalWavePlanStatus;
 declare const index_isTerminalWaveTaskStatus: typeof isTerminalWaveTaskStatus;
 declare const index_isWaveOver: typeof isWaveOver;
+declare const index_linkTracesToPlan: typeof linkTracesToPlan;
+declare const index_newPlannerRunId: typeof newPlannerRunId;
 declare const index_normalizeComplexity: typeof normalizeComplexity;
 declare const index_normalizeItemDescription: typeof normalizeItemDescription;
 declare const index_normalizeModel: typeof normalizeModel;
+declare const index_parallelizationGateApplies: typeof parallelizationGateApplies;
 declare const index_parseDependencies: typeof parseDependencies;
 declare const index_parseFilePaths: typeof parseFilePaths;
 declare const index_parseWavePlanResponse: typeof parseWavePlanResponse;
+declare const index_planOutcome: typeof planOutcome;
+declare const index_planSha: typeof planSha;
+declare const index_plannerTraceEnabled: typeof plannerTraceEnabled;
 declare const index_projectWavePlanToPlan: typeof projectWavePlanToPlan;
 declare const index_readPlanCodeGraph: typeof readPlanCodeGraph;
 declare const index_readWaveSignal: typeof readWaveSignal;
+declare const index_recordPlanReview: typeof recordPlanReview;
+declare const index_recordPlannerTrace: typeof recordPlannerTrace;
+declare const index_redactEpisode: typeof redactEpisode;
 declare const index_refinementTemplate: typeof refinementTemplate;
 declare const index_renderTicketDescription: typeof renderTicketDescription;
+declare const index_resetPlannerTraceWarning: typeof resetPlannerTraceWarning;
 declare const index_resolveItemDescription: typeof resolveItemDescription;
+declare const index_resolveMinParallelizationScore: typeof resolveMinParallelizationScore;
+declare const index_resolvePlannerMaxTokens: typeof resolvePlannerMaxTokens;
 declare const index_resolvePlannerModel: typeof resolvePlannerModel;
 declare const index_resolveWikiModel: typeof resolveWikiModel;
 declare const index_runIdFor: typeof runIdFor;
@@ -2919,6 +3380,7 @@ declare const index_scorePlan: typeof scorePlan;
 declare const index_selectDependentClaims: typeof selectDependentClaims;
 declare const index_simplifiedTemplate: typeof simplifiedTemplate;
 declare const index_sleep: typeof sleep;
+declare const index_summarizeCorpus: typeof summarizeCorpus;
 declare const index_toActivityEventType: typeof toActivityEventType;
 declare const index_topologicalSort: typeof topologicalSort;
 declare const index_validateDAG: typeof validateDAG;
@@ -2927,7 +3389,7 @@ declare const index_withCodeGraph: typeof withCodeGraph;
 declare const index_workFromReport: typeof workFromReport;
 declare const index_workHistoryForPaths: typeof workHistoryForPaths;
 declare namespace index {
-  export { type index_AIClientConfig as AIClientConfig, index_ActiveTaskInfo as ActiveTaskInfo, index_AssignedWave as AssignedWave, index_BLAST_RADIUS_LISTED as BLAST_RADIUS_LISTED, index_BlastRadiusLine as BlastRadiusLine, index_CodeGraphReview as CodeGraphReview, index_CodebaseContextBlock as CodebaseContextBlock, index_CodebaseContextService as CodebaseContextService, index_CompletedWorkBlock as CompletedWorkBlock, index_CompletionListener as CompletionListener, index_ConcurrencyManager as ConcurrencyManager, index_ConfidenceSignalUpdate as ConfidenceSignalUpdate, index_ConstraintBlock as ConstraintBlock, index_CriticalPathAnnotation as CriticalPathAnnotation, index_CriticalPathResult as CriticalPathResult, index_DAGNode as DAGNode, type index_DAGValidatorConfig as DAGValidatorConfig, index_DEFAULT_HISTORY_LIMIT as DEFAULT_HISTORY_LIMIT, index_DEFAULT_PLANNER_MODEL as DEFAULT_PLANNER_MODEL, index_DEFAULT_RECONCILE_INTERVAL_MS as DEFAULT_RECONCILE_INTERVAL_MS, index_DEFAULT_RECONCILE_STALL_MS as DEFAULT_RECONCILE_STALL_MS, index_DEFAULT_RESUME_MAX_AGE_MS as DEFAULT_RESUME_MAX_AGE_MS, index_DEFAULT_WIKI_MODEL as DEFAULT_WIKI_MODEL, index_DISPATCHABLE_WAVE_TASK_STATUSES as DISPATCHABLE_WAVE_TASK_STATUSES, index_DependentClaim as DependentClaim, type index_DispatchError as DispatchError, type index_DispatchLimits as DispatchLimits, type index_DispatchResult as DispatchResult, type index_DrivenWave as DrivenWave, index_ExecutionBridge as ExecutionBridge, type index_ExecutionBridgeOptions as ExecutionBridgeOptions, type index_FleetCapacity as FleetCapacity, index_FleetContextBlock as FleetContextBlock, index_FleetContextService as FleetContextService, index_GenerationResult as GenerationResult, index_GraphDependentsSource as GraphDependentsSource, index_IN_FLIGHT_WAVE_TASK_STATUSES as IN_FLIGHT_WAVE_TASK_STATUSES, index_MAX_DEPENDENT_CLAIMS_PER_TASK as MAX_DEPENDENT_CLAIMS_PER_TASK, index_MAX_HISTORY_LIMIT as MAX_HISTORY_LIMIT, index_MAX_ITEM_DESCRIPTION_CHARS as MAX_ITEM_DESCRIPTION_CHARS, index_MemoryContextBlock as MemoryContextBlock, index_OptimizationResult as OptimizationResult, index_ParsedEdge as ParsedEdge, index_ParsedStatistics as ParsedStatistics, index_ParsedTask as ParsedTask, index_ParsedWave as ParsedWave, index_ParsedWavePlan as ParsedWavePlan, index_PlanCodeGraph as PlanCodeGraph, type index_PlanRefinementConfig as PlanRefinementConfig, index_PlanRefinementService as PlanRefinementService, index_PlanScore as PlanScore, index_PredecessorSummary as PredecessorSummary, type index_ProjectedPlanIds as ProjectedPlanIds, index_PromptConstructor as PromptConstructor, type index_PromptConstructorConfig as PromptConstructorConfig, index_PromptContext as PromptContext, type index_PromptTemplate as PromptTemplate, type index_ReconcileOptions as ReconcileOptions, type index_ReconcileReport as ReconcileReport, type index_RefinementPromptTemplate as RefinementPromptTemplate, type index_RefinementResult as RefinementResult, index_RemainingWorkBlock as RemainingWorkBlock, index_SUMMARY_MAX_CHARS as SUMMARY_MAX_CHARS, index_SelectedDependentClaims as SelectedDependentClaims, index_SequencedLine as SequencedLine, type index_SettledWave as SettledWave, index_TERMINAL_WAVE_PLAN_STATUSES as TERMINAL_WAVE_PLAN_STATUSES, index_TERMINAL_WAVE_TASK_STATUSES as TERMINAL_WAVE_TASK_STATUSES, type index_TaskAttemptRef as TaskAttemptRef, index_TaskBlastRadius as TaskBlastRadius, type index_TaskDispatchOutcome as TaskDispatchOutcome, type index_TaskFailureOutcome as TaskFailureOutcome, type index_TaskSettlement as TaskSettlement, type index_TaskWork as TaskWork, index_TopologicalSortResult as TopologicalSortResult, index_ValidationError as ValidationError, index_ValidationErrorCode as ValidationErrorCode, index_ValidationResult as ValidationResult, index_ValidationWarning as ValidationWarning, index_ValidationWarningCode as ValidationWarningCode, index_WaveAdjustment as WaveAdjustment, index_WaveAssignerConfig as WaveAssignerConfig, index_WaveAssignmentResult as WaveAssignmentResult, type index_WaveDispatchContext as WaveDispatchContext, index_WaveDispatchCoordinator as WaveDispatchCoordinator, index_WaveDispatchRequest as WaveDispatchRequest, type index_WaveDriver as WaveDriver, type index_WaveDriverAnswer as WaveDriverAnswer, type index_WaveExecutionConfig as WaveExecutionConfig, index_WaveExecutionController as WaveExecutionController, index_WavePlanExecutionState as WavePlanExecutionState, type index_WavePlanGenerationResult as WavePlanGenerationResult, index_WavePlanGenerator as WavePlanGenerator, type index_WavePlanGeneratorConfig as WavePlanGeneratorConfig, index_WavePlannerAIClient as WavePlannerAIClient, index_WavePlannerConfig as WavePlannerConfig, type index_WaveProgress as WaveProgress, index_WaveSSEEvent as WaveSSEEvent, type index_WaveSignal as WaveSignal, type index_WorkHistoryEntry as WorkHistoryEntry, type index_WorkHistoryResult as WorkHistoryResult, type index_WorkHistoryRow as WorkHistoryRow, index_assignWaves as assignWaves, index_blastRadiusOf as blastRadiusOf, index_buildDAGGraph as buildDAGGraph, index_buildSpecContentForItem as buildSpecContentForItem, index_codeGraphOf as codeGraphOf, index_collectFinalMetrics as collectFinalMetrics, index_compareTaskCodes as compareTaskCodes, index_computeCriticalPath as computeCriticalPath, index_createFlatPlan as createFlatPlan, index_createFlatPlanFromDescriptions as createFlatPlanFromDescriptions, index_createPlanRefinementService as createPlanRefinementService, index_createPromptConstructor as createPromptConstructor, index_createWavePlanGenerator as createWavePlanGenerator, index_defaultTemplate as defaultTemplate, index_dependentClaimsOf as dependentClaimsOf, index_describeCodeGraph as describeCodeGraph, index_extractAllTaskCodes as extractAllTaskCodes, index_extractWaveFromTaskCode as extractWaveFromTaskCode, index_findCommonTheme as findCommonTheme, index_findTaskByCode as findTaskByCode, index_freeDispatchSlots as freeDispatchSlots, index_generatePlanForItem as generatePlanForItem, index_generateWaveLabel as generateWaveLabel, index_generateWavePlan as generateWavePlan, index_getExecutionBridgeOrNull as getExecutionBridgeOrNull, index_getTasksInWave as getTasksInWave, index_groupBy as groupBy, index_inFlightEverywhereSql as inFlightEverywhereSql, index_inFlightInPlanSql as inFlightInPlanSql, index_initExecutionBridge as initExecutionBridge, index_isDispatchableWaveTaskStatus as isDispatchableWaveTaskStatus, index_isInFlightWaveTaskStatus as isInFlightWaveTaskStatus, index_isPlanCodeGraph as isPlanCodeGraph, index_isTerminalWavePlanStatus as isTerminalWavePlanStatus, index_isTerminalWaveTaskStatus as isTerminalWaveTaskStatus, index_isWaveOver as isWaveOver, index_normalizeComplexity as normalizeComplexity, index_normalizeItemDescription as normalizeItemDescription, index_normalizeModel as normalizeModel, index_parseDependencies as parseDependencies, index_parseFilePaths as parseFilePaths, index_parseWavePlanResponse as parseWavePlanResponse, index_projectWavePlanToPlan as projectWavePlanToPlan, index_readPlanCodeGraph as readPlanCodeGraph, index_readWaveSignal as readWaveSignal, index_refinementTemplate as refinementTemplate, index_renderTicketDescription as renderTicketDescription, index_resolveItemDescription as resolveItemDescription, index_resolvePlannerModel as resolvePlannerModel, index_resolveWikiModel as resolveWikiModel, index_runIdFor as runIdFor, index_scorePlan as scorePlan, index_selectDependentClaims as selectDependentClaims, index_simplifiedTemplate as simplifiedTemplate, index_sleep as sleep, index_toActivityEventType as toActivityEventType, index_topologicalSort as topologicalSort, index_validateDAG as validateDAG, index_waveSignalFor as waveSignalFor, index_withCodeGraph as withCodeGraph, index_workFromReport as workFromReport, index_workHistoryForPaths as workHistoryForPaths };
+  export { type index_AIClientConfig as AIClientConfig, index_ActiveTaskInfo as ActiveTaskInfo, index_AssignedWave as AssignedWave, index_BLAST_RADIUS_LISTED as BLAST_RADIUS_LISTED, index_BlastRadiusLine as BlastRadiusLine, index_CodeGraphReview as CodeGraphReview, index_CodebaseContextBlock as CodebaseContextBlock, index_CodebaseContextService as CodebaseContextService, index_CompletedWorkBlock as CompletedWorkBlock, index_CompletionListener as CompletionListener, index_ConcurrencyManager as ConcurrencyManager, index_ConfidenceSignalUpdate as ConfidenceSignalUpdate, index_ConstraintBlock as ConstraintBlock, type index_CorpusSummary as CorpusSummary, index_CriticalPathAnnotation as CriticalPathAnnotation, index_CriticalPathResult as CriticalPathResult, index_DAGNode as DAGNode, type index_DAGValidatorConfig as DAGValidatorConfig, index_DEFAULT_HISTORY_LIMIT as DEFAULT_HISTORY_LIMIT, index_DEFAULT_MIN_PARALLELIZATION_SCORE as DEFAULT_MIN_PARALLELIZATION_SCORE, index_DEFAULT_PLANNER_MAX_TOKENS as DEFAULT_PLANNER_MAX_TOKENS, index_DEFAULT_PLANNER_MODEL as DEFAULT_PLANNER_MODEL, index_DEFAULT_RECONCILE_INTERVAL_MS as DEFAULT_RECONCILE_INTERVAL_MS, index_DEFAULT_RECONCILE_STALL_MS as DEFAULT_RECONCILE_STALL_MS, index_DEFAULT_RESUME_MAX_AGE_MS as DEFAULT_RESUME_MAX_AGE_MS, index_DEFAULT_WIKI_MODEL as DEFAULT_WIKI_MODEL, index_DISPATCHABLE_WAVE_TASK_STATUSES as DISPATCHABLE_WAVE_TASK_STATUSES, index_DependentClaim as DependentClaim, type index_DispatchError as DispatchError, type index_DispatchLimits as DispatchLimits, type index_DispatchResult as DispatchResult, type index_DrivenWave as DrivenWave, type index_EpisodeCall as EpisodeCall, type index_EpisodePlan as EpisodePlan, type index_EpisodeReview as EpisodeReview, type index_EpisodeTask as EpisodeTask, index_ExecutionBridge as ExecutionBridge, type index_ExecutionBridgeOptions as ExecutionBridgeOptions, type index_FleetCapacity as FleetCapacity, index_FleetContextBlock as FleetContextBlock, index_FleetContextService as FleetContextService, index_GenerationResult as GenerationResult, index_GraphDependentsSource as GraphDependentsSource, index_IN_FLIGHT_WAVE_TASK_STATUSES as IN_FLIGHT_WAVE_TASK_STATUSES, index_MAX_DEPENDENT_CLAIMS_PER_TASK as MAX_DEPENDENT_CLAIMS_PER_TASK, index_MAX_HISTORY_LIMIT as MAX_HISTORY_LIMIT, index_MAX_ITEM_DESCRIPTION_CHARS as MAX_ITEM_DESCRIPTION_CHARS, index_MIN_TASKS_FOR_PARALLELIZATION_GATE as MIN_TASKS_FOR_PARALLELIZATION_GATE, index_MemoryContextBlock as MemoryContextBlock, index_OptimizationResult as OptimizationResult, index_PLANNER_EPISODE_SCHEMA as PLANNER_EPISODE_SCHEMA, index_ParsedEdge as ParsedEdge, index_ParsedStatistics as ParsedStatistics, index_ParsedTask as ParsedTask, index_ParsedWave as ParsedWave, index_ParsedWavePlan as ParsedWavePlan, index_PlanCodeGraph as PlanCodeGraph, type index_PlanOutcome as PlanOutcome, type index_PlanRefinementConfig as PlanRefinementConfig, index_PlanRefinementService as PlanRefinementService, type index_PlanReviewRecord as PlanReviewRecord, index_PlanScore as PlanScore, type index_PlannerEpisode as PlannerEpisode, type index_PlannerTraceKind as PlannerTraceKind, type index_PlannerTraceOutcome as PlannerTraceOutcome, type index_PlannerTraceRecord as PlannerTraceRecord, index_PlannerTruncatedError as PlannerTruncatedError, index_PredecessorSummary as PredecessorSummary, type index_ProjectedPlanIds as ProjectedPlanIds, index_PromptConstructor as PromptConstructor, type index_PromptConstructorConfig as PromptConstructorConfig, index_PromptContext as PromptContext, type index_PromptTemplate as PromptTemplate, type index_ReconcileOptions as ReconcileOptions, type index_ReconcileReport as ReconcileReport, type index_RefinementPromptTemplate as RefinementPromptTemplate, type index_RefinementResult as RefinementResult, index_RemainingWorkBlock as RemainingWorkBlock, index_SUMMARY_MAX_CHARS as SUMMARY_MAX_CHARS, index_SelectedDependentClaims as SelectedDependentClaims, index_SequencedLine as SequencedLine, type index_SettledWave as SettledWave, index_TERMINAL_WAVE_PLAN_STATUSES as TERMINAL_WAVE_PLAN_STATUSES, index_TERMINAL_WAVE_TASK_STATUSES as TERMINAL_WAVE_TASK_STATUSES, type index_TaskAttemptRef as TaskAttemptRef, index_TaskBlastRadius as TaskBlastRadius, type index_TaskDispatchOutcome as TaskDispatchOutcome, type index_TaskFailureOutcome as TaskFailureOutcome, type index_TaskSettlement as TaskSettlement, type index_TaskWork as TaskWork, index_TopologicalSortResult as TopologicalSortResult, index_ValidationError as ValidationError, index_ValidationErrorCode as ValidationErrorCode, index_ValidationResult as ValidationResult, index_ValidationWarning as ValidationWarning, index_ValidationWarningCode as ValidationWarningCode, index_WaveAdjustment as WaveAdjustment, index_WaveAssignerConfig as WaveAssignerConfig, index_WaveAssignmentResult as WaveAssignmentResult, type index_WaveDispatchContext as WaveDispatchContext, index_WaveDispatchCoordinator as WaveDispatchCoordinator, index_WaveDispatchRequest as WaveDispatchRequest, type index_WaveDriver as WaveDriver, type index_WaveDriverAnswer as WaveDriverAnswer, type index_WaveExecutionConfig as WaveExecutionConfig, index_WaveExecutionController as WaveExecutionController, index_WavePlanExecutionState as WavePlanExecutionState, type index_WavePlanGenerationResult as WavePlanGenerationResult, index_WavePlanGenerator as WavePlanGenerator, type index_WavePlanGeneratorConfig as WavePlanGeneratorConfig, index_WavePlannerAIClient as WavePlannerAIClient, index_WavePlannerConfig as WavePlannerConfig, type index_WaveProgress as WaveProgress, index_WaveSSEEvent as WaveSSEEvent, type index_WaveSignal as WaveSignal, type index_WorkHistoryEntry as WorkHistoryEntry, type index_WorkHistoryResult as WorkHistoryResult, type index_WorkHistoryRow as WorkHistoryRow, index_assignWaves as assignWaves, index_blastRadiusOf as blastRadiusOf, index_buildDAGGraph as buildDAGGraph, index_buildEpisodes as buildEpisodes, index_buildSpecContentForItem as buildSpecContentForItem, index_codeGraphOf as codeGraphOf, index_collectFinalMetrics as collectFinalMetrics, index_compareTaskCodes as compareTaskCodes, index_computeCriticalPath as computeCriticalPath, index_createFlatPlan as createFlatPlan, index_createFlatPlanFromDescriptions as createFlatPlanFromDescriptions, index_createPlanRefinementService as createPlanRefinementService, index_createPromptConstructor as createPromptConstructor, index_createWavePlanGenerator as createWavePlanGenerator, index_defaultTemplate as defaultTemplate, index_dependentClaimsOf as dependentClaimsOf, index_describeCodeGraph as describeCodeGraph, index_extractAllTaskCodes as extractAllTaskCodes, index_extractWaveFromTaskCode as extractWaveFromTaskCode, index_findCommonTheme as findCommonTheme, index_findTaskByCode as findTaskByCode, index_freeDispatchSlots as freeDispatchSlots, index_generatePlanForItem as generatePlanForItem, index_generateWaveLabel as generateWaveLabel, index_generateWavePlan as generateWavePlan, index_getExecutionBridgeOrNull as getExecutionBridgeOrNull, index_getTasksInWave as getTasksInWave, index_groupBy as groupBy, index_inFlightEverywhereSql as inFlightEverywhereSql, index_inFlightInPlanSql as inFlightInPlanSql, index_initExecutionBridge as initExecutionBridge, index_isDispatchableWaveTaskStatus as isDispatchableWaveTaskStatus, index_isInFlightWaveTaskStatus as isInFlightWaveTaskStatus, index_isPlanCodeGraph as isPlanCodeGraph, index_isTerminalWavePlanStatus as isTerminalWavePlanStatus, index_isTerminalWaveTaskStatus as isTerminalWaveTaskStatus, index_isWaveOver as isWaveOver, index_linkTracesToPlan as linkTracesToPlan, index_newPlannerRunId as newPlannerRunId, index_normalizeComplexity as normalizeComplexity, index_normalizeItemDescription as normalizeItemDescription, index_normalizeModel as normalizeModel, index_parallelizationGateApplies as parallelizationGateApplies, index_parseDependencies as parseDependencies, index_parseFilePaths as parseFilePaths, index_parseWavePlanResponse as parseWavePlanResponse, index_planOutcome as planOutcome, index_planSha as planSha, index_plannerTraceEnabled as plannerTraceEnabled, index_projectWavePlanToPlan as projectWavePlanToPlan, index_readPlanCodeGraph as readPlanCodeGraph, index_readWaveSignal as readWaveSignal, index_recordPlanReview as recordPlanReview, index_recordPlannerTrace as recordPlannerTrace, index_redactEpisode as redactEpisode, index_refinementTemplate as refinementTemplate, index_renderTicketDescription as renderTicketDescription, index_resetPlannerTraceWarning as resetPlannerTraceWarning, index_resolveItemDescription as resolveItemDescription, index_resolveMinParallelizationScore as resolveMinParallelizationScore, index_resolvePlannerMaxTokens as resolvePlannerMaxTokens, index_resolvePlannerModel as resolvePlannerModel, index_resolveWikiModel as resolveWikiModel, index_runIdFor as runIdFor, index_scorePlan as scorePlan, index_selectDependentClaims as selectDependentClaims, index_simplifiedTemplate as simplifiedTemplate, index_sleep as sleep, index_summarizeCorpus as summarizeCorpus, index_toActivityEventType as toActivityEventType, index_topologicalSort as topologicalSort, index_validateDAG as validateDAG, index_waveSignalFor as waveSignalFor, index_withCodeGraph as withCodeGraph, index_workFromReport as workFromReport, index_workHistoryForPaths as workHistoryForPaths };
 }
 
-export { type DrivenWave as $, type AddDrawerInput as A, type AIClientConfig as B, type Closet as C, DisabledClient as D, CodebaseContextService as E, CompletionListener as F, ConcurrencyManager as G, type Hall as H, type DAGValidatorConfig as I, DEFAULT_HISTORY_LIMIT as J, type KgAddInput as K, LocalShimClient as L, MemPalaceService as M, DEFAULT_PLANNER_MODEL as N, DEFAULT_RECONCILE_INTERVAL_MS as O, type PalaceContextBlock as P, DEFAULT_RECONCILE_STALL_MS as Q, type RecallInput as R, type SearchInput as S, type Tunnel as T, DEFAULT_RESUME_MAX_AGE_MS as U, DEFAULT_WIKI_MODEL as V, type Wing as W, DISPATCHABLE_WAVE_TASK_STATUSES as X, type DispatchError as Y, type DispatchLimits as Z, type DispatchResult as _, type MemPalaceConfig as a, inFlightEverywhereSql as a$, ExecutionBridge as a0, type ExecutionBridgeOptions as a1, type FleetCapacity as a2, FleetContextService as a3, IN_FLIGHT_WAVE_TASK_STATUSES as a4, MAX_HISTORY_LIMIT as a5, MAX_ITEM_DESCRIPTION_CHARS as a6, type PlanRefinementConfig as a7, PlanRefinementService as a8, type ProjectedPlanIds as a9, type WaveProgress as aA, type WaveSignal as aB, type WorkHistoryEntry as aC, type WorkHistoryResult as aD, type WorkHistoryRow as aE, buildDAGGraph as aF, buildSpecContentForItem as aG, collectFinalMetrics as aH, compareTaskCodes as aI, computeCriticalPath as aJ, createFlatPlan as aK, createFlatPlanFromDescriptions as aL, createPlanRefinementService as aM, createPromptConstructor as aN, createWavePlanGenerator as aO, defaultTemplate as aP, extractAllTaskCodes as aQ, extractWaveFromTaskCode as aR, findCommonTheme as aS, findTaskByCode as aT, freeDispatchSlots as aU, generatePlanForItem as aV, generateWaveLabel as aW, generateWavePlan as aX, getExecutionBridgeOrNull as aY, getTasksInWave as aZ, groupBy as a_, PromptConstructor as aa, type PromptConstructorConfig as ab, type PromptTemplate as ac, type ReconcileOptions as ad, type ReconcileReport as ae, type RefinementPromptTemplate as af, type RefinementResult as ag, SUMMARY_MAX_CHARS as ah, type SettledWave as ai, TERMINAL_WAVE_PLAN_STATUSES as aj, TERMINAL_WAVE_TASK_STATUSES as ak, type TaskAttemptRef as al, type TaskDispatchOutcome as am, type TaskFailureOutcome as an, type TaskSettlement as ao, type TaskWork as ap, type WaveDispatchContext as aq, WaveDispatchCoordinator as ar, type WaveDriver as as, type WaveDriverAnswer as at, type WaveExecutionConfig as au, WaveExecutionController as av, type WavePlanGenerationResult as aw, WavePlanGenerator as ax, type WavePlanGeneratorConfig as ay, WavePlannerAIClient as az, type MemPalaceClient as b, inFlightInPlanSql as b0, initExecutionBridge as b1, isDispatchableWaveTaskStatus as b2, isInFlightWaveTaskStatus as b3, isTerminalWavePlanStatus as b4, isTerminalWaveTaskStatus as b5, isWaveOver as b6, normalizeComplexity as b7, normalizeItemDescription as b8, normalizeModel as b9, parseDependencies as ba, parseFilePaths as bb, parseWavePlanResponse as bc, projectWavePlanToPlan as bd, readWaveSignal as be, refinementTemplate as bf, renderTicketDescription as bg, resolveItemDescription as bh, resolvePlannerModel as bi, resolveWikiModel as bj, runIdFor as bk, scorePlan as bl, simplifiedTemplate as bm, sleep as bn, toActivityEventType as bo, topologicalSort as bp, validateDAG as bq, waveSignalFor as br, workFromReport as bs, workHistoryForPaths as bt, type AddDrawerResult as c, type SearchResult as d, type WakeUpInput as e, type WakeUpResult as f, type RecallResult as g, type KgContradiction as h, type KgQueryInput as i, type KgTriple as j, type KgInvalidateInput as k, type Room as l, type Drawer as m, type DrawerSource as n, type HallRelation as o, McpAdapterClient as p, type McpTransport as q, type MemPalaceMode as r, type MemoryTier as s, type MemoryType as t, type SearchHit as u, type WingType as v, createMemPalaceClient as w, createMemPalaceService as x, estimateTokens as y, index as z };
+export { type DispatchError as $, type AddDrawerInput as A, type AIClientConfig as B, type Closet as C, DisabledClient as D, CodebaseContextService as E, CompletionListener as F, ConcurrencyManager as G, type Hall as H, type CorpusSummary as I, type DAGValidatorConfig as J, type KgAddInput as K, LocalShimClient as L, MemPalaceService as M, DEFAULT_HISTORY_LIMIT as N, DEFAULT_MIN_PARALLELIZATION_SCORE as O, type PalaceContextBlock as P, DEFAULT_PLANNER_MAX_TOKENS as Q, type RecallInput as R, type SearchInput as S, type Tunnel as T, DEFAULT_PLANNER_MODEL as U, DEFAULT_RECONCILE_INTERVAL_MS as V, type Wing as W, DEFAULT_RECONCILE_STALL_MS as X, DEFAULT_RESUME_MAX_AGE_MS as Y, DEFAULT_WIKI_MODEL as Z, DISPATCHABLE_WAVE_TASK_STATUSES as _, type MemPalaceConfig as a, createFlatPlan as a$, type DispatchLimits as a0, type DispatchResult as a1, type DrivenWave as a2, type EpisodeCall as a3, type EpisodePlan as a4, type EpisodeReview as a5, type EpisodeTask as a6, ExecutionBridge as a7, type ExecutionBridgeOptions as a8, type FleetCapacity as a9, TERMINAL_WAVE_TASK_STATUSES as aA, type TaskAttemptRef as aB, type TaskDispatchOutcome as aC, type TaskFailureOutcome as aD, type TaskSettlement as aE, type TaskWork as aF, type WaveDispatchContext as aG, WaveDispatchCoordinator as aH, type WaveDriver as aI, type WaveDriverAnswer as aJ, type WaveExecutionConfig as aK, WaveExecutionController as aL, type WavePlanGenerationResult as aM, WavePlanGenerator as aN, type WavePlanGeneratorConfig as aO, WavePlannerAIClient as aP, type WaveProgress as aQ, type WaveSignal as aR, type WorkHistoryEntry as aS, type WorkHistoryResult as aT, type WorkHistoryRow as aU, buildDAGGraph as aV, buildEpisodes as aW, buildSpecContentForItem as aX, collectFinalMetrics as aY, compareTaskCodes as aZ, computeCriticalPath as a_, FleetContextService as aa, IN_FLIGHT_WAVE_TASK_STATUSES as ab, MAX_HISTORY_LIMIT as ac, MAX_ITEM_DESCRIPTION_CHARS as ad, MIN_TASKS_FOR_PARALLELIZATION_GATE as ae, PLANNER_EPISODE_SCHEMA as af, type PlanOutcome as ag, type PlanRefinementConfig as ah, PlanRefinementService as ai, type PlanReviewRecord as aj, type PlannerEpisode as ak, type PlannerTraceKind as al, type PlannerTraceOutcome as am, type PlannerTraceRecord as an, PlannerTruncatedError as ao, type ProjectedPlanIds as ap, PromptConstructor as aq, type PromptConstructorConfig as ar, type PromptTemplate as as, type ReconcileOptions as at, type ReconcileReport as au, type RefinementPromptTemplate as av, type RefinementResult as aw, SUMMARY_MAX_CHARS as ax, type SettledWave as ay, TERMINAL_WAVE_PLAN_STATUSES as az, type MemPalaceClient as b, createFlatPlanFromDescriptions as b0, createPlanRefinementService as b1, createPromptConstructor as b2, createWavePlanGenerator as b3, defaultTemplate as b4, extractAllTaskCodes as b5, extractWaveFromTaskCode as b6, findCommonTheme as b7, findTaskByCode as b8, freeDispatchSlots as b9, projectWavePlanToPlan as bA, readWaveSignal as bB, recordPlanReview as bC, recordPlannerTrace as bD, redactEpisode as bE, refinementTemplate as bF, renderTicketDescription as bG, resetPlannerTraceWarning as bH, resolveItemDescription as bI, resolveMinParallelizationScore as bJ, resolvePlannerMaxTokens as bK, resolvePlannerModel as bL, resolveWikiModel as bM, runIdFor as bN, scorePlan as bO, simplifiedTemplate as bP, sleep as bQ, summarizeCorpus as bR, toActivityEventType as bS, topologicalSort as bT, validateDAG as bU, waveSignalFor as bV, workFromReport as bW, workHistoryForPaths as bX, generatePlanForItem as ba, generateWaveLabel as bb, generateWavePlan as bc, getExecutionBridgeOrNull as bd, getTasksInWave as be, groupBy as bf, inFlightEverywhereSql as bg, inFlightInPlanSql as bh, initExecutionBridge as bi, isDispatchableWaveTaskStatus as bj, isInFlightWaveTaskStatus as bk, isTerminalWavePlanStatus as bl, isTerminalWaveTaskStatus as bm, isWaveOver as bn, linkTracesToPlan as bo, newPlannerRunId as bp, normalizeComplexity as bq, normalizeItemDescription as br, normalizeModel as bs, parallelizationGateApplies as bt, parseDependencies as bu, parseFilePaths as bv, parseWavePlanResponse as bw, planOutcome as bx, planSha as by, plannerTraceEnabled as bz, type AddDrawerResult as c, type SearchResult as d, type WakeUpInput as e, type WakeUpResult as f, type RecallResult as g, type KgContradiction as h, type KgQueryInput as i, type KgTriple as j, type KgInvalidateInput as k, type Room as l, type Drawer as m, type DrawerSource as n, type HallRelation as o, McpAdapterClient as p, type McpTransport as q, type MemPalaceMode as r, type MemoryTier as s, type MemoryType as t, type SearchHit as u, type WingType as v, createMemPalaceClient as w, createMemPalaceService as x, estimateTokens as y, index as z };

@@ -1,4 +1,12 @@
-import type { PromptContext, FleetContextBlock, CodebaseContextBlock, ConstraintBlock, MemoryContextBlock } from './types';
+import type {
+  PromptContext,
+  FleetContextBlock,
+  CodebaseContextBlock,
+  ConstraintBlock,
+  MemoryContextBlock,
+  CompletedWorkBlock,
+  RemainingWorkBlock,
+} from './types';
 import { FleetContextService } from './fleet-context';
 import { CodebaseContextService } from './codebase-context';
 import { defaultTemplate } from './prompt-templates/default';
@@ -38,6 +46,17 @@ export interface PromptConstructorConfig {
    * Token budget for MemPalace context block. Defaults to 2000.
    */
   memPalaceMaxTokens?: number;
+  /**
+   * For a plan made mid-run: what has already been done, and what is left.
+   *
+   * The templates have always been able to render these (`renderWorkContext`),
+   * and `PromptContext` has always had the fields. Nothing set them: a
+   * re-plan told the model "N tasks are already complete" as a sentence and
+   * gave it none of them, so it planned the whole specification again without
+   * knowing which files had changed or what had failed.
+   */
+  completedWork?: CompletedWorkBlock;
+  remainingWork?: RemainingWorkBlock;
 }
 
 // ============================================================================
@@ -129,7 +148,19 @@ export class PromptConstructor {
       codebaseContext,
       constraints,
       memoryContext,
+      ...(config.completedWork ? { completedWork: config.completedWork } : {}),
+      ...(config.remainingWork ? { remainingWork: config.remainingWork } : {}),
     };
+  }
+
+  /**
+   * A template's name and version, for the record of a planner call. A prompt
+   * is only comparable with another made from the same template at the same
+   * version; without this a trace would say what was sent and not what wrote it.
+   */
+  templateInfo(name: string): { name: string; version: string } {
+    const template = name === 'refinement' ? refinementTemplate : this.templates.get(name);
+    return { name, version: template?.version ?? 'unknown' };
   }
 
   /**
@@ -248,7 +279,8 @@ export class PromptConstructor {
     repo: string,
     config: PromptConstructorConfig,
     currentPlan: string,
-    currentScore: number
+    currentScore: number,
+    targetScore?: number
   ): Promise<string> {
     // Assemble context
     const context = await this.assembleContext(
@@ -261,7 +293,7 @@ export class PromptConstructor {
 
     // Use refinement template
     const template = refinementTemplate as RefinementPromptTemplate;
-    return template.renderRefinement(context, currentPlan, currentScore);
+    return template.renderRefinement(context, currentPlan, currentScore, targetScore);
   }
 
   /**

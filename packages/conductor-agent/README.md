@@ -139,6 +139,7 @@ says the same thing, but your other readers probably do not read checkpoints.
 | Option | Default | Meaning |
 |---|---|---|
 | `minParallelizationScore` | `0.7` | Refinement stops once the score reaches this. A ratio in [0, 1], like the score it is compared with |
+| `minTasksForRefinement` | `4` | Plans with fewer tasks are not held to `minParallelizationScore`. The score is one minus the critical path's share of the tasks, so one task — or two or three in sequence — scores 0 without being a plan that needs improving. A reviewer can still send it back. |
 | `maxRefinementIterations` | `3` | Hard cap on refinement passes |
 | `requireReview` | `true` | `false` dispatches a plan no human has seen |
 | `failurePolicy` | `'halt'` | `'continue'` advances past a failed wave |

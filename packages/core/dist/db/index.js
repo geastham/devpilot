@@ -67,6 +67,8 @@ __export(db_exports, {
   palaceTunnels: () => palaceTunnels,
   palaceWings: () => palaceWings,
   palaceWingsRelations: () => palaceWingsRelations,
+  plannerReviews: () => plannerReviews,
+  plannerTraces: () => plannerTraces,
   plans: () => plans,
   plansRelations: () => plansRelations,
   resetDatabase: () => resetDatabase,
@@ -163,6 +165,8 @@ __export(schema_exports, {
   palaceTunnels: () => palaceTunnels,
   palaceWings: () => palaceWings,
   palaceWingsRelations: () => palaceWingsRelations,
+  plannerReviews: () => plannerReviews,
+  plannerTraces: () => plannerTraces,
   plans: () => plans,
   plansRelations: () => plansRelations,
   rufloSessions: () => rufloSessions,
@@ -811,6 +815,72 @@ var wavePlanMetricsRelations = (0, import_drizzle_orm4.relations)(wavePlanMetric
     references: [wavePlans.id]
   })
 }));
+var plannerTraces = (0, import_sqlite_core5.sqliteTable)("planner_traces", {
+  id: (0, import_sqlite_core5.text)("id").primaryKey().$defaultFn(() => (0, import_cuid25.createId)()),
+  /** The steps of one planning run share this: an initial plan and its refinements. */
+  runId: (0, import_sqlite_core5.text)("run_id").notNull(),
+  /** 0 for the run's first call, counting up. */
+  step: (0, import_sqlite_core5.integer)("step").notNull(),
+  /** `initial`, `refine`, or `reoptimize` (an initial plan made mid-run, with work already done). */
+  kind: (0, import_sqlite_core5.text)("kind").notNull(),
+  itemId: (0, import_sqlite_core5.text)("item_id").notNull(),
+  repo: (0, import_sqlite_core5.text)("repo").notNull(),
+  /**
+   * The plan this call led to. NULL until a plan is persisted for the item;
+   * then every call since the previous persisted plan carries its id, and
+   * `chosen` says which one's response it was.
+   */
+  wavePlanId: (0, import_sqlite_core5.text)("wave_plan_id"),
+  chosen: (0, import_sqlite_core5.integer)("chosen", { mode: "boolean" }).notNull().default(false),
+  template: (0, import_sqlite_core5.text)("template").notNull(),
+  templateVersion: (0, import_sqlite_core5.text)("template_version").notNull(),
+  /** The model asked for, and the one that answered (an alias resolves to a dated id). */
+  modelRequested: (0, import_sqlite_core5.text)("model_requested").notNull(),
+  model: (0, import_sqlite_core5.text)("model"),
+  prompt: (0, import_sqlite_core5.text)("prompt").notNull(),
+  promptSha: (0, import_sqlite_core5.text)("prompt_sha").notNull(),
+  /** NULL when the call failed before an answer. */
+  response: (0, import_sqlite_core5.text)("response"),
+  responseSha: (0, import_sqlite_core5.text)("response_sha"),
+  /** For a refinement: the hash of the plan it was asked to improve. */
+  basedOnSha: (0, import_sqlite_core5.text)("based_on_sha"),
+  stopReason: (0, import_sqlite_core5.text)("stop_reason"),
+  tokensInput: (0, import_sqlite_core5.integer)("tokens_input"),
+  /** Includes the model's thinking, which is billed as output and is not in `response`. */
+  tokensOutput: (0, import_sqlite_core5.integer)("tokens_output"),
+  cacheReadTokens: (0, import_sqlite_core5.integer)("cache_read_tokens"),
+  cacheWriteTokens: (0, import_sqlite_core5.integer)("cache_write_tokens"),
+  durationMs: (0, import_sqlite_core5.integer)("duration_ms"),
+  /** `valid` (parsed and passed validation), `invalid` (answered, rejected), `error` (no answer). */
+  outcome: (0, import_sqlite_core5.text)("outcome").notNull(),
+  /** Validation errors, or the error message. */
+  errors: (0, import_sqlite_core5.text)("errors", { mode: "json" }).$type(),
+  warnings: (0, import_sqlite_core5.text)("warnings", { mode: "json" }).$type(),
+  taskCount: (0, import_sqlite_core5.integer)("task_count"),
+  /** The score the refinement gate read, and the rest of what the scorer said. */
+  score: (0, import_sqlite_core5.real)("score"),
+  scoreDetail: (0, import_sqlite_core5.text)("score_detail", { mode: "json" }).$type(),
+  /** For a refinement: the score it had to beat, and whether it did. */
+  previousScore: (0, import_sqlite_core5.real)("previous_score"),
+  improved: (0, import_sqlite_core5.integer)("improved", { mode: "boolean" }),
+  /** The constraints the prompt carried — a reviewer's, when they asked for changes. */
+  constraints: (0, import_sqlite_core5.text)("constraints", { mode: "json" }).$type(),
+  createdAt: (0, import_sqlite_core5.integer)("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date())
+});
+var plannerReviews = (0, import_sqlite_core5.sqliteTable)("planner_reviews", {
+  id: (0, import_sqlite_core5.text)("id").primaryKey().$defaultFn(() => (0, import_cuid25.createId)()),
+  itemId: (0, import_sqlite_core5.text)("item_id").notNull(),
+  /** The hash of the plan that was on screen. Matches `planner_traces.response_sha`. */
+  planSha: (0, import_sqlite_core5.text)("plan_sha"),
+  wavePlanId: (0, import_sqlite_core5.text)("wave_plan_id"),
+  /** `approve`, `refine`, or `abort`. */
+  action: (0, import_sqlite_core5.text)("action").notNull(),
+  constraints: (0, import_sqlite_core5.text)("constraints", { mode: "json" }).$type(),
+  reason: (0, import_sqlite_core5.text)("reason"),
+  /** The score the reviewer was shown. */
+  score: (0, import_sqlite_core5.real)("score"),
+  createdAt: (0, import_sqlite_core5.integer)("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date())
+});
 
 // src/db/schema/wiki.ts
 var import_sqlite_core6 = require("drizzle-orm/sqlite-core");
@@ -1325,6 +1395,60 @@ CREATE TABLE IF NOT EXISTS wave_plan_metrics (
   recorded_at INTEGER NOT NULL
 );
 
+-- Planner traces: one row per call to the planning model. Local only.
+CREATE TABLE IF NOT EXISTS planner_traces (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  step INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  wave_plan_id TEXT,
+  chosen INTEGER NOT NULL DEFAULT 0,
+  template TEXT NOT NULL,
+  template_version TEXT NOT NULL,
+  model_requested TEXT NOT NULL,
+  model TEXT,
+  prompt TEXT NOT NULL,
+  prompt_sha TEXT NOT NULL,
+  response TEXT,
+  response_sha TEXT,
+  based_on_sha TEXT,
+  stop_reason TEXT,
+  tokens_input INTEGER,
+  tokens_output INTEGER,
+  cache_read_tokens INTEGER,
+  cache_write_tokens INTEGER,
+  duration_ms INTEGER,
+  outcome TEXT NOT NULL,
+  errors TEXT,
+  warnings TEXT,
+  task_count INTEGER,
+  score REAL,
+  score_detail TEXT,
+  previous_score REAL,
+  improved INTEGER,
+  constraints TEXT,
+  created_at INTEGER NOT NULL
+);
+
+-- What a person decided about a plan they were shown.
+CREATE TABLE IF NOT EXISTS planner_reviews (
+  id TEXT PRIMARY KEY,
+  item_id TEXT NOT NULL,
+  plan_sha TEXT,
+  wave_plan_id TEXT,
+  action TEXT NOT NULL,
+  constraints TEXT,
+  reason TEXT,
+  score REAL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_planner_traces_item ON planner_traces(item_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_planner_traces_plan ON planner_traces(wave_plan_id);
+CREATE INDEX IF NOT EXISTS idx_planner_reviews_item ON planner_reviews(item_id, created_at);
+
 -- Create indexes
 CREATE INDEX IF NOT EXISTS idx_horizon_items_zone ON horizon_items(zone);
 CREATE INDEX IF NOT EXISTS idx_horizon_items_repo ON horizon_items(repo);
@@ -1504,6 +1628,8 @@ function resetDatabase() {
   palaceTunnels,
   palaceWings,
   palaceWingsRelations,
+  plannerReviews,
+  plannerTraces,
   plans,
   plansRelations,
   resetDatabase,

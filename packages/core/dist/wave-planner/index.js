@@ -35,6 +35,8 @@ __export(wave_planner_exports, {
   CompletionListener: () => CompletionListener,
   ConcurrencyManager: () => ConcurrencyManager,
   DEFAULT_HISTORY_LIMIT: () => DEFAULT_HISTORY_LIMIT,
+  DEFAULT_MIN_PARALLELIZATION_SCORE: () => DEFAULT_MIN_PARALLELIZATION_SCORE,
+  DEFAULT_PLANNER_MAX_TOKENS: () => DEFAULT_PLANNER_MAX_TOKENS,
   DEFAULT_PLANNER_MODEL: () => DEFAULT_PLANNER_MODEL,
   DEFAULT_RECONCILE_INTERVAL_MS: () => DEFAULT_RECONCILE_INTERVAL_MS,
   DEFAULT_RECONCILE_STALL_MS: () => DEFAULT_RECONCILE_STALL_MS,
@@ -47,7 +49,10 @@ __export(wave_planner_exports, {
   MAX_DEPENDENT_CLAIMS_PER_TASK: () => MAX_DEPENDENT_CLAIMS_PER_TASK,
   MAX_HISTORY_LIMIT: () => MAX_HISTORY_LIMIT,
   MAX_ITEM_DESCRIPTION_CHARS: () => MAX_ITEM_DESCRIPTION_CHARS,
+  MIN_TASKS_FOR_PARALLELIZATION_GATE: () => MIN_TASKS_FOR_PARALLELIZATION_GATE,
+  PLANNER_EPISODE_SCHEMA: () => PLANNER_EPISODE_SCHEMA,
   PlanRefinementService: () => PlanRefinementService,
+  PlannerTruncatedError: () => PlannerTruncatedError,
   PromptConstructor: () => PromptConstructor,
   SUMMARY_MAX_CHARS: () => SUMMARY_MAX_CHARS,
   TERMINAL_WAVE_PLAN_STATUSES: () => TERMINAL_WAVE_PLAN_STATUSES,
@@ -59,6 +64,7 @@ __export(wave_planner_exports, {
   assignWaves: () => assignWaves,
   blastRadiusOf: () => blastRadiusOf,
   buildDAGGraph: () => buildDAGGraph,
+  buildEpisodes: () => buildEpisodes,
   buildSpecContentForItem: () => buildSpecContentForItem,
   codeGraphOf: () => codeGraphOf,
   collectFinalMetrics: () => collectFinalMetrics,
@@ -92,18 +98,30 @@ __export(wave_planner_exports, {
   isTerminalWavePlanStatus: () => isTerminalWavePlanStatus,
   isTerminalWaveTaskStatus: () => isTerminalWaveTaskStatus,
   isWaveOver: () => isWaveOver,
+  linkTracesToPlan: () => linkTracesToPlan,
+  newPlannerRunId: () => newPlannerRunId,
   normalizeComplexity: () => normalizeComplexity,
   normalizeItemDescription: () => normalizeItemDescription,
   normalizeModel: () => normalizeModel,
+  parallelizationGateApplies: () => parallelizationGateApplies,
   parseDependencies: () => parseDependencies,
   parseFilePaths: () => parseFilePaths,
   parseWavePlanResponse: () => parseWavePlanResponse,
+  planOutcome: () => planOutcome,
+  planSha: () => planSha,
+  plannerTraceEnabled: () => plannerTraceEnabled,
   projectWavePlanToPlan: () => projectWavePlanToPlan,
   readPlanCodeGraph: () => readPlanCodeGraph,
   readWaveSignal: () => readWaveSignal,
+  recordPlanReview: () => recordPlanReview,
+  recordPlannerTrace: () => recordPlannerTrace,
+  redactEpisode: () => redactEpisode,
   refinementTemplate: () => refinementTemplate,
   renderTicketDescription: () => renderTicketDescription,
+  resetPlannerTraceWarning: () => resetPlannerTraceWarning,
   resolveItemDescription: () => resolveItemDescription,
+  resolveMinParallelizationScore: () => resolveMinParallelizationScore,
+  resolvePlannerMaxTokens: () => resolvePlannerMaxTokens,
   resolvePlannerModel: () => resolvePlannerModel,
   resolveWikiModel: () => resolveWikiModel,
   runIdFor: () => runIdFor,
@@ -111,6 +129,7 @@ __export(wave_planner_exports, {
   selectDependentClaims: () => selectDependentClaims,
   simplifiedTemplate: () => simplifiedTemplate,
   sleep: () => sleep,
+  summarizeCorpus: () => summarizeCorpus,
   toActivityEventType: () => toActivityEventType,
   topologicalSort: () => topologicalSort,
   validateDAG: () => validateDAG,
@@ -1315,6 +1334,12 @@ var DEFAULT_WIKI_MODEL = "claude-sonnet-5";
 function resolvePlannerModel(explicit) {
   return explicit || process.env.WAVE_PLANNER_MODEL || DEFAULT_PLANNER_MODEL;
 }
+var DEFAULT_PLANNER_MAX_TOKENS = 16e3;
+function resolvePlannerMaxTokens(explicit, env = process.env) {
+  if (typeof explicit === "number" && Number.isFinite(explicit) && explicit > 0) return Math.floor(explicit);
+  const fromEnv = parseInt(env.WAVE_PLANNER_MAX_TOKENS ?? "", 10);
+  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : DEFAULT_PLANNER_MAX_TOKENS;
+}
 function resolveWikiModel(explicit) {
   return explicit || process.env.WIKI_MODEL || DEFAULT_WIKI_MODEL;
 }
@@ -1338,12 +1363,25 @@ ${text8}`,
   } catch {
   }
 }
+var PlannerTruncatedError = class extends Error {
+  constructor(message, generation) {
+    super(message);
+    this.generation = generation;
+    this.retryable = false;
+    this.name = "PlannerTruncatedError";
+  }
+};
 function isRetryable(error) {
+  if (error?.retryable === false) return false;
   const status = error?.status;
   if (typeof status !== "number") return true;
   return !NON_RETRYABLE_STATUS.has(status);
 }
 var WavePlannerAIClient = class {
+  /** The model this client asks for — which may be an alias the API resolves. */
+  get modelRequested() {
+    return this.config.model;
+  }
   constructor(config) {
     this.config = config;
     this.client = new import_sdk.default({
@@ -1372,21 +1410,28 @@ var WavePlannerAIClient = class {
       const durationMs = Date.now() - startTime;
       const textContent = response.content.filter((block) => block.type === "text").map((block) => "text" in block ? block.text : "").join("\n");
       dumpRawResponse(textContent, response.model);
-      if (response.stop_reason === "max_tokens") {
-        throw new Error(
-          `Planner response hit the ${this.config.maxTokens}-token ceiling and was truncated mid-plan. Raise WAVE_PLANNER_MAX_TOKENS, or narrow the spec.`
-        );
-      }
-      return {
+      const generation = {
         content: textContent,
         tokensInput: response.usage.input_tokens,
         tokensOutput: response.usage.output_tokens,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
+        // Reported, not assumed. These were hard-coded to 0, which was true
+        // only because nothing asks for caching yet — and would have gone on
+        // saying 0 after something did.
+        cacheReadTokens: response.usage.cache_read_input_tokens ?? 0,
+        cacheWriteTokens: response.usage.cache_creation_input_tokens ?? 0,
         durationMs,
-        model: response.model
+        model: response.model,
+        stopReason: response.stop_reason ?? null
       };
+      if (response.stop_reason === "max_tokens") {
+        throw new PlannerTruncatedError(
+          `Planner response hit the ${this.config.maxTokens}-token ceiling and was truncated mid-plan (the ceiling covers the model's thinking as well as the plan). Raise WAVE_PLANNER_MAX_TOKENS, or narrow the spec.`,
+          generation
+        );
+      }
+      return generation;
     } catch (error) {
+      if (error instanceof PlannerTruncatedError) throw error;
       const durationMs = Date.now() - startTime;
       const wrapped = new Error(
         `Claude API call failed after ${durationMs}ms: ${error instanceof Error ? error.message : String(error)}`
@@ -1540,6 +1585,8 @@ __export(schema_exports, {
   palaceTunnels: () => palaceTunnels,
   palaceWings: () => palaceWings,
   palaceWingsRelations: () => palaceWingsRelations,
+  plannerReviews: () => plannerReviews,
+  plannerTraces: () => plannerTraces,
   plans: () => plans,
   plansRelations: () => plansRelations,
   rufloSessions: () => rufloSessions,
@@ -2188,6 +2235,72 @@ var wavePlanMetricsRelations = (0, import_drizzle_orm4.relations)(wavePlanMetric
     references: [wavePlans.id]
   })
 }));
+var plannerTraces = (0, import_sqlite_core5.sqliteTable)("planner_traces", {
+  id: (0, import_sqlite_core5.text)("id").primaryKey().$defaultFn(() => (0, import_cuid25.createId)()),
+  /** The steps of one planning run share this: an initial plan and its refinements. */
+  runId: (0, import_sqlite_core5.text)("run_id").notNull(),
+  /** 0 for the run's first call, counting up. */
+  step: (0, import_sqlite_core5.integer)("step").notNull(),
+  /** `initial`, `refine`, or `reoptimize` (an initial plan made mid-run, with work already done). */
+  kind: (0, import_sqlite_core5.text)("kind").notNull(),
+  itemId: (0, import_sqlite_core5.text)("item_id").notNull(),
+  repo: (0, import_sqlite_core5.text)("repo").notNull(),
+  /**
+   * The plan this call led to. NULL until a plan is persisted for the item;
+   * then every call since the previous persisted plan carries its id, and
+   * `chosen` says which one's response it was.
+   */
+  wavePlanId: (0, import_sqlite_core5.text)("wave_plan_id"),
+  chosen: (0, import_sqlite_core5.integer)("chosen", { mode: "boolean" }).notNull().default(false),
+  template: (0, import_sqlite_core5.text)("template").notNull(),
+  templateVersion: (0, import_sqlite_core5.text)("template_version").notNull(),
+  /** The model asked for, and the one that answered (an alias resolves to a dated id). */
+  modelRequested: (0, import_sqlite_core5.text)("model_requested").notNull(),
+  model: (0, import_sqlite_core5.text)("model"),
+  prompt: (0, import_sqlite_core5.text)("prompt").notNull(),
+  promptSha: (0, import_sqlite_core5.text)("prompt_sha").notNull(),
+  /** NULL when the call failed before an answer. */
+  response: (0, import_sqlite_core5.text)("response"),
+  responseSha: (0, import_sqlite_core5.text)("response_sha"),
+  /** For a refinement: the hash of the plan it was asked to improve. */
+  basedOnSha: (0, import_sqlite_core5.text)("based_on_sha"),
+  stopReason: (0, import_sqlite_core5.text)("stop_reason"),
+  tokensInput: (0, import_sqlite_core5.integer)("tokens_input"),
+  /** Includes the model's thinking, which is billed as output and is not in `response`. */
+  tokensOutput: (0, import_sqlite_core5.integer)("tokens_output"),
+  cacheReadTokens: (0, import_sqlite_core5.integer)("cache_read_tokens"),
+  cacheWriteTokens: (0, import_sqlite_core5.integer)("cache_write_tokens"),
+  durationMs: (0, import_sqlite_core5.integer)("duration_ms"),
+  /** `valid` (parsed and passed validation), `invalid` (answered, rejected), `error` (no answer). */
+  outcome: (0, import_sqlite_core5.text)("outcome").notNull(),
+  /** Validation errors, or the error message. */
+  errors: (0, import_sqlite_core5.text)("errors", { mode: "json" }).$type(),
+  warnings: (0, import_sqlite_core5.text)("warnings", { mode: "json" }).$type(),
+  taskCount: (0, import_sqlite_core5.integer)("task_count"),
+  /** The score the refinement gate read, and the rest of what the scorer said. */
+  score: (0, import_sqlite_core5.real)("score"),
+  scoreDetail: (0, import_sqlite_core5.text)("score_detail", { mode: "json" }).$type(),
+  /** For a refinement: the score it had to beat, and whether it did. */
+  previousScore: (0, import_sqlite_core5.real)("previous_score"),
+  improved: (0, import_sqlite_core5.integer)("improved", { mode: "boolean" }),
+  /** The constraints the prompt carried — a reviewer's, when they asked for changes. */
+  constraints: (0, import_sqlite_core5.text)("constraints", { mode: "json" }).$type(),
+  createdAt: (0, import_sqlite_core5.integer)("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date())
+});
+var plannerReviews = (0, import_sqlite_core5.sqliteTable)("planner_reviews", {
+  id: (0, import_sqlite_core5.text)("id").primaryKey().$defaultFn(() => (0, import_cuid25.createId)()),
+  itemId: (0, import_sqlite_core5.text)("item_id").notNull(),
+  /** The hash of the plan that was on screen. Matches `planner_traces.response_sha`. */
+  planSha: (0, import_sqlite_core5.text)("plan_sha"),
+  wavePlanId: (0, import_sqlite_core5.text)("wave_plan_id"),
+  /** `approve`, `refine`, or `abort`. */
+  action: (0, import_sqlite_core5.text)("action").notNull(),
+  constraints: (0, import_sqlite_core5.text)("constraints", { mode: "json" }).$type(),
+  reason: (0, import_sqlite_core5.text)("reason"),
+  /** The score the reviewer was shown. */
+  score: (0, import_sqlite_core5.real)("score"),
+  createdAt: (0, import_sqlite_core5.integer)("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => /* @__PURE__ */ new Date())
+});
 
 // src/db/schema/wiki.ts
 var import_sqlite_core6 = require("drizzle-orm/sqlite-core");
@@ -2701,6 +2814,60 @@ CREATE TABLE IF NOT EXISTS wave_plan_metrics (
   re_optimization_count INTEGER NOT NULL DEFAULT 0,
   recorded_at INTEGER NOT NULL
 );
+
+-- Planner traces: one row per call to the planning model. Local only.
+CREATE TABLE IF NOT EXISTS planner_traces (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  step INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  wave_plan_id TEXT,
+  chosen INTEGER NOT NULL DEFAULT 0,
+  template TEXT NOT NULL,
+  template_version TEXT NOT NULL,
+  model_requested TEXT NOT NULL,
+  model TEXT,
+  prompt TEXT NOT NULL,
+  prompt_sha TEXT NOT NULL,
+  response TEXT,
+  response_sha TEXT,
+  based_on_sha TEXT,
+  stop_reason TEXT,
+  tokens_input INTEGER,
+  tokens_output INTEGER,
+  cache_read_tokens INTEGER,
+  cache_write_tokens INTEGER,
+  duration_ms INTEGER,
+  outcome TEXT NOT NULL,
+  errors TEXT,
+  warnings TEXT,
+  task_count INTEGER,
+  score REAL,
+  score_detail TEXT,
+  previous_score REAL,
+  improved INTEGER,
+  constraints TEXT,
+  created_at INTEGER NOT NULL
+);
+
+-- What a person decided about a plan they were shown.
+CREATE TABLE IF NOT EXISTS planner_reviews (
+  id TEXT PRIMARY KEY,
+  item_id TEXT NOT NULL,
+  plan_sha TEXT,
+  wave_plan_id TEXT,
+  action TEXT NOT NULL,
+  constraints TEXT,
+  reason TEXT,
+  score REAL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_planner_traces_item ON planner_traces(item_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_planner_traces_plan ON planner_traces(wave_plan_id);
+CREATE INDEX IF NOT EXISTS idx_planner_reviews_item ON planner_reviews(item_id, created_at);
 
 -- Create indexes
 CREATE INDEX IF NOT EXISTS idx_horizon_items_zone ON horizon_items(zone);
@@ -3320,8 +3487,12 @@ function renderWorkContext(context) {
       output += `- Original dependencies: ${task.originalDependencies.join(", ") || "None"}
 `;
       output += `- Original files: ${task.originalFiles.join(", ")}
-
 `;
+      if (task.lastError) {
+        output += `- Its last attempt did not finish. It reported: "${task.lastError.replace(/\s+/g, " ").slice(0, 300)}"
+`;
+      }
+      output += "\n";
     });
     output += "Adjust dependencies based on completed work and current codebase state.\n\n";
   }
@@ -3437,7 +3608,8 @@ function renderSimplifiedConstraints(context) {
 // src/wave-planner/prompt-templates/refinement.ts
 var refinementTemplate = {
   name: "refinement",
-  version: "1.0.0",
+  // 1.1.0: the target in the prompt is the threshold the plan is held to.
+  version: "1.1.0",
   render(context) {
     return `# Optimize Wave Execution Plan
 
@@ -3457,7 +3629,8 @@ ${context.specContent}
 
 Generate an optimized wave plan following the standard format.`;
   },
-  renderRefinement(context, currentPlan, currentScore) {
+  renderRefinement(context, currentPlan, currentScore, targetScore) {
+    const target = typeof targetScore === "number" && Number.isFinite(targetScore) ? `${(targetScore * 100).toFixed(0)}%` : "higher";
     return `# Improve Wave Execution Plan
 
 You are refining an existing wave execution plan to increase parallelization and reduce execution time.
@@ -3474,7 +3647,7 @@ ${currentPlan}
 
 ## Current Quality Metrics
 
-**Overall Score**: ${(currentScore * 100).toFixed(1)}% (Target: 80%+)
+**Parallelization score**: ${(currentScore * 100).toFixed(1)}% (Target: ${target}). This is one minus the critical path's share of the tasks. Raise it by removing dependencies that are not real and by running separable work side by side \u2014 not by cutting one coherent change into pieces.
 
 The current plan has optimization opportunities. Your goal is to improve parallelization while maintaining correctness.
 
@@ -3725,8 +3898,19 @@ var PromptConstructor = class {
       fleetContext,
       codebaseContext,
       constraints,
-      memoryContext
+      memoryContext,
+      ...config.completedWork ? { completedWork: config.completedWork } : {},
+      ...config.remainingWork ? { remainingWork: config.remainingWork } : {}
     };
+  }
+  /**
+   * A template's name and version, for the record of a planner call. A prompt
+   * is only comparable with another made from the same template at the same
+   * version; without this a trace would say what was sent and not what wrote it.
+   */
+  templateInfo(name) {
+    const template = name === "refinement" ? refinementTemplate : this.templates.get(name);
+    return { name, version: template?.version ?? "unknown" };
   }
   /**
    * Assemble MemoryContextBlock. Currently produces only the palace
@@ -3806,7 +3990,7 @@ var PromptConstructor = class {
    * @param currentScore - Current parallelization score (0-1)
    * @returns Rendered refinement prompt
    */
-  async constructRefinementPrompt(specContent, itemTitle, itemId, repo, config, currentPlan, currentScore) {
+  async constructRefinementPrompt(specContent, itemTitle, itemId, repo, config, currentPlan, currentScore, targetScore) {
     const context = await this.assembleContext(
       specContent,
       itemTitle,
@@ -3815,7 +3999,7 @@ var PromptConstructor = class {
       config
     );
     const template = refinementTemplate;
-    return template.renderRefinement(context, currentPlan, currentScore);
+    return template.renderRefinement(context, currentPlan, currentScore, targetScore);
   }
   /**
    * Construct a reoptimization prompt for mid-execution replanning.
@@ -3895,15 +4079,132 @@ ${specContent}`.toLowerCase();
   return Array.from(candidates).slice(0, 5);
 }
 
+// src/wave-planner/trace.ts
+var import_node_crypto = require("crypto");
+var import_cuid28 = require("@paralleldrive/cuid2");
+var import_drizzle_orm8 = require("drizzle-orm");
+function plannerTraceEnabled(env = process.env) {
+  const value = (env.DEVPILOT_PLANNER_TRACE ?? "").trim().toLowerCase();
+  return !["0", "false", "off", "no"].includes(value);
+}
+function planSha(text8) {
+  return (0, import_node_crypto.createHash)("sha256").update(text8, "utf8").digest("hex");
+}
+function newPlannerRunId() {
+  return (0, import_cuid28.createId)();
+}
+var warned = false;
+function warnOnce(what, error) {
+  if (warned) return;
+  warned = true;
+  console.warn(
+    `[planner-trace] ${what} could not be recorded (${error instanceof Error ? error.message : String(error)}). Planning is unaffected; further failures are not reported.`
+  );
+}
+async function recordPlannerTrace(record) {
+  if (!plannerTraceEnabled()) return;
+  try {
+    const improved = record.basedOn && record.score ? record.score.parallelizationScore > record.basedOn.score : null;
+    await getDatabase().insert(plannerTraces).values({
+      runId: record.runId,
+      step: record.step,
+      kind: record.kind,
+      itemId: record.itemId,
+      repo: record.repo,
+      template: record.template,
+      templateVersion: record.templateVersion,
+      modelRequested: record.modelRequested,
+      model: record.response?.model ?? null,
+      prompt: record.prompt,
+      promptSha: planSha(record.prompt),
+      response: record.response?.content ?? null,
+      responseSha: record.response ? planSha(record.response.content) : null,
+      basedOnSha: record.basedOn ? planSha(record.basedOn.rawMarkdown) : null,
+      stopReason: record.response?.stopReason ?? null,
+      tokensInput: record.response?.tokensInput ?? null,
+      tokensOutput: record.response?.tokensOutput ?? null,
+      cacheReadTokens: record.response?.cacheReadTokens ?? null,
+      cacheWriteTokens: record.response?.cacheWriteTokens ?? null,
+      durationMs: record.response?.durationMs ?? null,
+      outcome: record.outcome,
+      errors: record.errors && record.errors.length > 0 ? record.errors : null,
+      warnings: record.warnings && record.warnings.length > 0 ? record.warnings : null,
+      taskCount: record.taskCount ?? null,
+      score: record.score?.parallelizationScore ?? null,
+      scoreDetail: record.score ? { ...record.score } : null,
+      previousScore: record.basedOn?.score ?? null,
+      improved,
+      constraints: record.constraints && record.constraints.length > 0 ? record.constraints : null
+    });
+  } catch (error) {
+    warnOnce("a planner call", error);
+  }
+}
+async function recordPlanReview(review) {
+  if (!plannerTraceEnabled()) return;
+  try {
+    await getDatabase().insert(plannerReviews).values({
+      itemId: review.itemId,
+      planSha: review.rawMarkdown ? planSha(review.rawMarkdown) : null,
+      action: review.action,
+      constraints: review.constraints && review.constraints.length > 0 ? review.constraints : null,
+      reason: review.reason?.trim() || null,
+      score: review.score ?? null
+    });
+  } catch (error) {
+    warnOnce("a plan review", error);
+  }
+}
+async function linkTracesToPlan(itemId, rawMarkdown, wavePlanId) {
+  if (!plannerTraceEnabled()) return;
+  try {
+    const db2 = getDatabase();
+    await db2.update(plannerTraces).set({ wavePlanId }).where((0, import_drizzle_orm8.and)((0, import_drizzle_orm8.eq)(plannerTraces.itemId, itemId), (0, import_drizzle_orm8.isNull)(plannerTraces.wavePlanId)));
+    await db2.update(plannerReviews).set({ wavePlanId }).where((0, import_drizzle_orm8.and)((0, import_drizzle_orm8.eq)(plannerReviews.itemId, itemId), (0, import_drizzle_orm8.isNull)(plannerReviews.wavePlanId)));
+    if (rawMarkdown) {
+      await db2.update(plannerTraces).set({ chosen: true }).where(
+        (0, import_drizzle_orm8.and)(
+          (0, import_drizzle_orm8.eq)(plannerTraces.wavePlanId, wavePlanId),
+          (0, import_drizzle_orm8.eq)(plannerTraces.responseSha, planSha(rawMarkdown)),
+          (0, import_drizzle_orm8.eq)(plannerTraces.outcome, "valid")
+        )
+      );
+    }
+  } catch (error) {
+    warnOnce("the link between a plan and its planner calls", error);
+  }
+}
+function resetPlannerTraceWarning() {
+  warned = false;
+}
+
 // src/wave-planner/plan-refinement-service.ts
+var DEFAULT_MIN_PARALLELIZATION_SCORE = 0.3;
+function resolveMinParallelizationScore(explicit, env = process.env) {
+  if (typeof explicit === "number" && Number.isFinite(explicit)) return explicit;
+  const fromEnv = parseFloat(env.WAVE_PLANNER_MIN_PARALLELIZATION ?? "");
+  return Number.isFinite(fromEnv) && fromEnv >= 0 && fromEnv <= 1 ? fromEnv : DEFAULT_MIN_PARALLELIZATION_SCORE;
+}
+var MIN_TASKS_FOR_PARALLELIZATION_GATE = 4;
+function parallelizationGateApplies(taskCount) {
+  return taskCount >= MIN_TASKS_FOR_PARALLELIZATION_GATE;
+}
 var DEFAULT_REFINEMENT_CONFIG = {
-  minParallelizationScore: 0.3,
+  minParallelizationScore: DEFAULT_MIN_PARALLELIZATION_SCORE,
   maxRefinementIterations: 2,
   useSimplifiedOnRetry: true,
   maxTasksPerWave: void 0
 };
 var PlanRefinementService = class {
   constructor(aiClientConfig, refinementConfig) {
+    /**
+     * The planning run a call belongs to, for its trace: an initial plan starts
+     * one and its refinements continue it. A service built fresh after a restart
+     * starts a new run for a refinement; the trace's `basedOnSha` still says
+     * which plan it was refining.
+     */
+    this.runId = newPlannerRunId();
+    this.step = 0;
     this.promptConstructor = new PromptConstructor();
     this.aiClient = new WavePlannerAIClient(aiClientConfig);
     this.config = { ...DEFAULT_REFINEMENT_CONFIG, ...refinementConfig };
@@ -3935,7 +4236,8 @@ var PlanRefinementService = class {
       currentScore = initialResult.score;
       totalTokensUsed += initialResult.tokensUsed;
       iterationsPerformed = 1;
-      if (currentScore.parallelizationScore >= this.config.minParallelizationScore) {
+      const taskCount = currentPlan.waves.reduce((n, w) => n + w.tasks.length, 0);
+      if (!parallelizationGateApplies(taskCount) || currentScore.parallelizationScore >= this.config.minParallelizationScore) {
         return {
           plan: currentPlan,
           score: currentScore,
@@ -4011,20 +4313,66 @@ var PlanRefinementService = class {
       repo,
       constructorConfig
     );
-    const response = await this.aiClient.generateWithRetry(prompt);
+    this.runId = newPlannerRunId();
+    this.step = 0;
+    const trace = this.traceBase(
+      constructorConfig.completedWork || constructorConfig.remainingWork ? "reoptimize" : "initial",
+      constructorConfig.template || "default",
+      itemId,
+      repo,
+      prompt,
+      constructorConfig
+    );
+    let response;
+    try {
+      response = await this.aiClient.generateWithRetry(prompt);
+    } catch (error) {
+      await recordPlannerTrace({ ...trace, ...answeredBeforeFailing(error), outcome: "error", errors: [messageOf(error)] });
+      throw error;
+    }
     const tokensUsed = response.tokensInput + response.tokensOutput;
     const plan = parseWavePlanResponse(response.content);
-    const validation = validateDAG(
-      plan.waves.flatMap((w) => w.tasks),
-      plan.dependencyEdges
-    );
+    const tasks2 = plan.waves.flatMap((w) => w.tasks);
+    const validation = validateDAG(tasks2, plan.dependencyEdges);
     if (!validation.valid) {
+      await recordPlannerTrace({
+        ...trace,
+        response,
+        outcome: "invalid",
+        errors: validation.errors.map((e) => e.message),
+        warnings: validation.warnings.map((w) => w.message),
+        taskCount: tasks2.length
+      });
       throw new Error(
         `Generated plan has validation errors: ${validation.errors.map((e) => e.message).join("; ")}`
       );
     }
     const score = this.scorePlan(plan);
+    await recordPlannerTrace({
+      ...trace,
+      response,
+      outcome: "valid",
+      warnings: validation.warnings.map((w) => w.message),
+      taskCount: tasks2.length,
+      score
+    });
     return { plan, score, tokensUsed };
+  }
+  /** What every trace of a call carries, before the call has an answer. */
+  traceBase(kind, templateName, itemId, repo, prompt, constructorConfig) {
+    const template = this.promptConstructor.templateInfo(templateName);
+    return {
+      runId: this.runId,
+      step: this.step++,
+      kind,
+      itemId,
+      repo,
+      template: template.name,
+      templateVersion: template.version,
+      modelRequested: this.aiClient.modelRequested,
+      prompt,
+      constraints: constructorConfig.customConstraints
+    };
   }
   /**
    * Refine an existing plan to improve parallelization.
@@ -4038,16 +4386,33 @@ var PlanRefinementService = class {
       repo,
       constructorConfig,
       currentPlan.rawMarkdown,
-      currentScore
+      currentScore,
+      this.config.minParallelizationScore
     );
-    const response = await this.aiClient.generateWithRetry(prompt);
+    const trace = {
+      ...this.traceBase("refine", "refinement", itemId, repo, prompt, constructorConfig),
+      basedOn: { rawMarkdown: currentPlan.rawMarkdown, score: currentScore }
+    };
+    let response;
+    try {
+      response = await this.aiClient.generateWithRetry(prompt);
+    } catch (error) {
+      await recordPlannerTrace({ ...trace, ...answeredBeforeFailing(error), outcome: "error", errors: [messageOf(error)] });
+      throw error;
+    }
     const tokensUsed = response.tokensInput + response.tokensOutput;
     const plan = parseWavePlanResponse(response.content);
-    const validation = validateDAG(
-      plan.waves.flatMap((w) => w.tasks),
-      plan.dependencyEdges
-    );
+    const tasks2 = plan.waves.flatMap((w) => w.tasks);
+    const validation = validateDAG(tasks2, plan.dependencyEdges);
     if (!validation.valid) {
+      await recordPlannerTrace({
+        ...trace,
+        response,
+        outcome: "invalid",
+        errors: validation.errors.map((e) => e.message),
+        warnings: validation.warnings.map((w) => w.message),
+        taskCount: tasks2.length
+      });
       this.lastRefinementError = `Refinement discarded \u2014 ${validation.errors.map((e) => e.message).join("; ")}`;
       return {
         plan: currentPlan,
@@ -4056,6 +4421,14 @@ var PlanRefinementService = class {
       };
     }
     const score = this.scorePlan(plan);
+    await recordPlannerTrace({
+      ...trace,
+      response,
+      outcome: "valid",
+      warnings: validation.warnings.map((w) => w.message),
+      taskCount: tasks2.length,
+      score
+    });
     return { plan, score, tokensUsed };
   }
   /**
@@ -4131,9 +4504,15 @@ var PlanRefinementService = class {
 function createPlanRefinementService(aiClientConfig, refinementConfig) {
   return new PlanRefinementService(aiClientConfig, refinementConfig);
 }
+function messageOf(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+function answeredBeforeFailing(error) {
+  return error instanceof PlannerTruncatedError ? { response: error.generation } : {};
+}
 
 // src/wave-planner/generator.ts
-var import_drizzle_orm8 = require("drizzle-orm");
+var import_drizzle_orm9 = require("drizzle-orm");
 var WavePlanGenerator = class {
   constructor(config) {
     this.config = config;
@@ -4294,7 +4673,7 @@ var WavePlanGenerator = class {
    */
   async persistWavePlan(horizonItemId, planId, wavePlan, criticalPath, waveAssignment, score, codeGraph) {
     const db2 = getDatabase();
-    const existingPlans = await db2.select().from(wavePlans).where((0, import_drizzle_orm8.eq)(wavePlans.horizonItemId, horizonItemId)).orderBy(wavePlans.version);
+    const existingPlans = await db2.select().from(wavePlans).where((0, import_drizzle_orm9.eq)(wavePlans.horizonItemId, horizonItemId)).orderBy(wavePlans.version);
     const version = existingPlans.length > 0 ? existingPlans[existingPlans.length - 1].version + 1 : 1;
     const previousWavePlanId = existingPlans.length > 0 ? existingPlans[existingPlans.length - 1].id : null;
     const [insertedWavePlan] = await db2.insert(wavePlans).values({
@@ -4367,6 +4746,7 @@ var WavePlanGenerator = class {
       ).length,
       reOptimizationCount: 0
     });
+    await linkTracesToPlan(horizonItemId, wavePlan.rawMarkdown, wavePlanId);
     return wavePlanId;
   }
   /**
@@ -4402,23 +4782,24 @@ var WavePlanGenerator = class {
    */
   async reoptimize(wavePlanId, specContent, itemTitle, repo, constructorConfig) {
     const db2 = getDatabase();
-    const existingPlan = await db2.select().from(wavePlans).where((0, import_drizzle_orm8.eq)(wavePlans.id, wavePlanId)).limit(1);
+    const existingPlan = await db2.select().from(wavePlans).where((0, import_drizzle_orm9.eq)(wavePlans.id, wavePlanId)).limit(1);
     if (existingPlan.length === 0) {
       throw new Error(`Wave plan not found: ${wavePlanId}`);
     }
     const wavePlan = existingPlan[0];
-    const existingTasks = await db2.select().from(waveTasks).where((0, import_drizzle_orm8.eq)(waveTasks.wavePlanId, wavePlanId));
+    const existingTasks = await db2.select().from(waveTasks).where((0, import_drizzle_orm9.eq)(waveTasks.wavePlanId, wavePlanId));
     const completedTasks2 = existingTasks.filter((t) => t.status === "completed").map((t) => ({
       taskCode: t.taskCode,
       description: t.description,
-      filesModified: t.filePaths || [],
-      completionSummary: `Completed task: ${t.label}`
+      filesModified: t.filesChanged ?? t.filePaths ?? [],
+      completionSummary: t.completionSummary?.trim().slice(0, COMPLETION_SUMMARY_MAX) || `Completed task: ${t.label}`
     }));
     const remainingTasks = existingTasks.filter((t) => t.status !== "completed" && t.status !== "skipped").map((t) => ({
       taskCode: t.taskCode,
       description: t.description,
       originalDependencies: t.dependencies || [],
-      originalFiles: t.filePaths || []
+      originalFiles: t.filePaths || [],
+      ...t.errorMessage?.trim() ? { lastError: t.errorMessage.trim() } : {}
     }));
     return this.generate(
       wavePlan.horizonItemId,
@@ -4428,6 +4809,8 @@ var WavePlanGenerator = class {
       repo,
       {
         ...constructorConfig,
+        completedWork: { tasks: completedTasks2 },
+        remainingWork: { tasks: remainingTasks },
         customConstraints: [
           ...constructorConfig.customConstraints || [],
           `This is a reoptimization. ${completedTasks2.length} tasks are already complete.`,
@@ -4437,6 +4820,7 @@ var WavePlanGenerator = class {
     );
   }
 };
+var COMPLETION_SUMMARY_MAX = 400;
 function createWavePlanGenerator(config) {
   return new WavePlanGenerator(config);
 }
@@ -4445,12 +4829,10 @@ async function generateWavePlan(horizonItemId, planId, specContent, itemTitle, r
     aiClient: {
       apiKey,
       model: resolvePlannerModel(),
-      maxTokens: parseInt(process.env.WAVE_PLANNER_MAX_TOKENS || "8192", 10)
+      maxTokens: resolvePlannerMaxTokens()
     },
     refinement: {
-      minParallelizationScore: parseFloat(
-        process.env.WAVE_PLANNER_MIN_PARALLELIZATION || "0.3"
-      ),
+      minParallelizationScore: resolveMinParallelizationScore(),
       maxRefinementIterations: 2
     },
     autoPersist: true
@@ -4465,8 +4847,205 @@ async function generateWavePlan(horizonItemId, planId, specContent, itemTitle, r
   );
 }
 
+// src/wave-planner/planner-corpus.ts
+var PLANNER_EPISODE_SCHEMA = "devpilot.planner-episode/1";
+var normalizePath = (path) => path.trim().replace(/\\/g, "/").replace(/^(\.\/)+/, "");
+var ENDED = /* @__PURE__ */ new Set(["completed", "failed", "skipped"]);
+function planOutcome(plan) {
+  const tasks2 = plan.tasks;
+  const dispatched = tasks2.filter((t) => t.startedAt !== null);
+  const completed = tasks2.filter((t) => t.status === "completed");
+  const failed = tasks2.filter((t) => t.status === "failed");
+  const conflicted = tasks2.filter((t) => t.error?.startsWith("merge conflict") ?? false);
+  const settled = dispatched.filter((t) => ENDED.has(t.status));
+  const firstTime = settled.filter((t) => t.status === "completed" && t.attempts === 1);
+  let planned = 0;
+  let changed = 0;
+  let both = 0;
+  let tasksMeasured = 0;
+  for (const task of tasks2) {
+    if (task.filesChanged === null) continue;
+    tasksMeasured += 1;
+    const plannedSet = new Set(task.filePaths.map(normalizePath));
+    const changedSet = new Set(task.filesChanged.map(normalizePath));
+    planned += plannedSet.size;
+    changed += changedSet.size;
+    for (const file of changedSet) if (plannedSet.has(file)) both += 1;
+  }
+  let sameWaveCollisions = 0;
+  const byWave = /* @__PURE__ */ new Map();
+  for (const task of tasks2) {
+    if (task.filesChanged === null || task.filesChanged.length === 0) continue;
+    const list = byWave.get(task.waveIndex) ?? [];
+    list.push(task);
+    byWave.set(task.waveIndex, list);
+  }
+  for (const wave of byWave.values()) {
+    for (let i = 0; i < wave.length; i++) {
+      const mine = new Set(wave[i].filesChanged.map(normalizePath));
+      for (let j = i + 1; j < wave.length; j++) {
+        if (wave[j].filesChanged.some((file) => mine.has(normalizePath(file)))) sameWaveCollisions += 1;
+      }
+    }
+  }
+  const starts = dispatched.map((t) => t.startedAt).filter((n) => Number.isFinite(n));
+  const ends = tasks2.map((t) => t.completedAt).filter((n) => n !== null);
+  const over = plan.status === "completed" || plan.status === "failed";
+  const wallClockMs = over && starts.length > 0 && ends.length > 0 ? Math.max(0, Math.max(...ends) - Math.min(...starts)) : null;
+  const costs = tasks2.map((t) => t.costUsd).filter((n) => n !== null);
+  const tokens = tasks2.map((t) => t.tokens).filter((n) => n !== null);
+  return {
+    ended: plan.status === "completed" ? "completed" : plan.status === "failed" ? "failed" : dispatched.length === 0 ? "not-run" : "running",
+    tasks: {
+      total: tasks2.length,
+      dispatched: dispatched.length,
+      completed: completed.length,
+      failed: failed.length,
+      skipped: tasks2.filter((t) => t.status === "skipped").length,
+      retried: tasks2.filter((t) => t.attempts > 1).length,
+      conflicted: conflicted.length
+    },
+    firstAttemptPassRate: settled.length > 0 ? firstTime.length / settled.length : null,
+    files: tasksMeasured > 0 ? {
+      tasksMeasured,
+      planned,
+      changed,
+      both,
+      precision: planned > 0 ? both / planned : null,
+      recall: changed > 0 ? both / changed : null
+    } : null,
+    sameWaveCollisions,
+    wallClockMs,
+    costUsd: costs.length > 0 ? costs.reduce((a, b) => a + b, 0) : null,
+    tokens: tokens.length > 0 ? tokens.reduce((a, b) => a + b, 0) : null
+  };
+}
+function buildEpisodes(input) {
+  const byAt = (a, b) => a.at < b.at ? -1 : a.at > b.at ? 1 : 0;
+  const strip = (row, ...keys) => {
+    const copy = { ...row };
+    for (const key of keys) delete copy[key];
+    return copy;
+  };
+  const episodes = [];
+  for (const plan of input.plans) {
+    const calls = input.calls.filter((c) => c.wavePlanId === plan.wavePlanId).sort(byAt);
+    const reviews = input.reviews.filter((r) => r.wavePlanId === plan.wavePlanId).sort(byAt);
+    const body = strip(plan, "itemId", "repo");
+    episodes.push({
+      schema: PLANNER_EPISODE_SCHEMA,
+      itemId: plan.itemId,
+      repo: plan.repo ?? calls[0]?.repo ?? null,
+      calls: calls.map((c) => strip(c, "itemId", "repo", "wavePlanId")),
+      reviews: reviews.map((r) => strip(r, "itemId", "wavePlanId")),
+      plan: body,
+      outcome: planOutcome(body),
+      sortAt: plan.createdAt
+    });
+  }
+  const known = new Set(input.plans.map((p) => p.wavePlanId));
+  const loose = /* @__PURE__ */ new Map();
+  const bucket = (itemId) => {
+    let b = loose.get(itemId);
+    if (!b) loose.set(itemId, b = { calls: [], reviews: [] });
+    return b;
+  };
+  for (const call of input.calls) if (!call.wavePlanId || !known.has(call.wavePlanId)) bucket(call.itemId).calls.push(call);
+  for (const review of input.reviews)
+    if (!review.wavePlanId || !known.has(review.wavePlanId)) bucket(review.itemId).reviews.push(review);
+  for (const [itemId, rows] of loose) {
+    const calls = rows.calls.sort(byAt);
+    const reviews = rows.reviews.sort(byAt);
+    const first = calls[0]?.at ?? reviews[0]?.at;
+    episodes.push({
+      schema: PLANNER_EPISODE_SCHEMA,
+      itemId,
+      repo: calls[0]?.repo ?? null,
+      calls: calls.map((c) => strip(c, "itemId", "repo", "wavePlanId")),
+      reviews: reviews.map((r) => strip(r, "itemId", "wavePlanId")),
+      plan: null,
+      outcome: null,
+      sortAt: first ? Date.parse(first) : 0
+    });
+  }
+  return episodes.sort((a, b) => b.sortAt - a.sortAt || (a.itemId < b.itemId ? -1 : 1)).map((episode) => strip(episode, "sortAt"));
+}
+function redactEpisode(episode) {
+  return {
+    ...episode,
+    repo: null,
+    calls: episode.calls.map((call) => ({
+      ...call,
+      prompt: null,
+      response: null,
+      errors: call.errors.map(() => "[removed]"),
+      warnings: call.warnings.map(() => "[removed]"),
+      constraints: call.constraints.map(() => "[removed]")
+    })),
+    reviews: episode.reviews.map((review) => ({
+      ...review,
+      constraints: review.constraints.map(() => "[removed]"),
+      reason: review.reason ? "[removed]" : null
+    })),
+    plan: episode.plan ? {
+      ...episode.plan,
+      failureReason: episode.plan.failureReason ? "[removed]" : null,
+      tasks: episode.plan.tasks.map((task) => ({
+        ...task,
+        description: null,
+        filePaths: task.filePaths.map((_, i) => `file-${i + 1}`),
+        error: task.error ? task.error.startsWith("merge conflict") ? "merge conflict" : "[removed]" : null,
+        summary: null,
+        filesChanged: task.filesChanged ? task.filesChanged.map((_, i) => `changed-${i + 1}`) : null
+      }))
+    } : null
+  };
+}
+function summarizeCorpus(episodes) {
+  const calls = episodes.flatMap((e) => e.calls);
+  const callOutcomes = {};
+  for (const call of calls) callOutcomes[call.outcome] = (callOutcomes[call.outcome] ?? 0) + 1;
+  const reviews = {};
+  for (const review of episodes.flatMap((e) => e.reviews)) reviews[review.action] = (reviews[review.action] ?? 0) + 1;
+  const ended = episodes.filter((e) => e.outcome && (e.outcome.ended === "completed" || e.outcome.ended === "failed"));
+  let settled = 0;
+  let firstTime = 0;
+  let planned = 0;
+  let changed = 0;
+  let both = 0;
+  let collisions = 0;
+  for (const episode of ended) {
+    const plan = episode.plan;
+    const done = plan.tasks.filter((t) => t.startedAt !== null && ENDED.has(t.status));
+    settled += done.length;
+    firstTime += done.filter((t) => t.status === "completed" && t.attempts === 1).length;
+    planned += episode.outcome.files?.planned ?? 0;
+    changed += episode.outcome.files?.changed ?? 0;
+    both += episode.outcome.files?.both ?? 0;
+    collisions += episode.outcome.sameWaveCollisions;
+  }
+  const refinements = calls.filter((c) => c.kind === "refine");
+  return {
+    episodes: episodes.length,
+    withPlan: episodes.filter((e) => e.plan).length,
+    ended: ended.length,
+    calls: calls.length,
+    callOutcomes,
+    refinements: refinements.length,
+    refinementsImproved: refinements.filter((c) => c.improved === true).length,
+    truncated: calls.filter((c) => c.stopReason === "max_tokens").length,
+    reviews,
+    tokensInput: calls.reduce((sum, c) => sum + (c.tokensInput ?? 0), 0),
+    tokensOutput: calls.reduce((sum, c) => sum + (c.tokensOutput ?? 0), 0),
+    firstAttemptPassRate: settled > 0 ? firstTime / settled : null,
+    filePrecision: planned > 0 ? both / planned : null,
+    fileRecall: changed > 0 ? both / changed : null,
+    sameWaveCollisions: collisions
+  };
+}
+
 // src/wave-planner/plan-projection.ts
-var import_drizzle_orm9 = require("drizzle-orm");
+var import_drizzle_orm10 = require("drizzle-orm");
 
 // src/wave-planner/ticket-description.ts
 var MAX_ITEM_DESCRIPTION_CHARS = 2e4;
@@ -4585,11 +5164,11 @@ async function generatePlanForItem(params) {
 async function projectWavePlanToPlan(params) {
   const { planId, generation, inFlightPaths } = params;
   const db2 = getDatabase();
-  const [planRow] = await db2.select({ horizonItemId: plans.horizonItemId }).from(plans).where((0, import_drizzle_orm9.eq)(plans.id, planId)).limit(1);
+  const [planRow] = await db2.select({ horizonItemId: plans.horizonItemId }).from(plans).where((0, import_drizzle_orm10.eq)(plans.id, planId)).limit(1);
   if (!planRow) {
     throw new Error(`Plan not found: ${planId}`);
   }
-  const [itemRow] = await db2.select({ repo: horizonItems.repo }).from(horizonItems).where((0, import_drizzle_orm9.eq)(horizonItems.id, planRow.horizonItemId)).limit(1);
+  const [itemRow] = await db2.select({ repo: horizonItems.repo }).from(horizonItems).where((0, import_drizzle_orm10.eq)(horizonItems.id, planRow.horizonItemId)).limit(1);
   const repo = itemRow?.repo ?? "";
   const maxParallelism = generation.waveAssignment.maxParallelism;
   const projectionWaves = generation.waveAssignment.waves;
@@ -4653,7 +5232,7 @@ async function projectWavePlanToPlan(params) {
     estimatedCostUsd: totalCostUsd,
     baselineCostUsd: totalCostUsd * baselineMultiplier,
     confidenceSignals
-  }).where((0, import_drizzle_orm9.eq)(plans.id, planId));
+  }).where((0, import_drizzle_orm10.eq)(plans.id, planId));
   return { planId, workstreamIds, taskIds };
 }
 
@@ -4668,7 +5247,7 @@ function workHistoryForPaths(rows, paths, opts = {}) {
   const byPath = {};
   const totals = {};
   for (const path of paths) {
-    const wanted = normalizePath(path);
+    const wanted = normalizePath2(path);
     const entries = [];
     let total = 0;
     for (const { row, at } of started) {
@@ -4684,9 +5263,9 @@ function workHistoryForPaths(rows, paths, opts = {}) {
 }
 function matchOf(row, path) {
   if (row.filesChanged !== null) {
-    return row.filesChanged.some((file) => normalizePath(file) === path) ? "changed" : null;
+    return row.filesChanged.some((file) => normalizePath2(file) === path) ? "changed" : null;
   }
-  return row.filePaths.some((file) => normalizePath(file) === path) ? "planned" : null;
+  return row.filePaths.some((file) => normalizePath2(file) === path) ? "planned" : null;
 }
 function entryOf(row, at, matchedOn) {
   const summary = row.completionSummary?.trim() || null;
@@ -4728,7 +5307,7 @@ function clampLimit(limit) {
   if (typeof limit !== "number" || !Number.isFinite(limit)) return DEFAULT_HISTORY_LIMIT;
   return Math.min(MAX_HISTORY_LIMIT, Math.max(1, Math.floor(limit)));
 }
-function normalizePath(path) {
+function normalizePath2(path) {
   return path.trim().replace(/\\/g, "/").replace(/^(\.\/)+/, "");
 }
 function compare(a, b) {
@@ -4753,7 +5332,7 @@ function toActivityEventType(t) {
 }
 
 // src/wave-planner/execution/wave-state.ts
-var import_drizzle_orm10 = require("drizzle-orm");
+var import_drizzle_orm11 = require("drizzle-orm");
 var TERMINAL_WAVE_TASK_STATUSES = [
   "completed",
   "failed",
@@ -4787,22 +5366,22 @@ function isTerminalWavePlanStatus(status) {
 function isWaveOver(tasks2) {
   return tasks2.every((task) => isTerminalWaveTaskStatus(task.status));
 }
-var quoted = (values) => import_drizzle_orm10.sql.raw(values.map((v) => `'${v}'`).join(", "));
+var quoted = (values) => import_drizzle_orm11.sql.raw(values.map((v) => `'${v}'`).join(", "));
 function inFlightEverywhereSql() {
-  return import_drizzle_orm10.sql`(select count(*) from wave_tasks t inner join wave_plans p on p.id = t.wave_plan_id where t.status in (${quoted(
+  return import_drizzle_orm11.sql`(select count(*) from wave_tasks t inner join wave_plans p on p.id = t.wave_plan_id where t.status in (${quoted(
     IN_FLIGHT_WAVE_TASK_STATUSES
   )}) and p.status not in (${quoted(TERMINAL_WAVE_PLAN_STATUSES)}))`;
 }
 function inFlightInPlanSql(wavePlanId) {
-  return import_drizzle_orm10.sql`(select count(*) from wave_tasks t where t.wave_plan_id = ${wavePlanId} and t.status in (${quoted(
+  return import_drizzle_orm11.sql`(select count(*) from wave_tasks t where t.wave_plan_id = ${wavePlanId} and t.status in (${quoted(
     IN_FLIGHT_WAVE_TASK_STATUSES
   )}))`;
 }
 async function freeDispatchSlots(wavePlanId, limits, db2 = getDatabase()) {
   const [row] = await db2.select({
-    everywhere: import_drizzle_orm10.sql`${inFlightEverywhereSql()}`.mapWith(Number),
-    inPlan: import_drizzle_orm10.sql`${inFlightInPlanSql(wavePlanId)}`.mapWith(Number)
-  }).from(wavePlans).where((0, import_drizzle_orm10.eq)(wavePlans.id, wavePlanId)).limit(1);
+    everywhere: import_drizzle_orm11.sql`${inFlightEverywhereSql()}`.mapWith(Number),
+    inPlan: import_drizzle_orm11.sql`${inFlightInPlanSql(wavePlanId)}`.mapWith(Number)
+  }).from(wavePlans).where((0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId)).limit(1);
   if (!row) return 0;
   return Math.max(
     0,
@@ -4870,12 +5449,12 @@ function readWaveSignal(plan, tasks2, freeSlots) {
   };
 }
 async function waveSignalFor(wavePlanId, waveIndex, limits, db2 = getDatabase()) {
-  const plan = await db2.query.wavePlans.findFirst({ where: (0, import_drizzle_orm10.eq)(wavePlans.id, wavePlanId) });
+  const plan = await db2.query.wavePlans.findFirst({ where: (0, import_drizzle_orm11.eq)(wavePlans.id, wavePlanId) });
   if (!plan) {
     return { kind: "wait", reason: `no wave plan ${wavePlanId}` };
   }
   const tasks2 = await db2.query.waveTasks.findMany({
-    where: (0, import_drizzle_orm10.and)((0, import_drizzle_orm10.eq)(waveTasks.wavePlanId, wavePlanId), (0, import_drizzle_orm10.eq)(waveTasks.waveIndex, waveIndex))
+    where: (0, import_drizzle_orm11.and)((0, import_drizzle_orm11.eq)(waveTasks.wavePlanId, wavePlanId), (0, import_drizzle_orm11.eq)(waveTasks.waveIndex, waveIndex))
   });
   return readWaveSignal(plan, tasks2, await freeDispatchSlots(wavePlanId, limits, db2));
 }
@@ -4969,7 +5548,7 @@ var ConcurrencyManager = class {
 };
 
 // src/wave-planner/execution/completion-listener.ts
-var import_drizzle_orm11 = require("drizzle-orm");
+var import_drizzle_orm12 = require("drizzle-orm");
 function workFromReport(report) {
   const r = report && typeof report === "object" ? report : {};
   const text8 = (value) => typeof value === "string" && value.length > 0 ? value : null;
@@ -5009,11 +5588,11 @@ var CompletionListener = class {
    */
   async handleTaskStarted(wavePlanId, taskCode, sessionId) {
     const started = await this.db.update(waveTasks).set({ status: "running" }).where(
-      (0, import_drizzle_orm11.and)(
-        (0, import_drizzle_orm11.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm11.eq)(waveTasks.taskCode, taskCode),
-        (0, import_drizzle_orm11.eq)(waveTasks.status, "dispatched"),
-        (0, import_drizzle_orm11.eq)(waveTasks.assignedSessionId, sessionId)
+      (0, import_drizzle_orm12.and)(
+        (0, import_drizzle_orm12.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm12.eq)(waveTasks.taskCode, taskCode),
+        (0, import_drizzle_orm12.eq)(waveTasks.status, "dispatched"),
+        (0, import_drizzle_orm12.eq)(waveTasks.assignedSessionId, sessionId)
       )
     ).returning({ id: waveTasks.id });
     if (started.length === 0) {
@@ -5059,16 +5638,16 @@ var CompletionListener = class {
       completionSummary: completionSummary ?? null,
       ...work && !nothingRecorded(work) ? work : {}
     }).where(
-      (0, import_drizzle_orm11.and)(
-        (0, import_drizzle_orm11.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm11.eq)(waveTasks.taskCode, taskCode),
-        (0, import_drizzle_orm11.notInArray)(waveTasks.status, [...TERMINAL_WAVE_TASK_STATUSES]),
-        ...sessionId ? [(0, import_drizzle_orm11.eq)(waveTasks.assignedSessionId, sessionId)] : []
+      (0, import_drizzle_orm12.and)(
+        (0, import_drizzle_orm12.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm12.eq)(waveTasks.taskCode, taskCode),
+        (0, import_drizzle_orm12.notInArray)(waveTasks.status, [...TERMINAL_WAVE_TASK_STATUSES]),
+        ...sessionId ? [(0, import_drizzle_orm12.eq)(waveTasks.assignedSessionId, sessionId)] : []
       )
     ).returning({ waveIndex: waveTasks.waveIndex });
     if (completed.length === 0) {
       const exists = await this.db.query.waveTasks.findFirst({
-        where: (0, import_drizzle_orm11.and)((0, import_drizzle_orm11.eq)(waveTasks.wavePlanId, wavePlanId), (0, import_drizzle_orm11.eq)(waveTasks.taskCode, taskCode))
+        where: (0, import_drizzle_orm12.and)((0, import_drizzle_orm12.eq)(waveTasks.wavePlanId, wavePlanId), (0, import_drizzle_orm12.eq)(waveTasks.taskCode, taskCode))
       });
       if (!exists) {
         throw new Error(`Task ${taskCode} not found in wave plan ${wavePlanId}`);
@@ -5095,11 +5674,11 @@ var CompletionListener = class {
   async recordTaskWork(wavePlanId, taskCode, sessionId, work) {
     if (nothingRecorded(work)) return;
     await this.db.update(waveTasks).set(work).where(
-      (0, import_drizzle_orm11.and)(
-        (0, import_drizzle_orm11.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm11.eq)(waveTasks.taskCode, taskCode),
-        (0, import_drizzle_orm11.eq)(waveTasks.assignedSessionId, sessionId),
-        (0, import_drizzle_orm11.inArray)(waveTasks.status, [...IN_FLIGHT_WAVE_TASK_STATUSES])
+      (0, import_drizzle_orm12.and)(
+        (0, import_drizzle_orm12.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm12.eq)(waveTasks.taskCode, taskCode),
+        (0, import_drizzle_orm12.eq)(waveTasks.assignedSessionId, sessionId),
+        (0, import_drizzle_orm12.inArray)(waveTasks.status, [...IN_FLIGHT_WAVE_TASK_STATUSES])
       )
     );
   }
@@ -5129,17 +5708,17 @@ var CompletionListener = class {
 };
 
 // src/wave-planner/execution/auto-advance.ts
-var import_drizzle_orm12 = require("drizzle-orm");
+var import_drizzle_orm13 = require("drizzle-orm");
 async function collectFinalMetrics(wavePlanId) {
   const db2 = getDatabase();
   const wavePlan = await db2.query.wavePlans.findFirst({
-    where: (0, import_drizzle_orm12.eq)(wavePlans.id, wavePlanId)
+    where: (0, import_drizzle_orm13.eq)(wavePlans.id, wavePlanId)
   });
   if (!wavePlan) {
     throw new Error(`Wave plan ${wavePlanId} not found`);
   }
   const tasks2 = await db2.query.waveTasks.findMany({
-    where: (0, import_drizzle_orm12.eq)(waveTasks.wavePlanId, wavePlanId)
+    where: (0, import_drizzle_orm13.eq)(waveTasks.wavePlanId, wavePlanId)
   });
   const tasksCompleted = tasks2.filter((t) => t.status === "completed").length;
   const tasksFailed = tasks2.filter((t) => t.status === "failed").length;
@@ -5164,14 +5743,13 @@ async function collectFinalMetrics(wavePlanId) {
     parallelizationEfficiency = theoreticalMinMs / totalWallClockMs;
   }
   const completedWaves = await db2.query.waves.findMany({
-    where: (0, import_drizzle_orm12.and)(
-      (0, import_drizzle_orm12.eq)(waves.wavePlanId, wavePlanId),
-      (0, import_drizzle_orm12.eq)(waves.status, "completed")
+    where: (0, import_drizzle_orm13.and)(
+      (0, import_drizzle_orm13.eq)(waves.wavePlanId, wavePlanId),
+      (0, import_drizzle_orm13.eq)(waves.status, "completed")
     )
   });
   const wavesExecutedCount = completedWaves.length;
-  await db2.insert(wavePlanMetrics).values({
-    wavePlanId,
+  const measured = {
     totalWallClockMs,
     theoreticalMinMs,
     parallelizationEfficiency,
@@ -5182,14 +5760,14 @@ async function collectFinalMetrics(wavePlanId) {
     avgTaskDurationMs,
     maxWaveWaitMs: null,
     // TODO: Calculate from wave timings
-    fileConflictsAvoided: 0,
-    // TODO: Track during execution
-    reOptimizationCount: wavePlan.version - 1
-  }).onConflictDoNothing({ target: wavePlanMetrics.wavePlanId });
+    reOptimizationCount: wavePlan.version - 1,
+    recordedAt: /* @__PURE__ */ new Date()
+  };
+  await db2.insert(wavePlanMetrics).values({ wavePlanId, ...measured, fileConflictsAvoided: 0 }).onConflictDoUpdate({ target: wavePlanMetrics.wavePlanId, set: measured });
 }
 
 // src/wave-planner/execution/controller.ts
-var import_drizzle_orm14 = require("drizzle-orm");
+var import_drizzle_orm15 = require("drizzle-orm");
 
 // src/orchestrator/session-prompt.ts
 var MAX_REACHED_TESTS_LISTED = 10;
@@ -5355,7 +5933,7 @@ Replace \`<callback-token>\` with the token provided by your runner. Send the co
 }
 
 // src/orchestrator/host-wiring.ts
-var import_drizzle_orm13 = require("drizzle-orm");
+var import_drizzle_orm14 = require("drizzle-orm");
 
 // src/wave-planner/execution/controller.ts
 var WaveExecutionController = class {
@@ -5370,7 +5948,7 @@ var WaveExecutionController = class {
    */
   async approve(wavePlanId) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: (0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId)
+      where: (0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId)
     });
     if (!wavePlan) {
       throw new Error(`Wave plan ${wavePlanId} not found`);
@@ -5381,7 +5959,7 @@ var WaveExecutionController = class {
     await this.db.update(wavePlans).set({
       status: "approved",
       updatedAt: /* @__PURE__ */ new Date()
-    }).where((0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId));
+    }).where((0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId));
     await this.dispatchWave(wavePlanId, 0);
   }
   /**
@@ -5391,7 +5969,7 @@ var WaveExecutionController = class {
    */
   async pause(wavePlanId) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: (0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId)
+      where: (0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId)
     });
     if (!wavePlan) {
       throw new Error(`Wave plan ${wavePlanId} not found`);
@@ -5402,7 +5980,7 @@ var WaveExecutionController = class {
     await this.db.update(wavePlans).set({
       status: "paused",
       updatedAt: /* @__PURE__ */ new Date()
-    }).where((0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId));
+    }).where((0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId));
   }
   /**
    * Resume execution of a paused wave plan
@@ -5413,7 +5991,7 @@ var WaveExecutionController = class {
    */
   async resume(wavePlanId) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: (0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId),
+      where: (0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId),
       with: {
         waves: {
           with: {
@@ -5432,7 +6010,7 @@ var WaveExecutionController = class {
       status: "executing",
       failureReason: null,
       updatedAt: /* @__PURE__ */ new Date()
-    }).where((0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId));
+    }).where((0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId));
     const currentWave = wavePlan.waves.find((w) => w.waveIndex === wavePlan.currentWaveIndex);
     if (currentWave && currentWave.status !== "completed") {
       return this.dispatchWave(wavePlanId, wavePlan.currentWaveIndex);
@@ -5446,7 +6024,7 @@ var WaveExecutionController = class {
    */
   async abort(wavePlanId) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: (0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId)
+      where: (0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId)
     });
     if (!wavePlan) {
       throw new Error(`Wave plan ${wavePlanId} not found`);
@@ -5455,13 +6033,13 @@ var WaveExecutionController = class {
       status: "failed",
       completedAt: /* @__PURE__ */ new Date(),
       updatedAt: /* @__PURE__ */ new Date()
-    }).where((0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId));
+    }).where((0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId));
     await this.db.update(waveTasks).set({
       status: "skipped"
     }).where(
-      (0, import_drizzle_orm14.and)(
-        (0, import_drizzle_orm14.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm14.eq)(waveTasks.status, "pending")
+      (0, import_drizzle_orm15.and)(
+        (0, import_drizzle_orm15.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm15.eq)(waveTasks.status, "pending")
       )
     );
   }
@@ -5480,7 +6058,7 @@ var WaveExecutionController = class {
    */
   async holdStalePlan(wavePlanId, lastActivity) {
     const reason = `not resumed after a restart: no activity since ${lastActivity.toISOString()}. Resume it from the cockpit to continue.`;
-    const held = await this.db.update(wavePlans).set({ status: "paused", failureReason: reason }).where((0, import_drizzle_orm14.and)((0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId), (0, import_drizzle_orm14.eq)(wavePlans.status, "executing"))).returning({ id: wavePlans.id });
+    const held = await this.db.update(wavePlans).set({ status: "paused", failureReason: reason }).where((0, import_drizzle_orm15.and)((0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId), (0, import_drizzle_orm15.eq)(wavePlans.status, "executing"))).returning({ id: wavePlans.id });
     if (held.length === 0) {
       return false;
     }
@@ -5504,7 +6082,7 @@ var WaveExecutionController = class {
    */
   async dispatchWave(wavePlanId, waveIndex) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: (0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId),
+      where: (0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId),
       with: {
         waves: {
           with: {
@@ -5524,14 +6102,14 @@ var WaveExecutionController = class {
       status: "executing",
       startedAt: /* @__PURE__ */ new Date(),
       updatedAt: /* @__PURE__ */ new Date()
-    }).where((0, import_drizzle_orm14.and)((0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId), (0, import_drizzle_orm14.eq)(wavePlans.status, "approved")));
-    await this.db.update(waves).set({ status: "dispatching" }).where((0, import_drizzle_orm14.and)((0, import_drizzle_orm14.eq)(waves.id, wave.id), (0, import_drizzle_orm14.eq)(waves.status, "pending")));
+    }).where((0, import_drizzle_orm15.and)((0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId), (0, import_drizzle_orm15.eq)(wavePlans.status, "approved")));
+    await this.db.update(waves).set({ status: "dispatching" }).where((0, import_drizzle_orm15.and)((0, import_drizzle_orm15.eq)(waves.id, wave.id), (0, import_drizzle_orm15.eq)(waves.status, "pending")));
     const result = await this.dispatchCoordinator.dispatchWave(
       wavePlanId,
       waveIndex,
       wave.tasks
     );
-    await this.db.update(waves).set({ status: "active" }).where((0, import_drizzle_orm14.and)((0, import_drizzle_orm14.eq)(waves.id, wave.id), (0, import_drizzle_orm14.eq)(waves.status, "dispatching")));
+    await this.db.update(waves).set({ status: "active" }).where((0, import_drizzle_orm15.and)((0, import_drizzle_orm15.eq)(waves.id, wave.id), (0, import_drizzle_orm15.eq)(waves.status, "dispatching")));
     for (const failure of result.errors) {
       await this.applyFailurePolicy(wavePlanId, failure.taskCode, failure.error);
     }
@@ -5557,9 +6135,9 @@ var WaveExecutionController = class {
   async driveWave(wavePlanId, waveIndex) {
     const result = await this.dispatchWave(wavePlanId, waveIndex);
     await this.db.update(wavePlans).set({ currentWaveIndex: waveIndex, updatedAt: /* @__PURE__ */ new Date() }).where(
-      (0, import_drizzle_orm14.and)(
-        (0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId),
-        (0, import_drizzle_orm14.notInArray)(wavePlans.status, [...TERMINAL_WAVE_PLAN_STATUSES])
+      (0, import_drizzle_orm15.and)(
+        (0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId),
+        (0, import_drizzle_orm15.notInArray)(wavePlans.status, [...TERMINAL_WAVE_PLAN_STATUSES])
       )
     );
     await this.recordWaveIfOver(wavePlanId, waveIndex);
@@ -5675,15 +6253,15 @@ var WaveExecutionController = class {
     if (signal.kind !== "over" || signal.outcome.state !== "failed") {
       return null;
     }
-    const plan = await this.db.query.wavePlans.findFirst({ where: (0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId) });
+    const plan = await this.db.query.wavePlans.findFirst({ where: (0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId) });
     if (!plan?.isolated || plan.status !== "failed") {
       return null;
     }
     const completed = await this.db.query.waveTasks.findMany({
-      where: (0, import_drizzle_orm14.and)(
-        (0, import_drizzle_orm14.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm14.eq)(waveTasks.waveIndex, waveIndex),
-        (0, import_drizzle_orm14.eq)(waveTasks.status, "completed")
+      where: (0, import_drizzle_orm15.and)(
+        (0, import_drizzle_orm15.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm15.eq)(waveTasks.waveIndex, waveIndex),
+        (0, import_drizzle_orm15.eq)(waveTasks.status, "completed")
       )
     });
     if (!completed.some((task) => !task.mergedAt)) {
@@ -5705,17 +6283,17 @@ var WaveExecutionController = class {
     if (!service || !service.isEnabled) {
       return false;
     }
-    const plan = await this.db.query.wavePlans.findFirst({ where: (0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId) });
-    const item = plan ? await this.db.query.horizonItems.findFirst({ where: (0, import_drizzle_orm14.eq)(horizonItems.id, plan.horizonItemId) }) : void 0;
+    const plan = await this.db.query.wavePlans.findFirst({ where: (0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId) });
+    const item = plan ? await this.db.query.horizonItems.findFirst({ where: (0, import_drizzle_orm15.eq)(horizonItems.id, plan.horizonItemId) }) : void 0;
     if (!plan?.runId || !item) {
       throw new Error(`Wave plan ${wavePlanId} has no run to merge into`);
     }
     const attempts = new Map(
       (await this.db.query.waveTasks.findMany({
-        where: (0, import_drizzle_orm14.and)(
-          (0, import_drizzle_orm14.eq)(waveTasks.wavePlanId, wavePlanId),
-          (0, import_drizzle_orm14.eq)(waveTasks.waveIndex, waveIndex),
-          (0, import_drizzle_orm14.eq)(waveTasks.status, "completed")
+        where: (0, import_drizzle_orm15.and)(
+          (0, import_drizzle_orm15.eq)(waveTasks.wavePlanId, wavePlanId),
+          (0, import_drizzle_orm15.eq)(waveTasks.waveIndex, waveIndex),
+          (0, import_drizzle_orm15.eq)(waveTasks.status, "completed")
         )
       })).map((task) => [task.taskCode, task])
     );
@@ -5731,7 +6309,7 @@ var WaveExecutionController = class {
     }
     const { result } = outcome;
     const now = /* @__PURE__ */ new Date();
-    await this.db.update(wavePlans).set({ runBranch: result.runBranch, runHeadSha: result.headSha, updatedAt: now }).where((0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId));
+    await this.db.update(wavePlans).set({ runBranch: result.runBranch, runHeadSha: result.headSha, updatedAt: now }).where((0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId));
     for (const merged of result.merged) {
       const attempt = attempts.get(merged.taskCode);
       if (!attempt) continue;
@@ -5740,9 +6318,9 @@ var WaveExecutionController = class {
         // Kept when the completion report recorded them. A completion applied
         // from the session row after a restart recorded neither, and the
         // runner has just said both.
-        branch: import_drizzle_orm14.sql`coalesce(branch, ${merged.branch})`,
-        commitSha: import_drizzle_orm14.sql`coalesce(commit_sha, ${merged.commitSha})`
-      }).where((0, import_drizzle_orm14.and)(...this.unmergedAttempt(attempt)));
+        branch: import_drizzle_orm15.sql`coalesce(branch, ${merged.branch})`,
+        commitSha: import_drizzle_orm15.sql`coalesce(commit_sha, ${merged.commitSha})`
+      }).where((0, import_drizzle_orm15.and)(...this.unmergedAttempt(attempt)));
     }
     if (conflicts === "leave") {
       return true;
@@ -5761,10 +6339,10 @@ var WaveExecutionController = class {
   /** A completed attempt that has not been merged — the one that was read. */
   unmergedAttempt(attempt) {
     return [
-      (0, import_drizzle_orm14.eq)(waveTasks.id, attempt.id),
-      (0, import_drizzle_orm14.eq)(waveTasks.status, "completed"),
-      (0, import_drizzle_orm14.isNull)(waveTasks.mergedAt),
-      attempt.assignedSessionId ? (0, import_drizzle_orm14.eq)(waveTasks.assignedSessionId, attempt.assignedSessionId) : (0, import_drizzle_orm14.isNull)(waveTasks.assignedSessionId)
+      (0, import_drizzle_orm15.eq)(waveTasks.id, attempt.id),
+      (0, import_drizzle_orm15.eq)(waveTasks.status, "completed"),
+      (0, import_drizzle_orm15.isNull)(waveTasks.mergedAt),
+      attempt.assignedSessionId ? (0, import_drizzle_orm15.eq)(waveTasks.assignedSessionId, attempt.assignedSessionId) : (0, import_drizzle_orm15.isNull)(waveTasks.assignedSessionId)
     ];
   }
   /**
@@ -5778,7 +6356,7 @@ var WaveExecutionController = class {
    */
   async failUnmerged(attempt, error) {
     if (!attempt) return;
-    await this.db.update(waves).set({ status: "active", completedAt: null }).where((0, import_drizzle_orm14.and)((0, import_drizzle_orm14.eq)(waves.wavePlanId, attempt.wavePlanId), (0, import_drizzle_orm14.eq)(waves.waveIndex, attempt.waveIndex)));
+    await this.db.update(waves).set({ status: "active", completedAt: null }).where((0, import_drizzle_orm15.and)((0, import_drizzle_orm15.eq)(waves.wavePlanId, attempt.wavePlanId), (0, import_drizzle_orm15.eq)(waves.waveIndex, attempt.waveIndex)));
     await this.recordFailure(
       attempt.wavePlanId,
       attempt.taskCode,
@@ -5800,15 +6378,15 @@ var WaveExecutionController = class {
       status: "completed",
       completedAt: /* @__PURE__ */ new Date()
     }).where(
-      (0, import_drizzle_orm14.and)(
-        (0, import_drizzle_orm14.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm14.eq)(waveTasks.taskCode, taskCode)
+      (0, import_drizzle_orm15.and)(
+        (0, import_drizzle_orm15.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm15.eq)(waveTasks.taskCode, taskCode)
       )
     );
     const task = await this.db.query.waveTasks.findFirst({
-      where: (0, import_drizzle_orm14.and)(
-        (0, import_drizzle_orm14.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm14.eq)(waveTasks.taskCode, taskCode)
+      where: (0, import_drizzle_orm15.and)(
+        (0, import_drizzle_orm15.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm15.eq)(waveTasks.taskCode, taskCode)
       )
     });
     if (!task) {
@@ -5829,15 +6407,15 @@ var WaveExecutionController = class {
    */
   async recordWaveIfOver(wavePlanId, waveIndex) {
     const tasks2 = await this.db.query.waveTasks.findMany({
-      where: (0, import_drizzle_orm14.and)(
-        (0, import_drizzle_orm14.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm14.eq)(waveTasks.waveIndex, waveIndex)
+      where: (0, import_drizzle_orm15.and)(
+        (0, import_drizzle_orm15.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm15.eq)(waveTasks.waveIndex, waveIndex)
       )
     });
     if (!isWaveOver(tasks2)) {
       return false;
     }
-    const wave = (0, import_drizzle_orm14.and)((0, import_drizzle_orm14.eq)(waves.wavePlanId, wavePlanId), (0, import_drizzle_orm14.eq)(waves.waveIndex, waveIndex));
+    const wave = (0, import_drizzle_orm15.and)((0, import_drizzle_orm15.eq)(waves.wavePlanId, wavePlanId), (0, import_drizzle_orm15.eq)(waves.waveIndex, waveIndex));
     if (tasks2.length > 0 && tasks2.every((task) => task.status === "skipped")) {
       await this.db.update(waves).set({ status: "skipped" }).where(wave);
       return true;
@@ -5845,7 +6423,7 @@ var WaveExecutionController = class {
     await this.db.update(waves).set({
       status: tasks2.every((task) => task.status === "completed") ? "completed" : "failed",
       completedAt: /* @__PURE__ */ new Date()
-    }).where((0, import_drizzle_orm14.and)(wave, (0, import_drizzle_orm14.isNull)(waves.completedAt)));
+    }).where((0, import_drizzle_orm15.and)(wave, (0, import_drizzle_orm15.isNull)(waves.completedAt)));
     return true;
   }
   /**
@@ -5867,7 +6445,7 @@ var WaveExecutionController = class {
       return;
     }
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: (0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId)
+      where: (0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId)
     });
     if (!wavePlan) {
       return;
@@ -5880,10 +6458,10 @@ var WaveExecutionController = class {
     if (this.config.autoAdvance) {
       const nextWaveIndex = waveIndex + 1;
       const advanced = await this.db.update(wavePlans).set({ currentWaveIndex: nextWaveIndex, updatedAt: /* @__PURE__ */ new Date() }).where(
-        (0, import_drizzle_orm14.and)(
-          (0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId),
-          (0, import_drizzle_orm14.eq)(wavePlans.status, "executing"),
-          (0, import_drizzle_orm14.lte)(wavePlans.currentWaveIndex, waveIndex)
+        (0, import_drizzle_orm15.and)(
+          (0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId),
+          (0, import_drizzle_orm15.eq)(wavePlans.status, "executing"),
+          (0, import_drizzle_orm15.lte)(wavePlans.currentWaveIndex, waveIndex)
         )
       ).returning({ id: wavePlans.id });
       if (advanced.length === 0) {
@@ -5905,9 +6483,9 @@ var WaveExecutionController = class {
   async completePlan(wavePlanId) {
     const now = /* @__PURE__ */ new Date();
     const completed = await this.db.update(wavePlans).set({ status: "completed", completedAt: now, updatedAt: now }).where(
-      (0, import_drizzle_orm14.and)(
-        (0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId),
-        (0, import_drizzle_orm14.inArray)(wavePlans.status, ["executing", "paused"])
+      (0, import_drizzle_orm15.and)(
+        (0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId),
+        (0, import_drizzle_orm15.inArray)(wavePlans.status, ["executing", "paused"])
       )
     ).returning({ id: wavePlans.id });
     if (completed.length === 0) {
@@ -5945,35 +6523,35 @@ var WaveExecutionController = class {
   async failPlan(wavePlanId, reason, cause) {
     const now = /* @__PURE__ */ new Date();
     const failed = await this.db.update(wavePlans).set({ status: "failed", failureReason: reason, completedAt: now, updatedAt: now }).where(
-      (0, import_drizzle_orm14.and)(
-        (0, import_drizzle_orm14.eq)(wavePlans.id, wavePlanId),
-        (0, import_drizzle_orm14.notInArray)(wavePlans.status, [...TERMINAL_WAVE_PLAN_STATUSES])
+      (0, import_drizzle_orm15.and)(
+        (0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId),
+        (0, import_drizzle_orm15.notInArray)(wavePlans.status, [...TERMINAL_WAVE_PLAN_STATUSES])
       )
     ).returning({ currentWaveIndex: wavePlans.currentWaveIndex });
     if (failed.length === 0) {
       return false;
     }
     const skipped = await this.db.update(waveTasks).set({ status: "skipped" }).where(
-      (0, import_drizzle_orm14.and)(
-        (0, import_drizzle_orm14.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm14.eq)(waveTasks.status, "pending")
+      (0, import_drizzle_orm15.and)(
+        (0, import_drizzle_orm15.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm15.eq)(waveTasks.status, "pending")
       )
     ).returning({ id: waveTasks.id });
     await this.db.update(waveTasks).set({ status: "failed", completedAt: now }).where(
-      (0, import_drizzle_orm14.and)(
-        (0, import_drizzle_orm14.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm14.eq)(waveTasks.status, "retrying")
+      (0, import_drizzle_orm15.and)(
+        (0, import_drizzle_orm15.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm15.eq)(waveTasks.status, "retrying")
       )
     );
     const failedWave = cause?.waveIndex ?? failed[0].currentWaveIndex;
     await this.db.update(waves).set({ status: "failed" }).where(
-      (0, import_drizzle_orm14.and)(
-        (0, import_drizzle_orm14.eq)(waves.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm14.eq)(waves.waveIndex, failedWave),
-        (0, import_drizzle_orm14.notInArray)(waves.status, ["completed", "failed"])
+      (0, import_drizzle_orm15.and)(
+        (0, import_drizzle_orm15.eq)(waves.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm15.eq)(waves.waveIndex, failedWave),
+        (0, import_drizzle_orm15.notInArray)(waves.status, ["completed", "failed"])
       )
     );
-    await this.db.update(waves).set({ status: "skipped" }).where((0, import_drizzle_orm14.and)((0, import_drizzle_orm14.eq)(waves.wavePlanId, wavePlanId), (0, import_drizzle_orm14.eq)(waves.status, "pending")));
+    await this.db.update(waves).set({ status: "skipped" }).where((0, import_drizzle_orm15.and)((0, import_drizzle_orm15.eq)(waves.wavePlanId, wavePlanId), (0, import_drizzle_orm15.eq)(waves.status, "pending")));
     await this.recordWaveIfOver(wavePlanId, failedWave);
     await this.emitEvent(
       {
@@ -6018,8 +6596,8 @@ var WaveExecutionController = class {
   /** The attempt a failure report may change: in flight, and the one named. */
   inFlightAttempt(attempt) {
     return [
-      (0, import_drizzle_orm14.inArray)(waveTasks.status, [...IN_FLIGHT_WAVE_TASK_STATUSES]),
-      ...attempt.sessionId ? [(0, import_drizzle_orm14.eq)(waveTasks.assignedSessionId, attempt.sessionId)] : []
+      (0, import_drizzle_orm15.inArray)(waveTasks.status, [...IN_FLIGHT_WAVE_TASK_STATUSES]),
+      ...attempt.sessionId ? [(0, import_drizzle_orm15.eq)(waveTasks.assignedSessionId, attempt.sessionId)] : []
     ];
   }
   /**
@@ -6033,9 +6611,9 @@ var WaveExecutionController = class {
    */
   async recordFailure(wavePlanId, taskCode, error, only, endedAt) {
     const task = await this.db.query.waveTasks.findFirst({
-      where: (0, import_drizzle_orm14.and)(
-        (0, import_drizzle_orm14.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm14.eq)(waveTasks.taskCode, taskCode)
+      where: (0, import_drizzle_orm15.and)(
+        (0, import_drizzle_orm15.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm15.eq)(waveTasks.taskCode, taskCode)
       )
     });
     if (!task) {
@@ -6049,9 +6627,9 @@ var WaveExecutionController = class {
       retryCount: task.retryCount + 1,
       errorMessage: error
     }).where(
-      (0, import_drizzle_orm14.and)(
-        (0, import_drizzle_orm14.eq)(waveTasks.id, task.id),
-        (0, import_drizzle_orm14.eq)(waveTasks.retryCount, task.retryCount),
+      (0, import_drizzle_orm15.and)(
+        (0, import_drizzle_orm15.eq)(waveTasks.id, task.id),
+        (0, import_drizzle_orm15.eq)(waveTasks.retryCount, task.retryCount),
         ...only
       )
     ).returning({ id: waveTasks.id });
@@ -6082,17 +6660,17 @@ var WaveExecutionController = class {
    */
   async failTask(wavePlanId, taskCode, error, only, endedAt) {
     const failed = await this.db.update(waveTasks).set({ status: "failed", completedAt: endedAt ?? /* @__PURE__ */ new Date(), errorMessage: error }).where(
-      (0, import_drizzle_orm14.and)(
-        (0, import_drizzle_orm14.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm14.eq)(waveTasks.taskCode, taskCode),
+      (0, import_drizzle_orm15.and)(
+        (0, import_drizzle_orm15.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm15.eq)(waveTasks.taskCode, taskCode),
         ...only
       )
     ).returning({ id: waveTasks.id });
     if (failed.length === 0) {
       const exists = await this.db.query.waveTasks.findFirst({
-        where: (0, import_drizzle_orm14.and)(
-          (0, import_drizzle_orm14.eq)(waveTasks.wavePlanId, wavePlanId),
-          (0, import_drizzle_orm14.eq)(waveTasks.taskCode, taskCode)
+        where: (0, import_drizzle_orm15.and)(
+          (0, import_drizzle_orm15.eq)(waveTasks.wavePlanId, wavePlanId),
+          (0, import_drizzle_orm15.eq)(waveTasks.taskCode, taskCode)
         )
       });
       if (!exists) {
@@ -6119,9 +6697,9 @@ var WaveExecutionController = class {
       return;
     }
     const task = await this.db.query.waveTasks.findFirst({
-      where: (0, import_drizzle_orm14.and)(
-        (0, import_drizzle_orm14.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm14.eq)(waveTasks.taskCode, taskCode)
+      where: (0, import_drizzle_orm15.and)(
+        (0, import_drizzle_orm15.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm15.eq)(waveTasks.taskCode, taskCode)
       )
     });
     if (!task) {
@@ -6156,7 +6734,7 @@ var WaveExecutionController = class {
 };
 
 // src/wave-planner/execution/dispatch-coordinator.ts
-var import_drizzle_orm15 = require("drizzle-orm");
+var import_drizzle_orm16 = require("drizzle-orm");
 function isBackPressure(errorMessage) {
   return errorMessage === "ORCHESTRATOR_UNAVAILABLE" || errorMessage === "CAPACITY" || /\b429\b/.test(errorMessage);
 }
@@ -6212,7 +6790,7 @@ var WaveDispatchCoordinator = class {
         const predecessorContext = await this.getPredecessorContext(wavePlanId, task.taskCode);
         const dispatchRequest = this.buildDispatchRequest(task, predecessorContext);
         await this.dispatchToOrchestrator(task, dispatchRequest, ctx);
-        await this.db.update(waves).set({ startedAt: task.lastAttemptAt }).where((0, import_drizzle_orm15.and)((0, import_drizzle_orm15.eq)(waves.id, task.waveId), (0, import_drizzle_orm15.isNull)(waves.startedAt)));
+        await this.db.update(waves).set({ startedAt: task.lastAttemptAt }).where((0, import_drizzle_orm16.and)((0, import_drizzle_orm16.eq)(waves.id, task.waveId), (0, import_drizzle_orm16.isNull)(waves.startedAt)));
         result.dispatched++;
         if (i < candidates.length - 1) {
           await this.delay(this.config.subagentDispatchDelayMs);
@@ -6229,17 +6807,17 @@ var WaveDispatchCoordinator = class {
           errorMessage,
           completedAt: /* @__PURE__ */ new Date()
         }).where(
-          (0, import_drizzle_orm15.and)(
-            (0, import_drizzle_orm15.eq)(waveTasks.id, task.id),
-            (0, import_drizzle_orm15.inArray)(waveTasks.status, [...IN_FLIGHT_WAVE_TASK_STATUSES])
+          (0, import_drizzle_orm16.and)(
+            (0, import_drizzle_orm16.eq)(waveTasks.id, task.id),
+            (0, import_drizzle_orm16.inArray)(waveTasks.status, [...IN_FLIGHT_WAVE_TASK_STATUSES])
           )
         );
       }
     }
-    const [still] = await this.db.select({ count: import_drizzle_orm15.sql`count(*)`.mapWith(Number) }).from(waveTasks).where(
-      (0, import_drizzle_orm15.and)(
-        (0, import_drizzle_orm15.inArray)(waveTasks.id, candidates.map((c) => c.id)),
-        (0, import_drizzle_orm15.inArray)(waveTasks.status, [...DISPATCHABLE_WAVE_TASK_STATUSES])
+    const [still] = await this.db.select({ count: import_drizzle_orm16.sql`count(*)`.mapWith(Number) }).from(waveTasks).where(
+      (0, import_drizzle_orm16.and)(
+        (0, import_drizzle_orm16.inArray)(waveTasks.id, candidates.map((c) => c.id)),
+        (0, import_drizzle_orm16.inArray)(waveTasks.status, [...DISPATCHABLE_WAVE_TASK_STATUSES])
       )
     );
     result.queued = still?.count ?? 0;
@@ -6291,15 +6869,15 @@ var WaveDispatchCoordinator = class {
       filesChanged: null,
       mergedAt: null,
       // First attempt's start, kept. Each attempt's start, recorded.
-      startedAt: import_drizzle_orm15.sql`coalesce(started_at, ${nowSeconds})`,
+      startedAt: import_drizzle_orm16.sql`coalesce(started_at, ${nowSeconds})`,
       lastAttemptAt: new Date(nowSeconds * 1e3)
     }).where(
-      (0, import_drizzle_orm15.and)(
-        (0, import_drizzle_orm15.eq)(waveTasks.id, candidate.id),
-        (0, import_drizzle_orm15.inArray)(waveTasks.status, [...DISPATCHABLE_WAVE_TASK_STATUSES]),
-        import_drizzle_orm15.sql`exists (select 1 from wave_plans p where p.id = ${candidate.wavePlanId} and p.status = 'executing')`,
-        import_drizzle_orm15.sql`${inFlightEverywhereSql()} < ${this.config.maxTotalActiveTasks}`,
-        import_drizzle_orm15.sql`${inFlightInPlanSql(candidate.wavePlanId)} < ${this.config.maxConcurrentSubagents}`
+      (0, import_drizzle_orm16.and)(
+        (0, import_drizzle_orm16.eq)(waveTasks.id, candidate.id),
+        (0, import_drizzle_orm16.inArray)(waveTasks.status, [...DISPATCHABLE_WAVE_TASK_STATUSES]),
+        import_drizzle_orm16.sql`exists (select 1 from wave_plans p where p.id = ${candidate.wavePlanId} and p.status = 'executing')`,
+        import_drizzle_orm16.sql`${inFlightEverywhereSql()} < ${this.config.maxTotalActiveTasks}`,
+        import_drizzle_orm16.sql`${inFlightInPlanSql(candidate.wavePlanId)} < ${this.config.maxConcurrentSubagents}`
       )
     ).returning();
     return claimed ?? null;
@@ -6324,7 +6902,7 @@ var WaveDispatchCoordinator = class {
       commitSha: candidate.commitSha,
       filesChanged: candidate.filesChanged,
       mergedAt: candidate.mergedAt
-    }).where((0, import_drizzle_orm15.and)((0, import_drizzle_orm15.eq)(waveTasks.id, claimed.id), (0, import_drizzle_orm15.eq)(waveTasks.status, "dispatched")));
+    }).where((0, import_drizzle_orm16.and)((0, import_drizzle_orm16.eq)(waveTasks.id, claimed.id), (0, import_drizzle_orm16.eq)(waveTasks.status, "dispatched")));
   }
   /**
    * Build a dispatch request for a task
@@ -6372,9 +6950,9 @@ var WaveDispatchCoordinator = class {
    */
   async getPredecessorContext(wavePlanId, taskCode) {
     const task = await this.db.query.waveTasks.findFirst({
-      where: (0, import_drizzle_orm15.and)(
-        (0, import_drizzle_orm15.eq)(waveTasks.wavePlanId, wavePlanId),
-        (0, import_drizzle_orm15.eq)(waveTasks.taskCode, taskCode)
+      where: (0, import_drizzle_orm16.and)(
+        (0, import_drizzle_orm16.eq)(waveTasks.wavePlanId, wavePlanId),
+        (0, import_drizzle_orm16.eq)(waveTasks.taskCode, taskCode)
       )
     });
     if (!task || !task.dependencies || task.dependencies.length === 0) {
@@ -6383,10 +6961,10 @@ var WaveDispatchCoordinator = class {
     const predecessorSummaries = [];
     for (const depTaskCode of task.dependencies) {
       const depTask = await this.db.query.waveTasks.findFirst({
-        where: (0, import_drizzle_orm15.and)(
-          (0, import_drizzle_orm15.eq)(waveTasks.wavePlanId, wavePlanId),
-          (0, import_drizzle_orm15.eq)(waveTasks.taskCode, depTaskCode),
-          (0, import_drizzle_orm15.eq)(waveTasks.status, "completed")
+        where: (0, import_drizzle_orm16.and)(
+          (0, import_drizzle_orm16.eq)(waveTasks.wavePlanId, wavePlanId),
+          (0, import_drizzle_orm16.eq)(waveTasks.taskCode, depTaskCode),
+          (0, import_drizzle_orm16.eq)(waveTasks.status, "completed")
         )
       });
       if (depTask) {
@@ -6418,7 +6996,7 @@ var WaveDispatchCoordinator = class {
       return null;
     }
     const session = await this.db.query.rufloSessions.findFirst({
-      where: (0, import_drizzle_orm15.eq)(rufloSessions.id, sessionId)
+      where: (0, import_drizzle_orm16.eq)(rufloSessions.id, sessionId)
     });
     const touched = session?.telemetry?.filesTouched;
     return Array.isArray(touched) && touched.length > 0 ? touched : null;
@@ -6430,13 +7008,13 @@ var WaveDispatchCoordinator = class {
    */
   async loadDispatchContext(wavePlanId, service) {
     const wavePlan = await this.db.query.wavePlans.findFirst({
-      where: (0, import_drizzle_orm15.eq)(wavePlans.id, wavePlanId)
+      where: (0, import_drizzle_orm16.eq)(wavePlans.id, wavePlanId)
     });
     if (!wavePlan) {
       throw new Error(`Wave plan ${wavePlanId} not found`);
     }
     const item = await this.db.query.horizonItems.findFirst({
-      where: (0, import_drizzle_orm15.eq)(horizonItems.id, wavePlan.horizonItemId)
+      where: (0, import_drizzle_orm16.eq)(horizonItems.id, wavePlan.horizonItemId)
     });
     if (!item) {
       throw new Error(`Horizon item ${wavePlan.horizonItemId} not found`);
@@ -6486,10 +7064,10 @@ var WaveDispatchCoordinator = class {
     if (wavePlan.runId && wavePlan.isolated !== null) {
       return { id: wavePlan.runId, isolated: wavePlan.isolated };
     }
-    const [started] = await this.db.select({ count: import_drizzle_orm15.sql`count(*)`.mapWith(Number) }).from(waveTasks).where(
-      (0, import_drizzle_orm15.and)(
-        (0, import_drizzle_orm15.eq)(waveTasks.wavePlanId, wavePlan.id),
-        import_drizzle_orm15.sql`(${waveTasks.startedAt} is not null or ${waveTasks.status} <> 'pending')`
+    const [started] = await this.db.select({ count: import_drizzle_orm16.sql`count(*)`.mapWith(Number) }).from(waveTasks).where(
+      (0, import_drizzle_orm16.and)(
+        (0, import_drizzle_orm16.eq)(waveTasks.wavePlanId, wavePlan.id),
+        import_drizzle_orm16.sql`(${waveTasks.startedAt} is not null or ${waveTasks.status} <> 'pending')`
       )
     );
     const support = (started?.count ?? 0) > 0 ? {
@@ -6500,9 +7078,9 @@ var WaveDispatchCoordinator = class {
       runId: wavePlan.runId ?? runIdFor(linearTicketId, wavePlan.id),
       isolated: support.supported,
       isolationNote: support.supported ? null : support.reason ?? "no reason given"
-    }).where((0, import_drizzle_orm15.and)((0, import_drizzle_orm15.eq)(wavePlans.id, wavePlan.id), (0, import_drizzle_orm15.isNull)(wavePlans.isolated)));
+    }).where((0, import_drizzle_orm16.and)((0, import_drizzle_orm16.eq)(wavePlans.id, wavePlan.id), (0, import_drizzle_orm16.isNull)(wavePlans.isolated)));
     const decided = await this.db.query.wavePlans.findFirst({
-      where: (0, import_drizzle_orm15.eq)(wavePlans.id, wavePlan.id)
+      where: (0, import_drizzle_orm16.eq)(wavePlans.id, wavePlan.id)
     });
     if (!decided?.runId || decided.isolated === null) {
       throw new Error(`Wave plan ${wavePlan.id} has no run recorded after its first dispatch`);
@@ -6593,10 +7171,10 @@ var WaveDispatchCoordinator = class {
         taskCode: request.taskCode
       }
     };
-    await this.db.update(waveTasks).set({ assignedSessionId: session.id }).where((0, import_drizzle_orm15.and)((0, import_drizzle_orm15.eq)(waveTasks.id, task.id), (0, import_drizzle_orm15.eq)(waveTasks.status, "dispatched")));
+    await this.db.update(waveTasks).set({ assignedSessionId: session.id }).where((0, import_drizzle_orm16.and)((0, import_drizzle_orm16.eq)(waveTasks.id, task.id), (0, import_drizzle_orm16.eq)(waveTasks.status, "dispatched")));
     const rollBack = async () => {
-      await this.db.update(waveTasks).set({ assignedSessionId: null }).where((0, import_drizzle_orm15.and)((0, import_drizzle_orm15.eq)(waveTasks.id, task.id), (0, import_drizzle_orm15.eq)(waveTasks.assignedSessionId, session.id)));
-      await this.db.delete(rufloSessions).where((0, import_drizzle_orm15.eq)(rufloSessions.id, session.id));
+      await this.db.update(waveTasks).set({ assignedSessionId: null }).where((0, import_drizzle_orm16.and)((0, import_drizzle_orm16.eq)(waveTasks.id, task.id), (0, import_drizzle_orm16.eq)(waveTasks.assignedSessionId, session.id)));
+      await this.db.delete(rufloSessions).where((0, import_drizzle_orm16.eq)(rufloSessions.id, session.id));
     };
     let response;
     try {
@@ -6613,7 +7191,7 @@ var WaveDispatchCoordinator = class {
       externalSessionId: response.orchestratorJobId ?? null,
       orchestratorMode: service.mode,
       updatedAt: /* @__PURE__ */ new Date()
-    }).where((0, import_drizzle_orm15.eq)(rufloSessions.id, session.id));
+    }).where((0, import_drizzle_orm16.eq)(rufloSessions.id, session.id));
     return {
       sessionId: session.id,
       externalJobId: response.orchestratorJobId ?? "",
@@ -6672,7 +7250,7 @@ var WaveDispatchCoordinator = class {
 };
 
 // src/wave-planner/execution/execution-bridge.ts
-var import_drizzle_orm16 = require("drizzle-orm");
+var import_drizzle_orm17 = require("drizzle-orm");
 var SESSION_LINK_GRACE_MS = 2 * 6e4;
 var CALLBACK_HANDOFF_GRACE_MS = 3e4;
 var DEFAULT_RECONCILE_STALL_MS = 30 * 6e4;
@@ -6757,7 +7335,7 @@ var ExecutionBridge = class {
   /** Resolve a DevPilot sessionId to its owning wave task, if any. */
   async resolveTask(sessionId) {
     const task = await this.db.query.waveTasks.findFirst({
-      where: (0, import_drizzle_orm16.eq)(waveTasks.assignedSessionId, sessionId)
+      where: (0, import_drizzle_orm17.eq)(waveTasks.assignedSessionId, sessionId)
     });
     return task ?? null;
   }
@@ -6971,7 +7549,7 @@ var ExecutionBridge = class {
     const maxAgeMs = configured ?? DEFAULT_RESUME_MAX_AGE_MS;
     if (maxAgeMs <= 0) return held;
     const executing = await this.db.query.wavePlans.findMany({
-      where: (0, import_drizzle_orm16.eq)(wavePlans.status, "executing")
+      where: (0, import_drizzle_orm17.eq)(wavePlans.status, "executing")
     });
     for (const plan of executing) {
       try {
@@ -6998,10 +7576,10 @@ var ExecutionBridge = class {
   /** When a plan last did anything. See `holdStalePlans` for what that means. */
   async lastActivity(plan) {
     const tasks2 = await this.db.query.waveTasks.findMany({
-      where: (0, import_drizzle_orm16.eq)(waveTasks.wavePlanId, plan.id)
+      where: (0, import_drizzle_orm17.eq)(waveTasks.wavePlanId, plan.id)
     });
     const sessionIds = tasks2.map((task) => task.assignedSessionId).filter((id) => Boolean(id));
-    const sessions = sessionIds.length ? await this.db.query.rufloSessions.findMany({ where: (0, import_drizzle_orm16.inArray)(rufloSessions.id, sessionIds) }) : [];
+    const sessions = sessionIds.length ? await this.db.query.rufloSessions.findMany({ where: (0, import_drizzle_orm17.inArray)(rufloSessions.id, sessionIds) }) : [];
     const instants = [
       plan.updatedAt,
       ...tasks2.flatMap((task) => [task.startedAt, task.lastAttemptAt, task.completedAt]),
@@ -7024,10 +7602,10 @@ var ExecutionBridge = class {
     const mark = (wavePlanId, waveIndex) => toSettle.set(`${wavePlanId}\0${waveIndex}`, { wavePlanId, waveIndex });
     try {
       const held = startup ? await this.holdStalePlans(now, report) : /* @__PURE__ */ new Set();
-      const rows = await this.db.select({ task: waveTasks, planStatus: wavePlans.status }).from(waveTasks).innerJoin(wavePlans, (0, import_drizzle_orm16.eq)(waveTasks.wavePlanId, wavePlans.id)).where(
-        (0, import_drizzle_orm16.and)(
-          (0, import_drizzle_orm16.inArray)(waveTasks.status, [...IN_FLIGHT_WAVE_TASK_STATUSES]),
-          (0, import_drizzle_orm16.notInArray)(wavePlans.status, [...TERMINAL_WAVE_PLAN_STATUSES])
+      const rows = await this.db.select({ task: waveTasks, planStatus: wavePlans.status }).from(waveTasks).innerJoin(wavePlans, (0, import_drizzle_orm17.eq)(waveTasks.wavePlanId, wavePlans.id)).where(
+        (0, import_drizzle_orm17.and)(
+          (0, import_drizzle_orm17.inArray)(waveTasks.status, [...IN_FLIGHT_WAVE_TASK_STATUSES]),
+          (0, import_drizzle_orm17.notInArray)(wavePlans.status, [...TERMINAL_WAVE_PLAN_STATUSES])
         )
       );
       for (const { task, planStatus } of rows) {
@@ -7048,7 +7626,7 @@ var ExecutionBridge = class {
         }
       }
       const executing = await this.db.query.wavePlans.findMany({
-        where: (0, import_drizzle_orm16.eq)(wavePlans.status, "executing")
+        where: (0, import_drizzle_orm17.eq)(wavePlans.status, "executing")
       });
       for (const plan of executing) mark(plan.id, plan.currentWaveIndex);
       for (const { wavePlanId, waveIndex } of toSettle.values()) {
@@ -7083,7 +7661,7 @@ var ExecutionBridge = class {
   async reconcileTask(task, now, stallMs, planPaused) {
     const { wavePlanId, taskCode } = task;
     const session = task.assignedSessionId ? await this.db.query.rufloSessions.findFirst({
-      where: (0, import_drizzle_orm16.eq)(rufloSessions.id, task.assignedSessionId)
+      where: (0, import_drizzle_orm17.eq)(rufloSessions.id, task.assignedSessionId)
     }) : void 0;
     if (!session) {
       const since = task.lastAttemptAt ?? task.startedAt;
@@ -7192,6 +7770,8 @@ function getExecutionBridgeOrNull() {
   CompletionListener,
   ConcurrencyManager,
   DEFAULT_HISTORY_LIMIT,
+  DEFAULT_MIN_PARALLELIZATION_SCORE,
+  DEFAULT_PLANNER_MAX_TOKENS,
   DEFAULT_PLANNER_MODEL,
   DEFAULT_RECONCILE_INTERVAL_MS,
   DEFAULT_RECONCILE_STALL_MS,
@@ -7204,7 +7784,10 @@ function getExecutionBridgeOrNull() {
   MAX_DEPENDENT_CLAIMS_PER_TASK,
   MAX_HISTORY_LIMIT,
   MAX_ITEM_DESCRIPTION_CHARS,
+  MIN_TASKS_FOR_PARALLELIZATION_GATE,
+  PLANNER_EPISODE_SCHEMA,
   PlanRefinementService,
+  PlannerTruncatedError,
   PromptConstructor,
   SUMMARY_MAX_CHARS,
   TERMINAL_WAVE_PLAN_STATUSES,
@@ -7216,6 +7799,7 @@ function getExecutionBridgeOrNull() {
   assignWaves,
   blastRadiusOf,
   buildDAGGraph,
+  buildEpisodes,
   buildSpecContentForItem,
   codeGraphOf,
   collectFinalMetrics,
@@ -7249,18 +7833,30 @@ function getExecutionBridgeOrNull() {
   isTerminalWavePlanStatus,
   isTerminalWaveTaskStatus,
   isWaveOver,
+  linkTracesToPlan,
+  newPlannerRunId,
   normalizeComplexity,
   normalizeItemDescription,
   normalizeModel,
+  parallelizationGateApplies,
   parseDependencies,
   parseFilePaths,
   parseWavePlanResponse,
+  planOutcome,
+  planSha,
+  plannerTraceEnabled,
   projectWavePlanToPlan,
   readPlanCodeGraph,
   readWaveSignal,
+  recordPlanReview,
+  recordPlannerTrace,
+  redactEpisode,
   refinementTemplate,
   renderTicketDescription,
+  resetPlannerTraceWarning,
   resolveItemDescription,
+  resolveMinParallelizationScore,
+  resolvePlannerMaxTokens,
   resolvePlannerModel,
   resolveWikiModel,
   runIdFor,
@@ -7268,6 +7864,7 @@ function getExecutionBridgeOrNull() {
   selectDependentClaims,
   simplifiedTemplate,
   sleep,
+  summarizeCorpus,
   toActivityEventType,
   topologicalSort,
   validateDAG,

@@ -232,6 +232,16 @@ interface ConductorConfig {
      * warning appeared on every single plan, including perfect ones.
      */
     minParallelizationScore: number;
+    /**
+     * Plans with fewer tasks than this are not held to `minParallelizationScore`.
+     *
+     * The score is one minus the critical path's share of the tasks, so a plan
+     * of one task scores 0, and so do two or three tasks in sequence. None of
+     * those is a plan that needs improving, but each was below any threshold and
+     * was sent back to be cut smaller until the iteration limit. A reviewer
+     * can still ask for changes; this only stops the loop asking on its own.
+     */
+    minTasksForRefinement: number;
     /** Hard cap on refinement passes. */
     maxRefinementIterations: number;
     /** Pause for human approval before dispatching. */

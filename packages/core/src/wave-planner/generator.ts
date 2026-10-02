@@ -14,10 +14,15 @@ import type {
   OptimizationResult,
   ParsedTask,
 } from './types';
-import { PlanRefinementService, PlanRefinementConfig } from './plan-refinement-service';
+import {
+  PlanRefinementService,
+  PlanRefinementConfig,
+  resolveMinParallelizationScore,
+} from './plan-refinement-service';
+import { linkTracesToPlan } from './trace';
 import { PromptConstructorConfig } from './prompt-constructor';
 import { AIClientConfig } from './ai-client';
-import { resolvePlannerModel } from './models';
+import { resolvePlannerMaxTokens, resolvePlannerModel } from './models';
 import { computeCriticalPath } from './critical-path';
 import { assignWaves, WaveAssignerConfig } from './wave-assigner';
 import { scorePlan } from './plan-scorer';
@@ -423,6 +428,11 @@ export class WavePlanGenerator {
       reOptimizationCount: 0,
     });
 
+    // Every planner call and review that led to this plan now knows which
+    // plan that was — which is what joins what the planner was told to how
+    // the plan turned out. Never fails a persist.
+    await linkTracesToPlan(horizonItemId, wavePlan.rawMarkdown, wavePlanId);
+
     return wavePlanId;
   }
 
@@ -492,14 +502,20 @@ export class WavePlanGenerator {
       .from(waveTasks)
       .where(eq(waveTasks.wavePlanId, wavePlanId));
 
-    // Separate completed and remaining tasks
+    // Separate completed and remaining tasks — with what actually happened.
+    //
+    // The files a completed task CHANGED, when its report said (`filesChanged`),
+    // rather than the files the plan had guessed it would; and the agent's own
+    // account of what it did, rather than a sentence made from the task's label.
+    // Both were already recorded on the row and neither was read.
     const completedTasks = existingTasks
       .filter(t => t.status === 'completed')
       .map(t => ({
         taskCode: t.taskCode,
         description: t.description,
-        filesModified: t.filePaths || [],
-        completionSummary: `Completed task: ${t.label}`,
+        filesModified: t.filesChanged ?? t.filePaths ?? [],
+        completionSummary:
+          t.completionSummary?.trim().slice(0, COMPLETION_SUMMARY_MAX) || `Completed task: ${t.label}`,
       }));
 
     const remainingTasks = existingTasks
@@ -509,9 +525,14 @@ export class WavePlanGenerator {
         description: t.description,
         originalDependencies: t.dependencies || [],
         originalFiles: t.filePaths || [],
+        ...(t.errorMessage?.trim() ? { lastError: t.errorMessage.trim() } : {}),
       }));
 
-    // Generate new plan for remaining work
+    // Generate new plan for remaining work.
+    //
+    // The two lists go to the prompt as lists. They used to be built here and
+    // dropped: the prompt was given the two counts, as sentences, and the model
+    // re-planned the whole specification with no idea which half was done.
     return this.generate(
       wavePlan.horizonItemId,
       wavePlan.planId,
@@ -520,6 +541,8 @@ export class WavePlanGenerator {
       repo,
       {
         ...constructorConfig,
+        completedWork: { tasks: completedTasks },
+        remainingWork: { tasks: remainingTasks },
         customConstraints: [
           ...(constructorConfig.customConstraints || []),
           `This is a reoptimization. ${completedTasks.length} tasks are already complete.`,
@@ -529,6 +552,9 @@ export class WavePlanGenerator {
     );
   }
 }
+
+/** How much of an agent's completion summary a re-plan is shown, per task. */
+const COMPLETION_SUMMARY_MAX = 400;
 
 /**
  * Create a wave plan generator instance.
@@ -556,12 +582,10 @@ export async function generateWavePlan(
     aiClient: {
       apiKey,
       model: resolvePlannerModel(),
-      maxTokens: parseInt(process.env.WAVE_PLANNER_MAX_TOKENS || '8192', 10),
+      maxTokens: resolvePlannerMaxTokens(),
     },
     refinement: {
-      minParallelizationScore: parseFloat(
-        process.env.WAVE_PLANNER_MIN_PARALLELIZATION || '0.3'
-      ),
+      minParallelizationScore: resolveMinParallelizationScore(),
       maxRefinementIterations: 2,
     },
     autoPersist: true,

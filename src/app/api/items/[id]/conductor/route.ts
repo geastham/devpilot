@@ -15,6 +15,7 @@ import {
   type ParsedWavePlan,
   type PlanCodeGraph,
   type WaveAdjustment,
+  recordPlanReview,
 } from '@devpilot.sh/core/wave-planner';
 
 // Never prerendered. A GET handler that touches no request API is treated by
@@ -59,6 +60,39 @@ function maybeRecord(result: Record<string, unknown>): void {
   if (status !== 'complete' && status !== 'failed') return;
   if (typeof wavePlanId !== 'string') return;
   void recordRun(wavePlanId);
+}
+
+/**
+ * Record a review decision against the plan that was on screen.
+ *
+ * The plan is read from the run's own state rather than from the request: the
+ * request says what was decided, and only the checkpoint knows what about.
+ */
+async function recordReview(
+  itemId: string,
+  decision: ReviewDecision,
+  graph: ReturnType<typeof getConductorGraph>,
+  thread: ReturnType<typeof threadFor>
+): Promise<void> {
+  try {
+    if (!decision || !['approve', 'refine', 'abort'].includes(decision.action)) return;
+    const values = (await graph.getState(thread)).values as {
+      plan?: { rawMarkdown?: unknown } | null;
+      score?: { parallelizationScore?: unknown } | null;
+    };
+    const rawMarkdown = typeof values.plan?.rawMarkdown === 'string' ? values.plan.rawMarkdown : null;
+    const score = typeof values.score?.parallelizationScore === 'number' ? values.score.parallelizationScore : null;
+    await recordPlanReview({
+      itemId,
+      rawMarkdown,
+      action: decision.action,
+      constraints: decision.action === 'refine' ? decision.constraints : undefined,
+      reason: decision.action === 'abort' ? decision.reason : undefined,
+      score,
+    });
+  } catch {
+    // A record of a decision must never be the reason the decision is lost.
+  }
 }
 
 /** Shape the graph's return into something the UI can branch on. */
@@ -181,6 +215,13 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
     // --- Resume paths -------------------------------------------------------
     if (body.decision) {
+      // What the reviewer decided, about which plan — written before the run
+      // moves on, so that an approval is on record when the plan it approves
+      // is persisted and claims it. Every review comes through here: the
+      // cockpit's panel, and a decision made on the hosted plane and applied
+      // by the bridge. Never fails the request.
+      await recordReview(id, body.decision as ReviewDecision, graph, thread);
+
       const result = await withConductorRun(id, () =>
         graph.invoke(new Command({ resume: body.decision as ReviewDecision }), thread)
       );
