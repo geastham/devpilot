@@ -161,11 +161,27 @@ export function parseFilePaths(raw: string | undefined | null): string[] {
     return [];
   }
 
-  // Split by comma, semicolon, or newline
+  // Split by comma, semicolon, or newline. Each path is unwrapped from the
+  // markdown it often arrives in: the planner writes `src/a.ts` as code, and a
+  // path kept with its backticks matches no file on disk, no code-graph node
+  // and no path in a task's report of what it changed. Seen on the first live
+  // run of the planner record (October 2026): all twelve paths in a plan.
   return raw
     .split(/[,;\n]/)
-    .map(s => s.trim())
+    .map(s => unwrapPath(s))
     .filter(s => s.length > 0);
+}
+
+/** `` `src/a.ts` ``, `"src/a.ts"`, `**src/a.ts**` → `src/a.ts`. */
+function unwrapPath(raw: string): string {
+  let s = raw.trim();
+  for (;;) {
+    const next = s
+      .replace(/^(`+|\*\*|\*|"|')(.*)\1$/, '$2')
+      .trim();
+    if (next === s) return s;
+    s = next;
+  }
 }
 
 /**

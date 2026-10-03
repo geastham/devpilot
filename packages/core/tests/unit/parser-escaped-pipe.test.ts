@@ -37,7 +37,7 @@ describe('parseWavePlanResponse — escaped pipes in table cells', () => {
 
   it('does not leak description fragments into filePaths', () => {
     // The bug produced filePaths of ["'svg'`)", "`ExportScale` (`1"].
-    expect(task11!.filePaths).toEqual(['`src/types/export.ts`']);
+    expect(task11!.filePaths).toEqual(['src/types/export.ts']);
   });
 
   it('unescapes \\| to a literal pipe in cell values', () => {
@@ -47,6 +47,6 @@ describe('parseWavePlanResponse — escaped pipes in table cells', () => {
   it('still parses rows that contain no escaped pipes', () => {
     const task12 = tasks.find((t) => t.taskCode === '1.2');
     expect(task12!.description).toBe('Plain row with no escaped pipes');
-    expect(task12!.filePaths).toEqual(['`src/lib/other.ts`']);
+    expect(task12!.filePaths).toEqual(['src/lib/other.ts']);
   });
 });

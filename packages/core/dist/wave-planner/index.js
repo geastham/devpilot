@@ -237,7 +237,15 @@ function parseFilePaths(raw) {
   if (!raw || raw.toLowerCase() === "none" || raw.trim() === "" || raw.trim() === "-") {
     return [];
   }
-  return raw.split(/[,;\n]/).map((s) => s.trim()).filter((s) => s.length > 0);
+  return raw.split(/[,;\n]/).map((s) => unwrapPath(s)).filter((s) => s.length > 0);
+}
+function unwrapPath(raw) {
+  let s = raw.trim();
+  for (; ; ) {
+    const next = s.replace(/^(`+|\*\*|\*|"|')(.*)\1$/, "$2").trim();
+    if (next === s) return s;
+    s = next;
+  }
 }
 function findCommonTheme(descriptions) {
   if (descriptions.length === 0) return null;
@@ -404,11 +412,21 @@ function parseTaskTable(tableContent) {
 function parseTableRow(line) {
   const cells = [];
   let current = "";
+  let inCode = false;
   for (let i = 0; i < line.length; i++) {
     const char = line[i];
     if (char === "\\" && line[i + 1] === "|") {
       current += "|";
       i++;
+      continue;
+    }
+    if (char === "`" && (inCode || line.indexOf("`", i + 1) !== -1)) {
+      inCode = !inCode;
+      current += char;
+      continue;
+    }
+    if (char === "|" && inCode) {
+      current += char;
       continue;
     }
     if (char === "|") {
