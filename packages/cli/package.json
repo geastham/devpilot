@@ -1,6 +1,6 @@
 {
   "name": "@devpilot.sh/cli",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "DevPilot CLI - Manage your AI coding agent fleet from the command line",
   "license": "MIT",
   "author": "DevPilot Team",
@@ -46,6 +46,7 @@
     "@devpilot.sh/bridge-protocol": "workspace:*",
     "@devpilot.sh/core": "workspace:*",
     "@devpilot.sh/mcp-session": "workspace:*",
+    "zod": "^3.22.0",
     "better-sqlite3": "^11.0.0",
     "chalk": "^5.3.0",
     "chokidar": "^3.6.0",
