@@ -165,7 +165,7 @@ function describePush(outcome: PushOutcome, identity: GraphIdentity): string[] {
   }
 }
 
-function clientFor(options: { url?: string; token?: string }): BridgeClient | null {
+export function clientFor(options: { url?: string; token?: string }): BridgeClient | null {
   const credentials = resolveBridgeCredentials({ url: options.url, token: options.token });
   if (!credentials.token) return null;
   return new BridgeClient({ bridgeUrl: credentials.url ?? DEFAULT_BRIDGE_URL, token: credentials.token });

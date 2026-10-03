@@ -32,6 +32,7 @@ var index_exports = {};
 __export(index_exports, {
   SERVER_NAME: () => SERVER_NAME,
   SERVER_VERSION: () => SERVER_VERSION,
+  connectStdio: () => connectStdio,
   createServer: () => createServer,
   createTools: () => createTools,
   main: () => main,
@@ -112,7 +113,7 @@ function writeHandoffFile(dir, sessionId, text2) {
 
 // src/index.ts
 var SERVER_NAME = "devpilot-session";
-var SERVER_VERSION = "0.4.0";
+var SERVER_VERSION = "0.5.0";
 var WAIT_DEFAULT_S = 30;
 var WAIT_MAX_S = 50;
 function defaultDeps() {
@@ -520,14 +521,17 @@ function registerHistoryTool(server, tools) {
     (input) => tools.history(input)
   );
 }
-async function main() {
-  const server = createServer();
+async function connectStdio(server) {
   await server.connect(new import_stdio.StdioServerTransport());
+}
+async function main() {
+  await connectStdio(createServer());
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   SERVER_NAME,
   SERVER_VERSION,
+  connectStdio,
   createServer,
   createTools,
   main,

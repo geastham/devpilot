@@ -75,7 +75,7 @@ function writeHandoffFile(dir, sessionId, text2) {
 
 // src/index.ts
 var SERVER_NAME = "devpilot-session";
-var SERVER_VERSION = "0.4.0";
+var SERVER_VERSION = "0.5.0";
 var WAIT_DEFAULT_S = 30;
 var WAIT_MAX_S = 50;
 function defaultDeps() {
@@ -483,13 +483,16 @@ function registerHistoryTool(server, tools) {
     (input) => tools.history(input)
   );
 }
-async function main() {
-  const server = createServer();
+async function connectStdio(server) {
   await server.connect(new StdioServerTransport());
+}
+async function main() {
+  await connectStdio(createServer());
 }
 export {
   SERVER_NAME,
   SERVER_VERSION,
+  connectStdio,
   createServer,
   createTools,
   main,

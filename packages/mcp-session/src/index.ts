@@ -52,7 +52,7 @@ import { SESSION_LIMITS, buildSessionHandoff, findJoinLink } from '@devpilot.sh/
 import { handoffDir, systemClipboard, writeHandoffFile, type Clipboard } from './delivery';
 
 export const SERVER_NAME = 'devpilot-session';
-export const SERVER_VERSION = '0.4.0';
+export const SERVER_VERSION = '0.5.0';
 
 /** How long `wait` may block, in seconds. Kept under common tool timeouts. */
 const WAIT_DEFAULT_S = 30;
@@ -752,7 +752,11 @@ function registerHistoryTool(server: McpServer, tools: Tools): void {
   );
 }
 
-export async function main(): Promise<void> {
-  const server = createServer();
+/** Serve over stdio. Exported so a host that adds tools of its own can start the server it built. */
+export async function connectStdio(server: McpServer): Promise<void> {
   await server.connect(new StdioServerTransport());
+}
+
+export async function main(): Promise<void> {
+  await connectStdio(createServer());
 }

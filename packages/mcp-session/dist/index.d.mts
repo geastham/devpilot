@@ -9,7 +9,7 @@ interface Clipboard {
 }
 
 declare const SERVER_NAME = "devpilot-session";
-declare const SERVER_VERSION = "0.4.0";
+declare const SERVER_VERSION = "0.5.0";
 /** Everything the tools reach outside this process for. Injected in tests. */
 interface ToolDeps {
     env: NodeJS.ProcessEnv;
@@ -164,6 +164,8 @@ declare function renderHistory(paths: string[], byPath: Record<string, HistoryEn
  */
 declare function toolGroups(env: NodeJS.ProcessEnv): Set<'session' | 'history'>;
 declare function createServer(overrides?: Partial<ToolDeps>): McpServer;
+/** Serve over stdio. Exported so a host that adds tools of its own can start the server it built. */
+declare function connectStdio(server: McpServer): Promise<void>;
 declare function main(): Promise<void>;
 
-export { SERVER_NAME, SERVER_VERSION, type ToolDeps, createServer, createTools, main, renderHistory, renderTranscript, toolGroups };
+export { SERVER_NAME, SERVER_VERSION, type ToolDeps, connectStdio, createServer, createTools, main, renderHistory, renderTranscript, toolGroups };
