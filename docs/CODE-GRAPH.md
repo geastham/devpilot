@@ -129,6 +129,29 @@ What it is for is what only the hosted plane can see — every machine at once:
 a warning when agents on two machines are working on connected code, and the
 blast radius of a task when reviewing a plan from a browser.
 
+### Asking from an assistant (`--allow-remote-config`)
+
+DevPilot's hosted side is also an MCP server (`https://devpilot.sh/api/mcp`). A
+member's assistant connected to it can ask for a repository's graph to be
+shared — `devpilot_share_repo` — instead of someone running `graph share` at
+the machine. The hosted side has no code, so the tool only leaves a request
+naming the repository (`owner/name`, never a path). A bridge picks it up:
+
+- **Off by default.** A bridge acts on a share request only if it was started
+  with `--allow-remote-config` (or `DEVPILOT_ALLOW_REMOTE_CONFIG=true`).
+  Without it, a machine that has the repository answers *declined* and sends
+  nothing.
+- **This machine decides which checkout.** It looks only at checkouts it
+  already knows: ones shared from here, and directories an agent session ran in
+  during the last 30 days. It takes one on the default branch; if none is, the
+  request fails and says so.
+- **A machine without the repository does not answer**, so the request stays
+  open for one that has it.
+- Then it is the same work as `graph enable` + `graph share --yes`, recorded in
+  the same share file, so `graph status` and `graph unshare` see it.
+
+A request to *stop* sharing is honoured without the flag: it sends nothing.
+
 ## Commands
 
 | | |

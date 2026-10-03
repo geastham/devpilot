@@ -330,6 +330,34 @@ var BridgeClient = class {
       };
     }
   }
+  /**
+   * What a member of the workspace has asked this machine to do, through an
+   * assistant connected to DevPilot. Today: share, or stop sharing, a
+   * repository's code graph. A request names a repository and nothing else.
+   *
+   * Empty on any failure, and on a hosted plane too old to have the route: no
+   * requests and "could not ask" call for the same thing, which is nothing.
+   */
+  async machineCommands() {
+    try {
+      const body = await this.request("/api/orchestrators/commands");
+      return Array.isArray(body.commands) ? body.commands : [];
+    } catch {
+      return [];
+    }
+  }
+  /** Say what this machine did about a request. One line of why, shown to whoever asked. */
+  async answerMachineCommand(id, status, result) {
+    try {
+      await this.request(`/api/orchestrators/commands/${encodeURIComponent(id)}`, {
+        method: "POST",
+        body: JSON.stringify({ status, ...result ? { result: result.slice(0, 500) } : {} })
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
   /** Remove a repository's graph from the hosted plane. */
   async graphDelete(repo, branch) {
     try {

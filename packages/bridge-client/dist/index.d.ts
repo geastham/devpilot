@@ -210,6 +210,14 @@ interface GraphSyncBatch {
         filePath: string;
     }[];
 }
+/** A request left for a machine by a member's connected assistant. */
+interface MachineCommand {
+    id: string;
+    kind: 'graph.share' | 'graph.unshare';
+    /** `owner/name`. Never a path: which checkout, if any, is this machine's to decide. */
+    repo: string;
+    createdAt: string;
+}
 declare class BridgeClient {
     private readonly config;
     private readonly fetchImpl;
@@ -350,6 +358,17 @@ declare class BridgeClient {
         status: number;
         message: string;
     }>;
+    /**
+     * What a member of the workspace has asked this machine to do, through an
+     * assistant connected to DevPilot. Today: share, or stop sharing, a
+     * repository's code graph. A request names a repository and nothing else.
+     *
+     * Empty on any failure, and on a hosted plane too old to have the route: no
+     * requests and "could not ask" call for the same thing, which is nothing.
+     */
+    machineCommands(): Promise<MachineCommand[]>;
+    /** Say what this machine did about a request. One line of why, shown to whoever asked. */
+    answerMachineCommand(id: string, status: 'applied' | 'failed' | 'declined', result?: string): Promise<boolean>;
     /** Remove a repository's graph from the hosted plane. */
     graphDelete(repo: string, branch: string): Promise<boolean>;
     /**
@@ -663,4 +682,4 @@ declare class PubSubSubscriber {
     constructor();
 }
 
-export { BridgeClient, type BridgeClientConfig, type BridgeCredentials, BridgeError, DEFAULT_BRIDGE_URL, type DispatchHandler, DispatchLoop, type DispatchLoopConfig, type EntryStatus, type GraphCounts, type GraphManifest, type GraphManifestResult, type GraphSyncBatch, type HeartbeatConfig, HeartbeatService, type MirroredPlan, type MirroredPlannerFigures, type MirroredTelemetry, PubSubSubscriber, RealtimeSubscriber, type RealtimeSubscriberConfig, type SessionCommandMessage, SharedSessionClient, type SharedSessionCreateOptions, type SharedSessionJoinOptions, type TranscriptEntry, bridgeCredentialsPath, clearBridgeCredentials, loadBridgeCredentials, resolveBridgeCredentials, saveBridgeCredentials };
+export { BridgeClient, type BridgeClientConfig, type BridgeCredentials, BridgeError, DEFAULT_BRIDGE_URL, type DispatchHandler, DispatchLoop, type DispatchLoopConfig, type EntryStatus, type GraphCounts, type GraphManifest, type GraphManifestResult, type GraphSyncBatch, type HeartbeatConfig, HeartbeatService, type MachineCommand, type MirroredPlan, type MirroredPlannerFigures, type MirroredTelemetry, PubSubSubscriber, RealtimeSubscriber, type RealtimeSubscriberConfig, type SessionCommandMessage, SharedSessionClient, type SharedSessionCreateOptions, type SharedSessionJoinOptions, type TranscriptEntry, bridgeCredentialsPath, clearBridgeCredentials, loadBridgeCredentials, resolveBridgeCredentials, saveBridgeCredentials };

@@ -338,7 +338,7 @@ import { Command as Command23 } from "commander";
 import updateNotifier from "update-notifier";
 
 // src/version.ts
-var VERSION = "0.9.0";
+var VERSION = "0.10.0";
 
 // src/commands/init.ts
 import { Command } from "commander";
@@ -2326,7 +2326,7 @@ async function say(o, progressPercent, message) {
 // src/commands/bridge/connect.ts
 import { homedir as homedir5 } from "os";
 import { join as join12, dirname as dirname7 } from "path";
-import { readFileSync as readFileSync12, writeFileSync as writeFileSync12, mkdirSync as mkdirSync10, existsSync as existsSync12 } from "fs";
+import { readFileSync as readFileSync12, writeFileSync as writeFileSync12, mkdirSync as mkdirSync10, existsSync as existsSync13 } from "fs";
 
 // src/commands/bridge/conductor-watcher.ts
 import { readFileSync as readFileSync9, writeFileSync as writeFileSync9, mkdirSync as mkdirSync7, unlinkSync as unlinkSync2, existsSync as existsSync9 } from "fs";
@@ -3387,16 +3387,169 @@ var GraphSharer = class {
   }
 };
 
+// src/commands/bridge/remote-config.ts
+import { execFileSync as execFileSync3 } from "child_process";
+import { existsSync as existsSync11 } from "fs";
+import { hostname } from "os";
+import { adoption as adoption2 } from "@devpilot.sh/core";
+var RemoteConfig = class {
+  constructor(opts) {
+    this.opts = opts;
+    this.timer = null;
+    this.running = false;
+  }
+  start() {
+    if (this.timer) return;
+    void this.sweep();
+    this.timer = setInterval(() => void this.sweep(), this.opts.intervalMs ?? 3e4);
+    this.timer.unref?.();
+  }
+  stop() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+  async sweep() {
+    if (this.running) return;
+    this.running = true;
+    try {
+      for (const command of await this.opts.client.machineCommands()) {
+        try {
+          await this.handle(command);
+        } catch (error) {
+          await this.answer(command, "failed", error instanceof Error ? error.message : String(error));
+        }
+      }
+    } finally {
+      this.running = false;
+    }
+  }
+  async answer(command, status, result) {
+    this.opts.onLog?.(`remote request ${command.kind} ${command.repo}: ${status} \u2014 ${result}`);
+    await this.opts.client.answerMachineCommand(command.id, status, result);
+  }
+  async handle(command) {
+    if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(command.repo)) return;
+    if (command.kind === "graph.unshare") return this.unshare(command);
+    if (command.kind !== "graph.share") return;
+    const checkouts = await (this.opts.findCheckouts ?? findCheckouts)(command.repo);
+    if (checkouts.length === 0) return;
+    if (!this.opts.allow) {
+      return this.answer(
+        command,
+        "declined",
+        `${hostname()} has ${command.repo} but does not take configuration from elsewhere. Restart its bridge with --allow-remote-config, or run \`devpilot graph share --yes\` in the checkout.`
+      );
+    }
+    const indexer = await (this.opts.findIndexer ?? findIndexer)();
+    if (!indexer) {
+      return this.answer(command, "failed", `The code graph indexer (codegraph) is not installed on ${hostname()}.`);
+    }
+    let chosen = null;
+    let offBranch = null;
+    for (const dir of checkouts) {
+      const identity = identify(dir, indexer.version ?? "unknown");
+      if ("error" in identity) continue;
+      if (identity.skip) {
+        offBranch = identity.skip;
+        continue;
+      }
+      chosen = { dir, identity };
+      break;
+    }
+    if (!chosen) {
+      return this.answer(
+        command,
+        "failed",
+        offBranch ? `No checkout of ${command.repo} on ${hostname()} is on the default branch (${offBranch}). Run \`devpilot graph share --any-branch --yes\` there to share it as it is.` : `Could not read the branch and commit of ${command.repo} on ${hostname()}.`
+      );
+    }
+    if (hasIndex(chosen.dir)) await syncIndex(indexer, chosen.dir);
+    else await buildIndex(indexer, chosen.dir);
+    await excludeIndexFromGit(chosen.dir);
+    const outcome = await (this.opts.push ?? pushGraph)(this.opts.client, chosen.dir, chosen.identity);
+    if (outcome.status !== "pushed") return this.answer(command, "failed", whyNot(outcome));
+    const path = this.opts.storePath ?? shareStorePath();
+    const store = loadShares(path);
+    store.repos[keyFor(chosen.dir)] = { repo: chosen.identity.repo, sharedAt: (/* @__PURE__ */ new Date()).toISOString() };
+    saveShares(store, path);
+    const counts = outcome.counts;
+    await this.answer(
+      command,
+      "applied",
+      `Shared ${chosen.identity.repo}@${chosen.identity.branch} at ${chosen.identity.commitSha.slice(0, 7)}` + (counts ? `: ${counts.files} files, ${counts.nodes} symbols, ${counts.edges} references.` : ".") + " Kept current while this bridge runs."
+    );
+  }
+  /**
+   * Stopping is not gated on the flag: it sends nothing, and a machine that
+   * was asked to stop sending should stop.
+   */
+  async unshare(command) {
+    const path = this.opts.storePath ?? shareStorePath();
+    const store = loadShares(path);
+    const mine = Object.entries(store.repos).filter(([, entry]) => entry.repo.toLowerCase() === command.repo.toLowerCase());
+    if (mine.length === 0) return;
+    for (const [dir] of mine) delete store.repos[dir];
+    saveShares(store, path);
+    let deleted = false;
+    for (const [dir, entry] of mine) {
+      const branch = defaultBranch(dir) ?? adoption2.resolveBranch(dir);
+      if (branch && await this.opts.client.graphDelete(entry.repo, branch)) deleted = true;
+    }
+    await this.answer(
+      command,
+      "applied",
+      deleted ? `${hostname()} no longer shares ${command.repo}, and the hosted copy was deleted.` : `${hostname()} no longer shares ${command.repo}. The hosted copy could not be deleted from there; remove it under Graph.`
+    );
+  }
+};
+function whyNot(outcome) {
+  if (outcome.status === "disabled") return "The workspace has the hosted code graph turned off.";
+  if (outcome.status === "no-index") return `The index could not be read: ${outcome.reason}`;
+  if (outcome.status === "failed") return `The graph did not land: ${outcome.message}`.slice(0, 400);
+  return "The graph was not sent.";
+}
+async function findCheckouts(repo, storePath = shareStorePath()) {
+  const wanted = repo.toLowerCase();
+  const roots = /* @__PURE__ */ new Set();
+  const consider = (dir) => {
+    if (!dir || !existsSync11(dir)) return;
+    if (adoption2.resolveRepo(dir)?.repo.toLowerCase() !== wanted) return;
+    const top = toplevel(dir);
+    if (top) roots.add(top);
+  };
+  for (const [dir, entry] of Object.entries(loadShares(storePath).repos)) {
+    if (entry.repo.toLowerCase() === wanted) consider(dir);
+  }
+  try {
+    const scan = await adoption2.scanSessions({
+      machineName: hostname(),
+      allRepos: true,
+      sinceMs: 30 * 24 * 60 * 60 * 1e3,
+      includePaths: false
+    });
+    for (const { cwd } of scan.transcriptPaths.values()) consider(cwd);
+  } catch {
+  }
+  return [...roots];
+}
+function toplevel(dir) {
+  try {
+    return execFileSync3("git", ["rev-parse", "--show-toplevel"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5e3 }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 // src/commands/bridge/observer.ts
 import chalk11 from "chalk";
-import { existsSync as existsSync11, mkdirSync as mkdirSync9, readFileSync as readFileSync11, statSync as statSync2, writeFileSync as writeFileSync11 } from "fs";
+import { existsSync as existsSync12, mkdirSync as mkdirSync9, readFileSync as readFileSync11, statSync as statSync2, writeFileSync as writeFileSync11 } from "fs";
 import { dirname as dirname6 } from "path";
 
 // src/commands/sessions/scan-pipeline.ts
 import { homedir as homedir4 } from "os";
 import { join as join11 } from "path";
 import chalk10 from "chalk";
-import { adoption as adoption2 } from "@devpilot.sh/core";
+import { adoption as adoption3 } from "@devpilot.sh/core";
 function parseDuration(input, fallbackMs) {
   const match = /^(\d+)\s*([smhdw])?$/i.exec(input.trim());
   if (!match) return fallbackMs;
@@ -3413,7 +3566,7 @@ function parseDuration(input, fallbackMs) {
 }
 async function runScanPipeline(options) {
   const repos = options.onlyRepo ? [options.onlyRepo] : options.repos;
-  const scan = adoption2.scanSessions({
+  const scan = adoption3.scanSessions({
     machineName: options.machineName,
     repos,
     // `--repo x` is an explicit narrowing, so it must not be widened by
@@ -3421,7 +3574,7 @@ async function runScanPipeline(options) {
     allRepos: options.onlyRepo ? false : options.allRepos,
     sinceMs: options.sinceMs,
     includePaths: options.includePaths,
-    excludeSessionUuids: adoption2.loadOwnedSessionIds(
+    excludeSessionUuids: adoption3.loadOwnedSessionIds(
       join11(homedir4(), ".devpilot", "owned-sessions.json")
     )
   });
@@ -3431,7 +3584,7 @@ async function runScanPipeline(options) {
       const observation = observationFor(candidate, scan);
       return observation ? { candidate, observation } : null;
     }).filter((j) => j !== null);
-    const summaries = await adoption2.summarizeSessions(
+    const summaries = await adoption3.summarizeSessions(
       jobs.map((j) => ({
         observation: j.observation,
         touchedPaths: j.candidate.touchedPaths ?? []
@@ -3451,7 +3604,7 @@ async function runScanPipeline(options) {
     unmappedProjectCount: scan.unmappedProjectCount,
     skipped: scan.skipped,
     projectDirCount: scan.projectDirCount,
-    withheldOwners: adoption2.withheldOwners(scan.skipped),
+    withheldOwners: adoption3.withheldOwners(scan.skipped),
     modelTitles,
     transcriptPaths: scan.transcriptPaths
   };
@@ -3459,7 +3612,7 @@ async function runScanPipeline(options) {
 function observationFor(candidate, scan) {
   const path = scan.transcriptPaths?.get(candidate.adoptionKey);
   if (!path) return null;
-  return adoption2.probeTranscript(path.transcriptPath, path.sessionUuid);
+  return adoption3.probeTranscript(path.transcriptPath, path.sessionUuid);
 }
 function relativeAge(iso, now = Date.now()) {
   const ms = now - Date.parse(iso);
@@ -3732,7 +3885,7 @@ var SessionObserver = class {
     const path = this.config.readingsStatePath;
     if (!path) return;
     try {
-      if (!existsSync11(path)) return;
+      if (!existsSync12(path)) return;
       const parsed = JSON.parse(readFileSync11(path, "utf8"));
       if (parsed?.version !== 1 || !parsed.readings) return;
       for (const [key, reading] of Object.entries(parsed.readings)) this.readings.set(key, reading);
@@ -3755,7 +3908,7 @@ var SessionObserver = class {
 };
 
 // src/commands/bridge/resume-applier.ts
-import { adoption as adoption3 } from "@devpilot.sh/core";
+import { adoption as adoption4 } from "@devpilot.sh/core";
 var DEFAULT_LIVE_WITHIN_MS = 5 * 6e4;
 var ResumeApplier = class {
   constructor(opts) {
@@ -3795,7 +3948,7 @@ var ResumeApplier = class {
       );
       return;
     }
-    const observation = adoption3.probeTranscript(target.transcriptPath, target.sessionUuid);
+    const observation = adoption4.probeTranscript(target.transcriptPath, target.sessionUuid);
     if (!observation) {
       await this.fail(command, "That session\u2019s transcript is no longer on this machine.");
       return;
@@ -3897,7 +4050,7 @@ var ResumeApplier = class {
 
 // src/commands/bridge/introspect.ts
 import chalk12 from "chalk";
-import { adoption as adoption4 } from "@devpilot.sh/core";
+import { adoption as adoption5 } from "@devpilot.sh/core";
 async function runIntrospection(options) {
   let result;
   try {
@@ -3920,7 +4073,7 @@ async function runIntrospection(options) {
     return;
   }
   const live = result.discovered.reduce((n2, r) => n2 + r.liveSessionCount, 0);
-  const owners = adoption4.groupByOwner(result.discovered);
+  const owners = adoption5.groupByOwner(result.discovered);
   console.log(
     chalk12.cyan(
       `   Looked around this machine: ${result.projectDirCount} projects, ${owners.size} owner${owners.size === 1 ? "" : "s"}, ${result.discovered.reduce((n2, r) => n2 + r.sessionCount, 0)} sessions`
@@ -4020,7 +4173,7 @@ function describe2(err) {
 function stableMachineName() {
   const path = join12(homedir5(), ".devpilot", "machine.json");
   try {
-    if (existsSync12(path)) {
+    if (existsSync13(path)) {
       const saved = JSON.parse(readFileSync12(path, "utf8"));
       if (saved.name) return saved.name;
     }
@@ -4091,6 +4244,10 @@ var connectCommand = new Command9("connect").description("Connect this machine t
   "--adopt",
   "Also put agent sessions already running on this machine onto the board",
   process.env.DEVPILOT_BRIDGE_ADOPT === "true"
+).option(
+  "--allow-remote-config",
+  "Let a member's connected assistant ask this machine to share a repository's code graph",
+  process.env.DEVPILOT_ALLOW_REMOTE_CONFIG === "true"
 ).option(
   "--adopt-all-repos",
   "With --adopt, include repos this machine does not route (names them first)",
@@ -4219,6 +4376,14 @@ var connectCommand = new Command9("connect").description("Connect this machine t
     observer.start();
   }
   new GraphSharer({ client: client2, onLog: (line) => console.log(chalk13.gray(`   ${line}`)) }).start();
+  new RemoteConfig({
+    client: client2,
+    allow: Boolean(options.allowRemoteConfig),
+    onLog: (line) => console.log(chalk13.gray(`   ${line}`))
+  }).start();
+  if (options.allowRemoteConfig) {
+    console.log(chalk13.gray("   Remote configuration: on \u2014 a connected assistant may ask this machine to share a code graph"));
+  }
   const resumeApplier = observer && (options.sessionApiUrl || options.cockpitUrl) ? new ResumeApplier({
     client: client2,
     sessionApiUrl: options.sessionApiUrl,
@@ -4382,7 +4547,7 @@ import {
   closeSync as closeSync2,
   constants,
   copyFileSync,
-  existsSync as existsSync13,
+  existsSync as existsSync14,
   mkdirSync as mkdirSync11,
   openSync as openSync2,
   readFileSync as readFileSync13,
@@ -4778,7 +4943,7 @@ function inspectService(paths, sys) {
     return { supported: false, kind: null, path: null, installed: false, loaded: false, pid: null, args: null, url: null };
   }
   const path = kind === "launchd" ? paths.plistPath : paths.unitPath;
-  if (!existsSync13(path)) {
+  if (!existsSync14(path)) {
     return { supported: true, kind, path, installed: false, loaded: false, pid: null, args: null, url: null };
   }
   const record = readJson(paths.serviceRecordPath);
@@ -4915,7 +5080,7 @@ function bridgeStatus(paths, sys, options = {}) {
     stale: recorded && !live ? { pid: recorded.pid, startedAt: recorded.startedAt } : null,
     unmanaged: unmanagedBridges(sys, [live?.pid ?? null, service2.pid]),
     service: service2,
-    log: { path: paths.logPath, exists: existsSync13(paths.logPath), tail: tailLog(paths.logPath, options.tail ?? 5, { skipBlank: true }) }
+    log: { path: paths.logPath, exists: existsSync14(paths.logPath), tail: tailLog(paths.logPath, options.tail ?? 5, { skipBlank: true }) }
   };
 }
 var SESSION_KEY_MESSAGE = [
@@ -5021,7 +5186,7 @@ function uninstallService(paths, sys) {
   const kind = serviceKind(sys.platform);
   if (!kind) return { status: "unsupported", platform: sys.platform };
   const path = kind === "launchd" ? paths.plistPath : paths.unitPath;
-  if (!existsSync13(path)) {
+  if (!existsSync14(path)) {
     rmSync3(paths.serviceRecordPath, { force: true });
     return { status: "not-installed", kind, path };
   }
@@ -5041,7 +5206,7 @@ function uninstallService(paths, sys) {
 // src/commands/bridge/background.ts
 import { Command as Command11 } from "commander";
 import chalk15 from "chalk";
-import { existsSync as existsSync14, statSync as statSync4 } from "fs";
+import { existsSync as existsSync15, statSync as statSync4 } from "fs";
 import { resolve as resolve6 } from "path";
 function displayPath(path, home) {
   return path === home ? "~" : path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
@@ -5190,7 +5355,7 @@ var stopCommand = new Command11("stop").description("Stop the bridge that `devpi
 var logsCommand = new Command11("logs").description("Print the background bridge\u2019s log").option("-f, --follow", "Keep printing as the bridge writes").option("-n, --lines <n>", "How many lines to print", "50").action(async (options) => {
   const paths = bridgePaths();
   rotateLog(paths.logPath);
-  if (!existsSync14(paths.logPath)) {
+  if (!existsSync15(paths.logPath)) {
     console.log(chalk15.gray(`No log yet at ${displayPath(paths.logPath, paths.home)}.`));
     console.log(chalk15.gray("It is written by `devpilot bridge start` and by the login service."));
     if (!options.follow) return;
@@ -5198,7 +5363,7 @@ var logsCommand = new Command11("logs").description("Print the background bridge
   const count2 = Math.max(0, parseInt(options.lines, 10) || 0);
   for (const line of tailLog(paths.logPath, count2)) console.log(line);
   if (!options.follow) return;
-  let offset = existsSync14(paths.logPath) ? statSync4(paths.logPath).size : 0;
+  let offset = existsSync15(paths.logPath) ? statSync4(paths.logPath).size : 0;
   setInterval(() => {
     const next = readLogFrom(paths.logPath, offset);
     offset = next.offset;
@@ -5572,7 +5737,7 @@ var sessionCommand = new Command18("session").description("Shared, end-to-end en
 import os5 from "os";
 import { homedir as homedir7 } from "os";
 import { join as join14, dirname as dirname9 } from "path";
-import { existsSync as existsSync15, readFileSync as readFileSync14, writeFileSync as writeFileSync14, mkdirSync as mkdirSync12 } from "fs";
+import { existsSync as existsSync16, readFileSync as readFileSync14, writeFileSync as writeFileSync14, mkdirSync as mkdirSync12 } from "fs";
 import { Command as Command19 } from "commander";
 import chalk21 from "chalk";
 import inquirer from "inquirer";
@@ -5580,7 +5745,7 @@ import { BridgeClient as BridgeClient3 } from "@devpilot.sh/bridge-client";
 function stableMachineName2() {
   const path = join14(homedir7(), ".devpilot", "machine.json");
   try {
-    if (existsSync15(path)) {
+    if (existsSync16(path)) {
       const saved = JSON.parse(readFileSync14(path, "utf8"));
       if (saved.name) return saved.name;
     }
@@ -5803,14 +5968,14 @@ import { resolve as resolve8 } from "path";
 // src/commands/session-runner/server.ts
 import { createServer } from "http";
 import { randomUUID as randomUUID2 } from "crypto";
-import { existsSync as existsSync18 } from "fs";
+import { existsSync as existsSync19 } from "fs";
 import { basename as basename4, isAbsolute as isAbsolute3, resolve as resolve7 } from "path";
 
 // src/commands/session-runner/claude-runner.ts
 init_statusline_store();
 import { spawn as spawn3, execFile as execFile2 } from "child_process";
 import { promisify as promisify2 } from "util";
-import { mkdtempSync as mkdtempSync2, rmSync as rmSync4, writeFileSync as writeFileSync16, existsSync as existsSync16, readFileSync as readFileSync15, mkdirSync as mkdirSync13 } from "fs";
+import { mkdtempSync as mkdtempSync2, rmSync as rmSync4, writeFileSync as writeFileSync16, existsSync as existsSync17, readFileSync as readFileSync15, mkdirSync as mkdirSync13 } from "fs";
 import { tmpdir as tmpdir2, homedir as homedir8 } from "os";
 import { join as join16 } from "path";
 
@@ -6299,7 +6464,7 @@ function recordOwnedSession(sessionId) {
     const dir = join16(homedir8(), ".devpilot");
     const path = join16(dir, "owned-sessions.json");
     let ids = [];
-    if (existsSync16(path)) {
+    if (existsSync17(path)) {
       const parsed = JSON.parse(readFileSync15(path, "utf8"));
       if (Array.isArray(parsed.sessionIds)) {
         ids = parsed.sessionIds.filter((v) => typeof v === "string");
@@ -6576,7 +6741,7 @@ function sendCompletion(callbackUrl, report, token, log) {
 // src/commands/session-runner/isolation.ts
 import { execFile as execFile3 } from "child_process";
 import { createHash } from "crypto";
-import { existsSync as existsSync17, mkdirSync as mkdirSync14, realpathSync as realpathSync2, rmSync as rmSync5 } from "fs";
+import { existsSync as existsSync18, mkdirSync as mkdirSync14, realpathSync as realpathSync2, rmSync as rmSync5 } from "fs";
 import { homedir as homedir9 } from "os";
 import { basename as basename3, dirname as dirname10, join as join17 } from "path";
 import { promisify as promisify3 } from "util";
@@ -6696,7 +6861,7 @@ async function prepareTaskWorkspace(repoDir, request, config = {}) {
         await git3(repoDir, ["branch", runBranch, "HEAD"]);
       }
       const baseSha = await revParse(repoDir, `refs/heads/${runBranch}`);
-      if (existsSync17(dir)) await removeWorktree(repoDir, dir);
+      if (existsSync18(dir)) await removeWorktree(repoDir, dir);
       const previous = await revParse(repoDir, `refs/heads/${branch}`);
       if (previous) {
         let kept = `${branch}-attempt-${previous.slice(0, 8)}`;
@@ -6837,7 +7002,7 @@ async function integrateRun(repoDir, request, config = {}) {
       conflicts: [],
       missing: []
     };
-    if (existsSync17(dir)) await removeWorktree(repoDir, dir);
+    if (existsSync18(dir)) await removeWorktree(repoDir, dir);
     mkdirSync14(dirname10(dir), { recursive: true });
     try {
       await git3(repoDir, ["worktree", "add", "--detach", dir, runBranch]);
@@ -6981,10 +7146,10 @@ var SessionRunner = class {
   resolveWorkdir(repo) {
     const mapped = this.config.repoMap.get(repo);
     if (mapped) {
-      return existsSync18(mapped) ? { workdir: mapped } : { error: `Mapped path for '${repo}' does not exist: ${mapped}` };
+      return existsSync19(mapped) ? { workdir: mapped } : { error: `Mapped path for '${repo}' does not exist: ${mapped}` };
     }
     const candidate = isAbsolute3(repo) ? repo : resolve7(this.config.workspace, basename4(repo));
-    if (!existsSync18(candidate)) {
+    if (!existsSync19(candidate)) {
       return {
         error: `No checkout for '${repo}'. Tried ${candidate}. Pass --repo ${repo}=/path/to/checkout, or set --workspace.`
       };
@@ -7683,7 +7848,7 @@ var updateCommand = new Command21("update").description("Update DevPilot CLI to 
 
 // src/commands/wiki.ts
 import { Command as Command22 } from "commander";
-import { existsSync as existsSync19, mkdirSync as mkdirSync15, readFileSync as readFileSync16, writeFileSync as writeFileSync17 } from "fs";
+import { existsSync as existsSync20, mkdirSync as mkdirSync15, readFileSync as readFileSync16, writeFileSync as writeFileSync17 } from "fs";
 import { join as join18 } from "path";
 import chalk24 from "chalk";
 import { resolveWikiModel } from "@devpilot.sh/core/wave-planner";
@@ -7692,17 +7857,17 @@ wikiCommand.command("init").description("Initialize the wiki system in the curre
   const cwd = process.cwd();
   const devpilotDir = join18(cwd, ".devpilot");
   const wikiDir = join18(cwd, options.wikiDir);
-  if (!existsSync19(devpilotDir)) {
+  if (!existsSync20(devpilotDir)) {
     console.log(
       chalk24.yellow("\u26A0\uFE0F  DevPilot not initialized. Run `devpilot init` first.")
     );
     return;
   }
-  if (!existsSync19(wikiDir)) {
+  if (!existsSync20(wikiDir)) {
     mkdirSync15(wikiDir, { recursive: true });
   }
   const indexPath = join18(wikiDir, "index.md");
-  if (!existsSync19(indexPath)) {
+  if (!existsSync20(indexPath)) {
     const initialIndex = `# Wiki Index
 
 > Auto-generated wiki \u2014 compiled from session logs, commits, specs, and decisions.
@@ -7720,7 +7885,7 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
     writeFileSync17(indexPath, initialIndex);
   }
   const logPath = join18(wikiDir, "log.md");
-  if (!existsSync19(logPath)) {
+  if (!existsSync20(logPath)) {
     writeFileSync17(
       logPath,
       `# Wiki Activity Log
@@ -7732,7 +7897,7 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
     );
   }
   const gitignorePath = join18(cwd, ".gitignore");
-  if (existsSync19(gitignorePath)) {
+  if (existsSync20(gitignorePath)) {
     const gitignore = readFileSync16(gitignorePath, "utf-8");
     if (!gitignore.includes(".devpilot/wiki")) {
     }
@@ -7761,7 +7926,7 @@ Run \`devpilot wiki ingest\` to manually add sources, or let the session hook ca
 wikiCommand.command("ingest").description("Ingest a source document into the wiki").requiredOption("--type <type>", "Source type: session_log, commit, spec, decision, manual").requiredOption("--title <title>", "Human-readable title for the source").option("--file <path>", "Path to source file").option("--stdin", "Read source from stdin").option("--origin <origin>", "Origin identifier (e.g. session ID, commit SHA)").action(async (options) => {
   let content;
   if (options.file) {
-    if (!existsSync19(options.file)) {
+    if (!existsSync20(options.file)) {
       console.log(chalk24.red(`\u274C File not found: ${options.file}`));
       return;
     }
