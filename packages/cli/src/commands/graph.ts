@@ -57,13 +57,13 @@ export function loadShares(path: string = shareStorePath()): ShareStore {
   return { version: 1, repos: {} };
 }
 
-function saveShares(store: ShareStore, path: string = shareStorePath()): void {
+export function saveShares(store: ShareStore, path: string = shareStorePath()): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(store, null, 2) + '\n', { mode: 0o600 });
 }
 
 /** Keyed by the real path, so two ways of naming one checkout are one entry. */
-function keyFor(dir: string): string {
+export function keyFor(dir: string): string {
   try {
     return realpathSync(dir);
   } catch {
@@ -84,7 +84,7 @@ function git(dir: string, args: string[]): string | null {
 }
 
 /** `main`, from `origin/HEAD`. Null when the remote has not said. */
-function defaultBranch(dir: string): string | null {
+export function defaultBranch(dir: string): string | null {
   const ref = git(dir, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']);
   return ref ? ref.replace(/^origin\//, '') : null;
 }

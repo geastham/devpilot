@@ -60,6 +60,7 @@ import { ConductorWatcher } from './conductor-watcher';
 import { CommandApplier } from './command-applier';
 import { AdoptionWatcher } from './adoption-watcher';
 import { GraphSharer } from './graph-sharer';
+import { RemoteConfig } from './remote-config';
 import { SessionObserver } from './observer';
 import { ResumeApplier } from './resume-applier';
 import { runIntrospection } from './introspect';
@@ -150,6 +151,7 @@ interface ConnectOptions {
   aoPath?: string;
   save?: boolean;
   discover?: boolean;
+  allowRemoteConfig?: boolean;
   observe?: boolean;
   adopt?: boolean;
   adoptAllRepos?: boolean;
@@ -215,6 +217,11 @@ export const connectCommand = new Command('connect')
     '--adopt',
     'Also put agent sessions already running on this machine onto the board',
     process.env.DEVPILOT_BRIDGE_ADOPT === 'true',
+  )
+  .option(
+    '--allow-remote-config',
+    'Let a member\'s connected assistant ask this machine to share a repository\'s code graph',
+    process.env.DEVPILOT_ALLOW_REMOTE_CONFIG === 'true',
   )
   .option(
     '--adopt-all-repos',
@@ -424,6 +431,18 @@ export const connectCommand = new Command('connect')
     // sent for any other repository, indexed or not — and this is a separate
     // consent from observing sessions, so it does not depend on that being on.
     new GraphSharer({ client, onLog: (line) => console.log(chalk.gray(`   ${line}`)) }).start();
+
+    // Requests left by a member's connected assistant. Runs either way: with
+    // the flag off it only says no, so whoever asked is told why nothing
+    // happened instead of waiting on a machine that will never answer.
+    new RemoteConfig({
+      client,
+      allow: Boolean(options.allowRemoteConfig),
+      onLog: (line) => console.log(chalk.gray(`   ${line}`)),
+    }).start();
+    if (options.allowRemoteConfig) {
+      console.log(chalk.gray('   Remote configuration: on — a connected assistant may ask this machine to share a code graph'));
+    }
 
     /**
      * The command return path — TRD 23 §7.1.

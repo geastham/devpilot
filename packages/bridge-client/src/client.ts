@@ -221,6 +221,15 @@ export interface GraphSyncBatch {
   edges: { source: string; target: string; kind: string; line: number | null; filePath: string }[];
 }
 
+/** A request left for a machine by a member's connected assistant. */
+export interface MachineCommand {
+  id: string;
+  kind: 'graph.share' | 'graph.unshare';
+  /** `owner/name`. Never a path: which checkout, if any, is this machine's to decide. */
+  repo: string;
+  createdAt: string;
+}
+
 export class BridgeClient {
   private readonly fetchImpl: typeof fetch;
   private orchestratorId: string | null = null;
@@ -554,6 +563,40 @@ export class BridgeClient {
         status: error instanceof BridgeError ? error.status : 0,
         message: error instanceof Error ? error.message : String(error),
       };
+    }
+  }
+
+  /**
+   * What a member of the workspace has asked this machine to do, through an
+   * assistant connected to DevPilot. Today: share, or stop sharing, a
+   * repository's code graph. A request names a repository and nothing else.
+   *
+   * Empty on any failure, and on a hosted plane too old to have the route: no
+   * requests and "could not ask" call for the same thing, which is nothing.
+   */
+  async machineCommands(): Promise<MachineCommand[]> {
+    try {
+      const body = await this.request<{ commands?: MachineCommand[] }>('/api/orchestrators/commands');
+      return Array.isArray(body.commands) ? body.commands : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Say what this machine did about a request. One line of why, shown to whoever asked. */
+  async answerMachineCommand(
+    id: string,
+    status: 'applied' | 'failed' | 'declined',
+    result?: string
+  ): Promise<boolean> {
+    try {
+      await this.request(`/api/orchestrators/commands/${encodeURIComponent(id)}`, {
+        method: 'POST',
+        body: JSON.stringify({ status, ...(result ? { result: result.slice(0, 500) } : {}) }),
+      });
+      return true;
+    } catch {
+      return false;
     }
   }
 

@@ -361,7 +361,7 @@ var import_commander23 = require("commander");
 var import_update_notifier = __toESM(require("update-notifier"));
 
 // src/version.ts
-var VERSION = "0.9.0";
+var VERSION = "0.10.0";
 
 // src/commands/init.ts
 var import_commander = require("commander");
@@ -2339,9 +2339,9 @@ async function say(o, progressPercent, message) {
 }
 
 // src/commands/bridge/connect.ts
-var import_node_os2 = require("os");
+var import_node_os3 = require("os");
 var import_node_path5 = require("path");
-var import_node_fs5 = require("fs");
+var import_node_fs6 = require("fs");
 
 // src/commands/bridge/conductor-watcher.ts
 var import_node_fs = require("fs");
@@ -3402,16 +3402,169 @@ var GraphSharer = class {
   }
 };
 
+// src/commands/bridge/remote-config.ts
+var import_node_child_process = require("child_process");
+var import_node_fs4 = require("fs");
+var import_node_os = require("os");
+var import_core6 = require("@devpilot.sh/core");
+var RemoteConfig = class {
+  constructor(opts) {
+    this.opts = opts;
+    this.timer = null;
+    this.running = false;
+  }
+  start() {
+    if (this.timer) return;
+    void this.sweep();
+    this.timer = setInterval(() => void this.sweep(), this.opts.intervalMs ?? 3e4);
+    this.timer.unref?.();
+  }
+  stop() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+  async sweep() {
+    if (this.running) return;
+    this.running = true;
+    try {
+      for (const command of await this.opts.client.machineCommands()) {
+        try {
+          await this.handle(command);
+        } catch (error) {
+          await this.answer(command, "failed", error instanceof Error ? error.message : String(error));
+        }
+      }
+    } finally {
+      this.running = false;
+    }
+  }
+  async answer(command, status, result) {
+    this.opts.onLog?.(`remote request ${command.kind} ${command.repo}: ${status} \u2014 ${result}`);
+    await this.opts.client.answerMachineCommand(command.id, status, result);
+  }
+  async handle(command) {
+    if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(command.repo)) return;
+    if (command.kind === "graph.unshare") return this.unshare(command);
+    if (command.kind !== "graph.share") return;
+    const checkouts = await (this.opts.findCheckouts ?? findCheckouts)(command.repo);
+    if (checkouts.length === 0) return;
+    if (!this.opts.allow) {
+      return this.answer(
+        command,
+        "declined",
+        `${(0, import_node_os.hostname)()} has ${command.repo} but does not take configuration from elsewhere. Restart its bridge with --allow-remote-config, or run \`devpilot graph share --yes\` in the checkout.`
+      );
+    }
+    const indexer = await (this.opts.findIndexer ?? findIndexer)();
+    if (!indexer) {
+      return this.answer(command, "failed", `The code graph indexer (codegraph) is not installed on ${(0, import_node_os.hostname)()}.`);
+    }
+    let chosen = null;
+    let offBranch = null;
+    for (const dir of checkouts) {
+      const identity = identify(dir, indexer.version ?? "unknown");
+      if ("error" in identity) continue;
+      if (identity.skip) {
+        offBranch = identity.skip;
+        continue;
+      }
+      chosen = { dir, identity };
+      break;
+    }
+    if (!chosen) {
+      return this.answer(
+        command,
+        "failed",
+        offBranch ? `No checkout of ${command.repo} on ${(0, import_node_os.hostname)()} is on the default branch (${offBranch}). Run \`devpilot graph share --any-branch --yes\` there to share it as it is.` : `Could not read the branch and commit of ${command.repo} on ${(0, import_node_os.hostname)()}.`
+      );
+    }
+    if (hasIndex(chosen.dir)) await syncIndex(indexer, chosen.dir);
+    else await buildIndex(indexer, chosen.dir);
+    await excludeIndexFromGit(chosen.dir);
+    const outcome = await (this.opts.push ?? pushGraph)(this.opts.client, chosen.dir, chosen.identity);
+    if (outcome.status !== "pushed") return this.answer(command, "failed", whyNot(outcome));
+    const path = this.opts.storePath ?? shareStorePath();
+    const store = loadShares(path);
+    store.repos[keyFor(chosen.dir)] = { repo: chosen.identity.repo, sharedAt: (/* @__PURE__ */ new Date()).toISOString() };
+    saveShares(store, path);
+    const counts = outcome.counts;
+    await this.answer(
+      command,
+      "applied",
+      `Shared ${chosen.identity.repo}@${chosen.identity.branch} at ${chosen.identity.commitSha.slice(0, 7)}` + (counts ? `: ${counts.files} files, ${counts.nodes} symbols, ${counts.edges} references.` : ".") + " Kept current while this bridge runs."
+    );
+  }
+  /**
+   * Stopping is not gated on the flag: it sends nothing, and a machine that
+   * was asked to stop sending should stop.
+   */
+  async unshare(command) {
+    const path = this.opts.storePath ?? shareStorePath();
+    const store = loadShares(path);
+    const mine = Object.entries(store.repos).filter(([, entry]) => entry.repo.toLowerCase() === command.repo.toLowerCase());
+    if (mine.length === 0) return;
+    for (const [dir] of mine) delete store.repos[dir];
+    saveShares(store, path);
+    let deleted = false;
+    for (const [dir, entry] of mine) {
+      const branch = defaultBranch(dir) ?? import_core6.adoption.resolveBranch(dir);
+      if (branch && await this.opts.client.graphDelete(entry.repo, branch)) deleted = true;
+    }
+    await this.answer(
+      command,
+      "applied",
+      deleted ? `${(0, import_node_os.hostname)()} no longer shares ${command.repo}, and the hosted copy was deleted.` : `${(0, import_node_os.hostname)()} no longer shares ${command.repo}. The hosted copy could not be deleted from there; remove it under Graph.`
+    );
+  }
+};
+function whyNot(outcome) {
+  if (outcome.status === "disabled") return "The workspace has the hosted code graph turned off.";
+  if (outcome.status === "no-index") return `The index could not be read: ${outcome.reason}`;
+  if (outcome.status === "failed") return `The graph did not land: ${outcome.message}`.slice(0, 400);
+  return "The graph was not sent.";
+}
+async function findCheckouts(repo, storePath = shareStorePath()) {
+  const wanted = repo.toLowerCase();
+  const roots = /* @__PURE__ */ new Set();
+  const consider = (dir) => {
+    if (!dir || !(0, import_node_fs4.existsSync)(dir)) return;
+    if (import_core6.adoption.resolveRepo(dir)?.repo.toLowerCase() !== wanted) return;
+    const top = toplevel(dir);
+    if (top) roots.add(top);
+  };
+  for (const [dir, entry] of Object.entries(loadShares(storePath).repos)) {
+    if (entry.repo.toLowerCase() === wanted) consider(dir);
+  }
+  try {
+    const scan = await import_core6.adoption.scanSessions({
+      machineName: (0, import_node_os.hostname)(),
+      allRepos: true,
+      sinceMs: 30 * 24 * 60 * 60 * 1e3,
+      includePaths: false
+    });
+    for (const { cwd } of scan.transcriptPaths.values()) consider(cwd);
+  } catch {
+  }
+  return [...roots];
+}
+function toplevel(dir) {
+  try {
+    return (0, import_node_child_process.execFileSync)("git", ["rev-parse", "--show-toplevel"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5e3 }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 // src/commands/bridge/observer.ts
 var import_chalk11 = __toESM(require("chalk"));
-var import_node_fs4 = require("fs");
+var import_node_fs5 = require("fs");
 var import_node_path4 = require("path");
 
 // src/commands/sessions/scan-pipeline.ts
-var import_node_os = require("os");
+var import_node_os2 = require("os");
 var import_node_path3 = require("path");
 var import_chalk10 = __toESM(require("chalk"));
-var import_core6 = require("@devpilot.sh/core");
+var import_core7 = require("@devpilot.sh/core");
 function parseDuration(input, fallbackMs) {
   const match = /^(\d+)\s*([smhdw])?$/i.exec(input.trim());
   if (!match) return fallbackMs;
@@ -3428,7 +3581,7 @@ function parseDuration(input, fallbackMs) {
 }
 async function runScanPipeline(options) {
   const repos = options.onlyRepo ? [options.onlyRepo] : options.repos;
-  const scan = import_core6.adoption.scanSessions({
+  const scan = import_core7.adoption.scanSessions({
     machineName: options.machineName,
     repos,
     // `--repo x` is an explicit narrowing, so it must not be widened by
@@ -3436,8 +3589,8 @@ async function runScanPipeline(options) {
     allRepos: options.onlyRepo ? false : options.allRepos,
     sinceMs: options.sinceMs,
     includePaths: options.includePaths,
-    excludeSessionUuids: import_core6.adoption.loadOwnedSessionIds(
-      (0, import_node_path3.join)((0, import_node_os.homedir)(), ".devpilot", "owned-sessions.json")
+    excludeSessionUuids: import_core7.adoption.loadOwnedSessionIds(
+      (0, import_node_path3.join)((0, import_node_os2.homedir)(), ".devpilot", "owned-sessions.json")
     )
   });
   let modelTitles = 0;
@@ -3446,7 +3599,7 @@ async function runScanPipeline(options) {
       const observation = observationFor(candidate, scan);
       return observation ? { candidate, observation } : null;
     }).filter((j) => j !== null);
-    const summaries = await import_core6.adoption.summarizeSessions(
+    const summaries = await import_core7.adoption.summarizeSessions(
       jobs.map((j) => ({
         observation: j.observation,
         touchedPaths: j.candidate.touchedPaths ?? []
@@ -3466,7 +3619,7 @@ async function runScanPipeline(options) {
     unmappedProjectCount: scan.unmappedProjectCount,
     skipped: scan.skipped,
     projectDirCount: scan.projectDirCount,
-    withheldOwners: import_core6.adoption.withheldOwners(scan.skipped),
+    withheldOwners: import_core7.adoption.withheldOwners(scan.skipped),
     modelTitles,
     transcriptPaths: scan.transcriptPaths
   };
@@ -3474,7 +3627,7 @@ async function runScanPipeline(options) {
 function observationFor(candidate, scan) {
   const path = scan.transcriptPaths?.get(candidate.adoptionKey);
   if (!path) return null;
-  return import_core6.adoption.probeTranscript(path.transcriptPath, path.sessionUuid);
+  return import_core7.adoption.probeTranscript(path.transcriptPath, path.sessionUuid);
 }
 function relativeAge(iso, now = Date.now()) {
   const ms = now - Date.parse(iso);
@@ -3706,7 +3859,7 @@ var SessionObserver = class {
         if (this.config.isWatched?.(candidate.key)) continue;
         let mtimeMs;
         try {
-          mtimeMs = (0, import_node_fs4.statSync)(location.transcriptPath).mtimeMs;
+          mtimeMs = (0, import_node_fs5.statSync)(location.transcriptPath).mtimeMs;
         } catch {
           this.readings.delete(candidate.key);
           continue;
@@ -3747,8 +3900,8 @@ var SessionObserver = class {
     const path = this.config.readingsStatePath;
     if (!path) return;
     try {
-      if (!(0, import_node_fs4.existsSync)(path)) return;
-      const parsed = JSON.parse((0, import_node_fs4.readFileSync)(path, "utf8"));
+      if (!(0, import_node_fs5.existsSync)(path)) return;
+      const parsed = JSON.parse((0, import_node_fs5.readFileSync)(path, "utf8"));
       if (parsed?.version !== 1 || !parsed.readings) return;
       for (const [key, reading] of Object.entries(parsed.readings)) this.readings.set(key, reading);
     } catch {
@@ -3758,8 +3911,8 @@ var SessionObserver = class {
     const path = this.config.readingsStatePath;
     if (!path) return;
     try {
-      (0, import_node_fs4.mkdirSync)((0, import_node_path4.dirname)(path), { recursive: true });
-      (0, import_node_fs4.writeFileSync)(
+      (0, import_node_fs5.mkdirSync)((0, import_node_path4.dirname)(path), { recursive: true });
+      (0, import_node_fs5.writeFileSync)(
         path,
         JSON.stringify({ version: 1, readings: Object.fromEntries(this.readings) }),
         "utf8"
@@ -3770,7 +3923,7 @@ var SessionObserver = class {
 };
 
 // src/commands/bridge/resume-applier.ts
-var import_core7 = require("@devpilot.sh/core");
+var import_core8 = require("@devpilot.sh/core");
 var DEFAULT_LIVE_WITHIN_MS = 5 * 6e4;
 var ResumeApplier = class {
   constructor(opts) {
@@ -3810,7 +3963,7 @@ var ResumeApplier = class {
       );
       return;
     }
-    const observation = import_core7.adoption.probeTranscript(target.transcriptPath, target.sessionUuid);
+    const observation = import_core8.adoption.probeTranscript(target.transcriptPath, target.sessionUuid);
     if (!observation) {
       await this.fail(command, "That session\u2019s transcript is no longer on this machine.");
       return;
@@ -3912,7 +4065,7 @@ var ResumeApplier = class {
 
 // src/commands/bridge/introspect.ts
 var import_chalk12 = __toESM(require("chalk"));
-var import_core8 = require("@devpilot.sh/core");
+var import_core9 = require("@devpilot.sh/core");
 async function runIntrospection(options) {
   let result;
   try {
@@ -3935,7 +4088,7 @@ async function runIntrospection(options) {
     return;
   }
   const live = result.discovered.reduce((n2, r) => n2 + r.liveSessionCount, 0);
-  const owners = import_core8.adoption.groupByOwner(result.discovered);
+  const owners = import_core9.adoption.groupByOwner(result.discovered);
   console.log(
     import_chalk12.default.cyan(
       `   Looked around this machine: ${result.projectDirCount} projects, ${owners.size} owner${owners.size === 1 ? "" : "s"}, ${result.discovered.reduce((n2, r) => n2 + r.sessionCount, 0)} sessions`
@@ -4033,18 +4186,18 @@ function describe2(err) {
 
 // src/commands/bridge/connect.ts
 function stableMachineName() {
-  const path = (0, import_node_path5.join)((0, import_node_os2.homedir)(), ".devpilot", "machine.json");
+  const path = (0, import_node_path5.join)((0, import_node_os3.homedir)(), ".devpilot", "machine.json");
   try {
-    if ((0, import_node_fs5.existsSync)(path)) {
-      const saved = JSON.parse((0, import_node_fs5.readFileSync)(path, "utf8"));
+    if ((0, import_node_fs6.existsSync)(path)) {
+      const saved = JSON.parse((0, import_node_fs6.readFileSync)(path, "utf8"));
       if (saved.name) return saved.name;
     }
   } catch {
   }
   const name = import_os4.default.hostname();
   try {
-    (0, import_node_fs5.mkdirSync)((0, import_node_path5.dirname)(path), { recursive: true });
-    (0, import_node_fs5.writeFileSync)(path, JSON.stringify({ name }, null, 2), "utf8");
+    (0, import_node_fs6.mkdirSync)((0, import_node_path5.dirname)(path), { recursive: true });
+    (0, import_node_fs6.writeFileSync)(path, JSON.stringify({ name }, null, 2), "utf8");
   } catch {
   }
   return name;
@@ -4106,6 +4259,10 @@ var connectCommand = new import_commander9.Command("connect").description("Conne
   "--adopt",
   "Also put agent sessions already running on this machine onto the board",
   process.env.DEVPILOT_BRIDGE_ADOPT === "true"
+).option(
+  "--allow-remote-config",
+  "Let a member's connected assistant ask this machine to share a repository's code graph",
+  process.env.DEVPILOT_ALLOW_REMOTE_CONFIG === "true"
 ).option(
   "--adopt-all-repos",
   "With --adopt, include repos this machine does not route (names them first)",
@@ -4175,7 +4332,7 @@ var connectCommand = new import_commander9.Command("connect").description("Conne
     // Survives a restart. Without this, upgrading the CLI or closing a
     // laptop lid orphaned every in-flight run: the cockpit kept working
     // and Linear was never told how any of it ended.
-    statePath: (0, import_node_path5.join)((0, import_node_os2.homedir)(), ".devpilot", "conductor-watch.json"),
+    statePath: (0, import_node_path5.join)((0, import_node_os3.homedir)(), ".devpilot", "conductor-watch.json"),
     onLog: (line) => console.log(import_chalk13.default.blue(`   ${line}`)),
     onLost: (run) => console.log(
       import_chalk13.default.yellow(
@@ -4199,7 +4356,7 @@ var connectCommand = new import_commander9.Command("connect").description("Conne
   }
   const adoptionWatcher = new AdoptionWatcher({
     client: client2,
-    statePath: (0, import_node_path5.join)((0, import_node_os2.homedir)(), ".devpilot", "adoption-watch.json"),
+    statePath: (0, import_node_path5.join)((0, import_node_os3.homedir)(), ".devpilot", "adoption-watch.json"),
     onLog: (line) => console.log(import_chalk13.default.blue(`   ${line}`))
   });
   const resumedAdoptions = adoptionWatcher.restore();
@@ -4217,7 +4374,7 @@ var connectCommand = new import_commander9.Command("connect").description("Conne
     // A session placed on a board is already followed by the adoption
     // watcher; everything else gets its instruments from the observer.
     isWatched: (key) => adoptionWatcher.isTracking(key),
-    readingsStatePath: (0, import_node_path5.join)((0, import_node_os2.homedir)(), ".devpilot", "observed-readings.json"),
+    readingsStatePath: (0, import_node_path5.join)((0, import_node_os3.homedir)(), ".devpilot", "observed-readings.json"),
     onLog: (line) => console.log(import_chalk13.default.gray(`   ${line}`))
   }) : null;
   if (observer) {
@@ -4234,6 +4391,14 @@ var connectCommand = new import_commander9.Command("connect").description("Conne
     observer.start();
   }
   new GraphSharer({ client: client2, onLog: (line) => console.log(import_chalk13.default.gray(`   ${line}`)) }).start();
+  new RemoteConfig({
+    client: client2,
+    allow: Boolean(options.allowRemoteConfig),
+    onLog: (line) => console.log(import_chalk13.default.gray(`   ${line}`))
+  }).start();
+  if (options.allowRemoteConfig) {
+    console.log(import_chalk13.default.gray("   Remote configuration: on \u2014 a connected assistant may ask this machine to share a code graph"));
+  }
   const resumeApplier = observer && (options.sessionApiUrl || options.cockpitUrl) ? new ResumeApplier({
     client: client2,
     sessionApiUrl: options.sessionApiUrl,
@@ -4386,9 +4551,9 @@ var import_commander12 = require("commander");
 var import_chalk16 = __toESM(require("chalk"));
 
 // src/commands/bridge/service.ts
-var import_node_child_process = require("child_process");
-var import_node_fs6 = require("fs");
-var import_node_os3 = require("os");
+var import_node_child_process2 = require("child_process");
+var import_node_fs7 = require("fs");
+var import_node_os4 = require("os");
 var import_node_path6 = require("path");
 var import_bridge_client5 = require("@devpilot.sh/bridge-client");
 var LAUNCHD_LABEL = "sh.devpilot.bridge";
@@ -4396,7 +4561,7 @@ var SYSTEMD_UNIT = "devpilot-bridge.service";
 var STATE_DIR_ENV = "DEVPILOT_BRIDGE_STATE_DIR";
 var REGISTERED_MARK = "\u2713 Registered";
 var LOG_CAP_BYTES = 5 * 1024 * 1024;
-function bridgePaths(home = (0, import_node_os3.homedir)(), env = process.env) {
+function bridgePaths(home = (0, import_node_os4.homedir)(), env = process.env) {
   const stateDir = env[STATE_DIR_ENV]?.trim() || (0, import_node_path6.join)(home, ".devpilot", "bridge");
   const configHome = env.XDG_CONFIG_HOME?.trim() || (0, import_node_path6.join)(home, ".config");
   return {
@@ -4416,10 +4581,10 @@ function realSystem() {
     platform: process.platform,
     uid,
     spawnDetached(command, args, options) {
-      (0, import_node_fs6.mkdirSync)((0, import_node_path6.dirname)(options.logPath), { recursive: true, mode: 448 });
-      const fd = (0, import_node_fs6.openSync)(options.logPath, "a");
+      (0, import_node_fs7.mkdirSync)((0, import_node_path6.dirname)(options.logPath), { recursive: true, mode: 448 });
+      const fd = (0, import_node_fs7.openSync)(options.logPath, "a");
       try {
-        const child = (0, import_node_child_process.spawn)(command, args, {
+        const child = (0, import_node_child_process2.spawn)(command, args, {
           // Its own session, so closing the terminal (SIGHUP to the
           // foreground process group) does not take it down with it.
           detached: true,
@@ -4432,7 +4597,7 @@ function realSystem() {
         child.unref();
         return child.pid ?? null;
       } finally {
-        (0, import_node_fs6.closeSync)(fd);
+        (0, import_node_fs7.closeSync)(fd);
       }
     },
     isAlive(pid) {
@@ -4444,21 +4609,21 @@ function realSystem() {
       }
     },
     commandLine(pid) {
-      const result = process.platform === "win32" ? (0, import_node_child_process.spawnSync)(
+      const result = process.platform === "win32" ? (0, import_node_child_process2.spawnSync)(
         "powershell.exe",
         ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`],
         { encoding: "utf8", timeout: 1e4 }
       ) : (
         // `-ww`: without it `ps` may cut the line at the terminal's width,
         // and the part cut off is the part being looked for.
-        (0, import_node_child_process.spawnSync)("ps", ["-ww", "-o", "command=", "-p", String(pid)], { encoding: "utf8", timeout: 1e4 })
+        (0, import_node_child_process2.spawnSync)("ps", ["-ww", "-o", "command=", "-p", String(pid)], { encoding: "utf8", timeout: 1e4 })
       );
       if (result.error || result.status !== 0) return null;
       return result.stdout.trim() || null;
     },
     startTime(pid) {
       if (process.platform === "win32") return null;
-      const result = (0, import_node_child_process.spawnSync)("ps", ["-o", "lstart=", "-p", String(pid)], {
+      const result = (0, import_node_child_process2.spawnSync)("ps", ["-o", "lstart=", "-p", String(pid)], {
         encoding: "utf8",
         timeout: 1e4,
         // `lstart` is formatted in the user's locale; pin it so Date can read it.
@@ -4478,7 +4643,7 @@ function realSystem() {
     },
     bridgeProcesses() {
       if (process.platform === "win32") return [];
-      const result = (0, import_node_child_process.spawnSync)("ps", ["-ww", "-U", String(uid), "-o", "pid=,command="], {
+      const result = (0, import_node_child_process2.spawnSync)("ps", ["-ww", "-U", String(uid), "-o", "pid=,command="], {
         encoding: "utf8",
         timeout: 1e4,
         maxBuffer: 16 * 1024 * 1024
@@ -4490,7 +4655,7 @@ function realSystem() {
       });
     },
     run(command, args) {
-      const result = (0, import_node_child_process.spawnSync)(command, args, { encoding: "utf8", timeout: 3e4 });
+      const result = (0, import_node_child_process2.spawnSync)(command, args, { encoding: "utf8", timeout: 3e4 });
       if (result.error) return { status: null, stdout: "", stderr: result.error.message };
       return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
     }
@@ -4543,16 +4708,16 @@ function redact(text) {
 }
 function readJson(path) {
   try {
-    return JSON.parse((0, import_node_fs6.readFileSync)(path, "utf8"));
+    return JSON.parse((0, import_node_fs7.readFileSync)(path, "utf8"));
   } catch {
     return null;
   }
 }
 function writeJson(path, value) {
-  (0, import_node_fs6.mkdirSync)((0, import_node_path6.dirname)(path), { recursive: true, mode: 448 });
+  (0, import_node_fs7.mkdirSync)((0, import_node_path6.dirname)(path), { recursive: true, mode: 448 });
   const tmp = `${path}.tmp`;
-  (0, import_node_fs6.writeFileSync)(tmp, JSON.stringify(value, null, 2) + "\n");
-  (0, import_node_fs6.renameSync)(tmp, path);
+  (0, import_node_fs7.writeFileSync)(tmp, JSON.stringify(value, null, 2) + "\n");
+  (0, import_node_fs7.renameSync)(tmp, path);
 }
 function readState(paths) {
   const state = readJson(paths.statePath);
@@ -4572,9 +4737,9 @@ function liveState(paths, sys) {
 }
 function rotateLog(logPath, capBytes = LOG_CAP_BYTES) {
   try {
-    if ((0, import_node_fs6.statSync)(logPath).size <= capBytes) return false;
-    (0, import_node_fs6.copyFileSync)(logPath, `${logPath}.1`);
-    (0, import_node_fs6.truncateSync)(logPath, 0);
+    if ((0, import_node_fs7.statSync)(logPath).size <= capBytes) return false;
+    (0, import_node_fs7.copyFileSync)(logPath, `${logPath}.1`);
+    (0, import_node_fs7.truncateSync)(logPath, 0);
     return true;
   } catch {
     return false;
@@ -4582,13 +4747,13 @@ function rotateLog(logPath, capBytes = LOG_CAP_BYTES) {
 }
 function openLog(logPath, heading) {
   rotateLog(logPath);
-  (0, import_node_fs6.appendFileSync)(logPath, `[${(/* @__PURE__ */ new Date()).toISOString()}] ${heading}
+  (0, import_node_fs7.appendFileSync)(logPath, `[${(/* @__PURE__ */ new Date()).toISOString()}] ${heading}
 `, { mode: 384 });
   return logSize(logPath);
 }
 function logSize(logPath) {
   try {
-    return (0, import_node_fs6.statSync)(logPath).size;
+    return (0, import_node_fs7.statSync)(logPath).size;
   } catch {
     return 0;
   }
@@ -4597,17 +4762,17 @@ var stripAnsi = (text) => text.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
 function readLogFrom(logPath, offset) {
   let fd;
   try {
-    const size = (0, import_node_fs6.statSync)(logPath).size;
+    const size = (0, import_node_fs7.statSync)(logPath).size;
     const from = size < offset ? 0 : offset;
     if (size === from) return { text: "", offset: size };
-    fd = (0, import_node_fs6.openSync)(logPath, "r");
+    fd = (0, import_node_fs7.openSync)(logPath, "r");
     const buffer = Buffer.alloc(size - from);
-    const read = (0, import_node_fs6.readSync)(fd, buffer, 0, buffer.length, from);
+    const read = (0, import_node_fs7.readSync)(fd, buffer, 0, buffer.length, from);
     return { text: stripAnsi(buffer.subarray(0, read).toString("utf8")), offset: from + read };
   } catch {
     return { text: "", offset };
   } finally {
-    if (fd !== void 0) (0, import_node_fs6.closeSync)(fd);
+    if (fd !== void 0) (0, import_node_fs7.closeSync)(fd);
   }
 }
 function tailLog(logPath, count2, options = {}) {
@@ -4680,8 +4845,8 @@ function findOnPath(name, envPath) {
     if (!dir || !(0, import_node_path6.isAbsolute)(dir)) continue;
     const candidate = (0, import_node_path6.join)(dir, name);
     try {
-      (0, import_node_fs6.accessSync)(candidate, import_node_fs6.constants.X_OK);
-      if ((0, import_node_fs6.statSync)(candidate).isFile()) return candidate;
+      (0, import_node_fs7.accessSync)(candidate, import_node_fs7.constants.X_OK);
+      if ((0, import_node_fs7.statSync)(candidate).isFile()) return candidate;
     } catch {
     }
   }
@@ -4766,7 +4931,7 @@ function inspectService(paths, sys) {
     return { supported: false, kind: null, path: null, installed: false, loaded: false, pid: null, args: null, url: null };
   }
   const path = kind === "launchd" ? paths.plistPath : paths.unitPath;
-  if (!(0, import_node_fs6.existsSync)(path)) {
+  if (!(0, import_node_fs7.existsSync)(path)) {
     return { supported: true, kind, path, installed: false, loaded: false, pid: null, args: null, url: null };
   }
   const record = readJson(paths.serviceRecordPath);
@@ -4829,8 +4994,8 @@ async function startBridge(input, sys) {
   const credentials = prepareCredentials(split, input.env, paths.credentialsPath);
   if (!credentials.ok) return credentials.outcome;
   const others = unmanagedBridges(sys, []);
-  (0, import_node_fs6.mkdirSync)(paths.stateDir, { recursive: true, mode: 448 });
-  (0, import_node_fs6.rmSync)(paths.statePath, { force: true });
+  (0, import_node_fs7.mkdirSync)(paths.stateDir, { recursive: true, mode: 448 });
+  (0, import_node_fs7.rmSync)(paths.statePath, { force: true });
   const offset = openLog(paths.logPath, `devpilot bridge start (cli ${input.cliVersion})`);
   const pid = sys.spawnDetached(input.node, [input.script, "bridge", "connect", ...split.forwarded], {
     logPath: paths.logPath,
@@ -4857,7 +5022,7 @@ async function startBridge(input, sys) {
   const registration = await awaitRegistered(paths.logPath, offset, () => sys.isAlive(pid), wait);
   if (!registration.ok) {
     if (sys.isAlive(pid)) await terminate(pid, sys, 5e3, wait.pollMs);
-    (0, import_node_fs6.rmSync)(paths.statePath, { force: true });
+    (0, import_node_fs7.rmSync)(paths.statePath, { force: true });
     credentials.rollback();
     return { status: "failed", reason: registration.reason, lines: registration.lines, logPath: paths.logPath };
   }
@@ -4876,10 +5041,10 @@ async function stopBridge(paths, sys, options = {}) {
   if (state && isBridgeProcess(state.pid, sys)) {
     const { forced, gone } = await terminate(state.pid, sys, options.termWaitMs ?? 1e4, options.pollMs ?? 100);
     if (!gone) return { status: "still-running", pid: state.pid };
-    (0, import_node_fs6.rmSync)(paths.statePath, { force: true });
+    (0, import_node_fs7.rmSync)(paths.statePath, { force: true });
     return { status: "stopped", pid: state.pid, forced };
   }
-  (0, import_node_fs6.rmSync)(paths.statePath, { force: true });
+  (0, import_node_fs7.rmSync)(paths.statePath, { force: true });
   if (state && sys.isAlive(state.pid)) return { status: "not-ours", pid: state.pid };
   const service2 = inspectService(paths, sys);
   if (service2.installed && service2.loaded) return { status: "service-managed", kind: service2.kind };
@@ -4903,7 +5068,7 @@ function bridgeStatus(paths, sys, options = {}) {
     stale: recorded && !live ? { pid: recorded.pid, startedAt: recorded.startedAt } : null,
     unmanaged: unmanagedBridges(sys, [live?.pid ?? null, service2.pid]),
     service: service2,
-    log: { path: paths.logPath, exists: (0, import_node_fs6.existsSync)(paths.logPath), tail: tailLog(paths.logPath, options.tail ?? 5, { skipBlank: true }) }
+    log: { path: paths.logPath, exists: (0, import_node_fs7.existsSync)(paths.logPath), tail: tailLog(paths.logPath, options.tail ?? 5, { skipBlank: true }) }
   };
 }
 var SESSION_KEY_MESSAGE = [
@@ -4933,8 +5098,8 @@ function unloadService(kind, path, sys) {
   return sys.run("systemctl", ["--user", "disable", "--now", SYSTEMD_UNIT]);
 }
 function removeServiceFile(kind, path, paths, sys) {
-  (0, import_node_fs6.rmSync)(path, { force: true });
-  (0, import_node_fs6.rmSync)(paths.serviceRecordPath, { force: true });
+  (0, import_node_fs7.rmSync)(path, { force: true });
+  (0, import_node_fs7.rmSync)(paths.serviceRecordPath, { force: true });
   if (kind === "systemd") sys.run("systemctl", ["--user", "daemon-reload"]);
 }
 async function installService(input, sys) {
@@ -4962,10 +5127,10 @@ async function installService(input, sys) {
     path: servicePathEnv({ node: input.node, claude: input.claudePath, envPath: input.env.PATH })
   };
   const others = unmanagedBridges(sys, []);
-  (0, import_node_fs6.mkdirSync)(paths.stateDir, { recursive: true, mode: 448 });
+  (0, import_node_fs7.mkdirSync)(paths.stateDir, { recursive: true, mode: 448 });
   const offset = openLog(paths.logPath, `devpilot bridge install (${kind}, cli ${input.cliVersion})`);
-  (0, import_node_fs6.mkdirSync)((0, import_node_path6.dirname)(path), { recursive: true });
-  (0, import_node_fs6.writeFileSync)(path, kind === "launchd" ? launchdPlist(spec) : systemdUnit(spec), { mode: 420 });
+  (0, import_node_fs7.mkdirSync)((0, import_node_path6.dirname)(path), { recursive: true });
+  (0, import_node_fs7.writeFileSync)(path, kind === "launchd" ? launchdPlist(spec) : systemdUnit(spec), { mode: 420 });
   const loaded = loadService(kind, path, sys);
   if (loaded.status !== 0) {
     removeServiceFile(kind, path, paths, sys);
@@ -5009,8 +5174,8 @@ function uninstallService(paths, sys) {
   const kind = serviceKind(sys.platform);
   if (!kind) return { status: "unsupported", platform: sys.platform };
   const path = kind === "launchd" ? paths.plistPath : paths.unitPath;
-  if (!(0, import_node_fs6.existsSync)(path)) {
-    (0, import_node_fs6.rmSync)(paths.serviceRecordPath, { force: true });
+  if (!(0, import_node_fs7.existsSync)(path)) {
+    (0, import_node_fs7.rmSync)(paths.serviceRecordPath, { force: true });
     return { status: "not-installed", kind, path };
   }
   const unloaded = unloadService(kind, path, sys);
@@ -5029,7 +5194,7 @@ function uninstallService(paths, sys) {
 // src/commands/bridge/background.ts
 var import_commander11 = require("commander");
 var import_chalk15 = __toESM(require("chalk"));
-var import_node_fs7 = require("fs");
+var import_node_fs8 = require("fs");
 var import_node_path7 = require("path");
 function displayPath(path, home) {
   return path === home ? "~" : path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
@@ -5178,7 +5343,7 @@ var stopCommand = new import_commander11.Command("stop").description("Stop the b
 var logsCommand = new import_commander11.Command("logs").description("Print the background bridge\u2019s log").option("-f, --follow", "Keep printing as the bridge writes").option("-n, --lines <n>", "How many lines to print", "50").action(async (options) => {
   const paths = bridgePaths();
   rotateLog(paths.logPath);
-  if (!(0, import_node_fs7.existsSync)(paths.logPath)) {
+  if (!(0, import_node_fs8.existsSync)(paths.logPath)) {
     console.log(import_chalk15.default.gray(`No log yet at ${displayPath(paths.logPath, paths.home)}.`));
     console.log(import_chalk15.default.gray("It is written by `devpilot bridge start` and by the login service."));
     if (!options.follow) return;
@@ -5186,7 +5351,7 @@ var logsCommand = new import_commander11.Command("logs").description("Print the 
   const count2 = Math.max(0, parseInt(options.lines, 10) || 0);
   for (const line of tailLog(paths.logPath, count2)) console.log(line);
   if (!options.follow) return;
-  let offset = (0, import_node_fs7.existsSync)(paths.logPath) ? (0, import_node_fs7.statSync)(paths.logPath).size : 0;
+  let offset = (0, import_node_fs8.existsSync)(paths.logPath) ? (0, import_node_fs8.statSync)(paths.logPath).size : 0;
   setInterval(() => {
     const next = readLogFrom(paths.logPath, offset);
     offset = next.offset;
@@ -5554,26 +5719,26 @@ var sessionCommand = new import_commander18.Command("session").description("Shar
 
 // src/commands/sessions/index.ts
 var import_os8 = __toESM(require("os"));
-var import_node_os4 = require("os");
+var import_node_os5 = require("os");
 var import_node_path8 = require("path");
-var import_node_fs8 = require("fs");
+var import_node_fs9 = require("fs");
 var import_commander19 = require("commander");
 var import_chalk21 = __toESM(require("chalk"));
 var import_inquirer = __toESM(require("inquirer"));
 var import_bridge_client9 = require("@devpilot.sh/bridge-client");
 function stableMachineName2() {
-  const path = (0, import_node_path8.join)((0, import_node_os4.homedir)(), ".devpilot", "machine.json");
+  const path = (0, import_node_path8.join)((0, import_node_os5.homedir)(), ".devpilot", "machine.json");
   try {
-    if ((0, import_node_fs8.existsSync)(path)) {
-      const saved = JSON.parse((0, import_node_fs8.readFileSync)(path, "utf8"));
+    if ((0, import_node_fs9.existsSync)(path)) {
+      const saved = JSON.parse((0, import_node_fs9.readFileSync)(path, "utf8"));
       if (saved.name) return saved.name;
     }
   } catch {
   }
   const name = import_os8.default.hostname();
   try {
-    (0, import_node_fs8.mkdirSync)((0, import_node_path8.dirname)(path), { recursive: true });
-    (0, import_node_fs8.writeFileSync)(path, JSON.stringify({ name }, null, 2), "utf8");
+    (0, import_node_fs9.mkdirSync)((0, import_node_path8.dirname)(path), { recursive: true });
+    (0, import_node_fs9.writeFileSync)(path, JSON.stringify({ name }, null, 2), "utf8");
   } catch {
   }
   return name;
@@ -6080,8 +6245,8 @@ function describeActivity(telemetry) {
 }
 
 // src/commands/session-runner/harness.ts
-var import_node_fs9 = require("fs");
-var import_node_os5 = require("os");
+var import_node_fs10 = require("fs");
+var import_node_os6 = require("os");
 var import_node_path9 = require("path");
 function workHistorySource(callbackUrl, repo) {
   if (!callbackUrl || !repo) return null;
@@ -6109,7 +6274,7 @@ var TECHNIQUES = [
     args: (ctx) => {
       if (ctx.hasMcpConfig) return [];
       const file = (0, import_node_path9.join)(ctx.scratchDir(), "mcp-none.json");
-      (0, import_node_fs9.writeFileSync)(file, JSON.stringify({ mcpServers: {} }), { mode: 384 });
+      (0, import_node_fs10.writeFileSync)(file, JSON.stringify({ mcpServers: {} }), { mode: 384 });
       return ["--mcp-config", file, "--strict-mcp-config"];
     }
   },
@@ -6162,7 +6327,7 @@ var TECHNIQUES = [
     args: (ctx) => {
       if (!ctx.codeGraph) return [];
       const file = (0, import_node_path9.join)(ctx.scratchDir(), "mcp-code-graph.json");
-      (0, import_node_fs9.writeFileSync)(file, JSON.stringify({ mcpServers: { codegraph: ctx.codeGraph } }), { mode: 384 });
+      (0, import_node_fs10.writeFileSync)(file, JSON.stringify({ mcpServers: { codegraph: ctx.codeGraph } }), { mode: 384 });
       return ["--mcp-config", file];
     },
     applies: (ctx) => Boolean(ctx.codeGraph),
@@ -6181,7 +6346,7 @@ var TECHNIQUES = [
     args: (ctx) => {
       if (!ctx.workHistory) return [];
       const file = (0, import_node_path9.join)(ctx.scratchDir(), "mcp-work-history.json");
-      (0, import_node_fs9.writeFileSync)(
+      (0, import_node_fs10.writeFileSync)(
         file,
         JSON.stringify({
           mcpServers: {
@@ -6259,7 +6424,7 @@ function resolveHarness(spec) {
         hasMcpConfig,
         codeGraph: codeGraph3,
         workHistory,
-        scratchDir: () => dir ?? (dir = (0, import_node_fs9.mkdtempSync)((0, import_node_path9.join)((0, import_node_os5.tmpdir)(), "devpilot-harness-")))
+        scratchDir: () => dir ?? (dir = (0, import_node_fs10.mkdtempSync)((0, import_node_path9.join)((0, import_node_os6.tmpdir)(), "devpilot-harness-")))
       };
       const applied = techniques.filter((t) => t.applies?.(ctx) ?? true);
       const args = applied.flatMap((t) => t.args(ctx));
@@ -6910,7 +7075,7 @@ function workspacePreamble(workspace, config = {}) {
 }
 
 // src/commands/session-runner/server.ts
-var import_core9 = require("@devpilot.sh/core");
+var import_core10 = require("@devpilot.sh/core");
 var VERSION2 = "1.1.0";
 var CAPABILITIES = ["isolation", "code-graph"];
 function commitSubject(taskCode, title) {
@@ -7316,14 +7481,14 @@ ${message}` : message;
     if (kind === "dependents") {
       const depth = typeof body.depth === "number" ? body.depth : void 0;
       const limit = typeof body.limit === "number" ? body.limit : void 0;
-      const result = import_core9.codeGraph.dependentsOf(workdir, files, { depth, limit });
-      const status = import_core9.codeGraph.readGraphStatus(workdir);
+      const result = import_core10.codeGraph.dependentsOf(workdir, files, { depth, limit });
+      const status = import_core10.codeGraph.readGraphStatus(workdir);
       return json(res, 200, {
         ...result,
         indexedAt: status.indexedAt ? new Date(status.indexedAt).toISOString() : null
       });
     }
-    return json(res, 200, import_core9.codeGraph.affectedTests(workdir, files));
+    return json(res, 200, import_core10.codeGraph.affectedTests(workdir, files));
   }
   handleGet(res, externalSessionId) {
     const session = this.sessions.get(externalSessionId);
