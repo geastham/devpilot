@@ -197,12 +197,27 @@ function parseTaskTable(tableContent: string): ParsedTask[] {
 function parseTableRow(line: string): string[] {
   const cells: string[] = [];
   let current = '';
+  // Inside a code span a pipe is part of the code. GFM wants it escaped even
+  // there, and the planner does not always: `lastError?: string | null` in a
+  // description shifted every later cell left, and the Files column became a
+  // fragment of the description (first live run, October 2026). A backtick
+  // span is only treated as one when it closes on the same line.
+  let inCode = false;
 
   for (let i = 0; i < line.length; i++) {
     const char = line[i];
     if (char === '\\' && line[i + 1] === '|') {
       current += '|'; // escaped pipe → literal, and unescape it for the value
       i++;
+      continue;
+    }
+    if (char === '`' && (inCode || line.indexOf('`', i + 1) !== -1)) {
+      inCode = !inCode;
+      current += char;
+      continue;
+    }
+    if (char === '|' && inCode) {
+      current += char;
       continue;
     }
     if (char === '|') {
