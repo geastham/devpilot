@@ -546,6 +546,12 @@ interface SharedSessionCreateOptions extends ParticipantOptions {
     mode?: 'observe' | 'relay' | 'auto';
     autoBudget?: number;
     autoTtlMinutes?: number;
+    /** Why someone is being asked in. Sent only when given: an older hosted plane refuses fields it does not know. */
+    intent?: 'look' | 'pair' | 'fix';
+    /** `owner/name` of the repository this is about. */
+    repo?: string;
+    /** How long the session lasts before it ends and its messages are deleted. Hosted default: a day. */
+    lifetime?: '1h' | '24h' | '7d';
 }
 interface SharedSessionJoinOptions {
     /** `https://devpilot.sh/s/<id>#k=<key>` — the fragment carries the key. */

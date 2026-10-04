@@ -364,7 +364,7 @@ var import_commander24 = require("commander");
 var import_update_notifier = __toESM(require("update-notifier"));
 
 // src/version.ts
-var VERSION = "0.11.0";
+var VERSION = "0.12.0";
 
 // src/commands/init.ts
 var import_commander = require("commander");
@@ -5782,12 +5782,16 @@ var import_os5 = __toESM(require("os"));
 var import_commander16 = require("commander");
 var import_chalk19 = __toESM(require("chalk"));
 var import_bridge_protocol = require("@devpilot.sh/bridge-protocol");
+var import_core11 = require("@devpilot.sh/core");
 var import_bridge_client6 = require("@devpilot.sh/bridge-client");
 var MODES = ["observe", "relay", "auto"];
 var newCommand = new import_commander16.Command("new").description("Create a shared session and print the message to send your teammate").argument("<title>", "What this session is about (stored in plaintext \u2014 no secrets)").option("-u, --url <url>", "Bridge URL (defaults to the one this machine is connected to)").option("-t, --token <token>", "Machine token (defaults to the one this machine is connected with)").option("--issue <identifier>", "Linear issue identifier to attach, e.g. ENG-394").option(
+  "--intent <intent>",
+  "Why someone is being asked in: look (come and see) | pair (work it through) | fix (the agents sort it out, bounded)",
+  "look"
+).option("--lifetime <lifetime>", "How long it lasts before it ends and its messages are deleted: 1h | 24h | 7d (default 24h)").option(
   "--mode <mode>",
-  "observe (agents post only when asked) | relay | auto (agents may reply, bounded)",
-  "observe"
+  "Override the mode the intent sets: observe (agents post only when asked) | relay | auto (agents may reply, bounded)"
 ).option("--budget <n>", `Agent messages allowed in auto mode (default ${import_bridge_protocol.SESSION_LIMITS.autoDefaultBudget})`).option("--minutes <n>", `Minutes auto mode lasts (default ${import_bridge_protocol.SESSION_LIMITS.autoDefaultTtlMinutes})`).option("-n, --name <name>", "Your display name in the transcript", import_os5.default.hostname()).option("-m, --message <text>", "Post this as the first message (encrypted)").option("--link-only", "Print just the join link, for scripts").action(async (title, options) => {
   const credentials = (0, import_bridge_client6.resolveBridgeCredentials)({ url: options.url, token: options.token });
   if (!credentials.token) {
@@ -5798,11 +5802,22 @@ var newCommand = new import_commander16.Command("new").description("Create a sha
     console.error(import_chalk19.default.gray("  is remembered, or pass --token / set DEVPILOT_BRIDGE_TOKEN."));
     process.exit(1);
   }
-  if (!MODES.includes(options.mode)) {
+  if (!import_bridge_protocol.SESSION_INTENTS.includes(options.intent)) {
+    console.error(import_chalk19.default.red(`\u2717 Unknown intent "${options.intent}" \u2014 use look, pair or fix`));
+    process.exit(1);
+  }
+  const intent = options.intent;
+  if (options.lifetime && !import_bridge_protocol.SESSION_LIFETIMES.includes(options.lifetime)) {
+    console.error(import_chalk19.default.red(`\u2717 Unknown lifetime "${options.lifetime}" \u2014 use 1h, 24h or 7d`));
+    process.exit(1);
+  }
+  const lifetime = options.lifetime;
+  if (options.mode && !MODES.includes(options.mode)) {
     console.error(import_chalk19.default.red(`\u2717 Unknown mode "${options.mode}" \u2014 use observe, relay or auto`));
     process.exit(1);
   }
-  const mode = options.mode;
+  const mode = options.mode ?? import_bridge_protocol.INTENT_MODE[intent];
+  const repo = import_core11.adoption.resolveRepo(process.cwd())?.repo ?? null;
   const autoBudget = options.budget ? parseInt(options.budget, 10) : import_bridge_protocol.SESSION_LIMITS.autoDefaultBudget;
   const autoTtlMinutes = options.minutes ? parseInt(options.minutes, 10) : import_bridge_protocol.SESSION_LIMITS.autoDefaultTtlMinutes;
   if (mode === "auto" && !(autoBudget > 0 && autoTtlMinutes > 0)) {
@@ -5820,7 +5835,10 @@ var newCommand = new import_commander16.Command("new").description("Create a sha
       linearIdentifier: options.issue,
       mode,
       autoBudget,
-      autoTtlMinutes
+      autoTtlMinutes,
+      intent,
+      ...repo ? { repo } : {},
+      ...lifetime ? { lifetime } : {}
     });
   } catch (err) {
     console.error(import_chalk19.default.red("\u2717 Could not create the session"));
@@ -5838,7 +5856,16 @@ var newCommand = new import_commander16.Command("new").description("Create a sha
   console.log("");
   console.log(import_chalk19.default.gray("  Send this to your teammate:"));
   console.log("");
-  for (const line of (0, import_bridge_protocol.buildSessionHandoff)({ title, link, mode, autoBudget, autoTtlMinutes }).split("\n")) {
+  for (const line of (0, import_bridge_protocol.buildSessionHandoff)({
+    title,
+    link,
+    mode,
+    autoBudget,
+    autoTtlMinutes,
+    intent,
+    repo,
+    expiresAt: created.client.session.expiresAt
+  }).split("\n")) {
     console.log(`  ${line}`);
   }
   console.log("");
@@ -7299,7 +7326,7 @@ function workspacePreamble(workspace, config = {}) {
 }
 
 // src/commands/session-runner/server.ts
-var import_core11 = require("@devpilot.sh/core");
+var import_core12 = require("@devpilot.sh/core");
 var VERSION2 = "1.1.0";
 var CAPABILITIES = ["isolation", "code-graph"];
 function commitSubject(taskCode, title) {
@@ -7705,14 +7732,14 @@ ${message}` : message;
     if (kind === "dependents") {
       const depth = typeof body.depth === "number" ? body.depth : void 0;
       const limit = typeof body.limit === "number" ? body.limit : void 0;
-      const result = import_core11.codeGraph.dependentsOf(workdir, files, { depth, limit });
-      const status = import_core11.codeGraph.readGraphStatus(workdir);
+      const result = import_core12.codeGraph.dependentsOf(workdir, files, { depth, limit });
+      const status = import_core12.codeGraph.readGraphStatus(workdir);
       return json(res, 200, {
         ...result,
         indexedAt: status.indexedAt ? new Date(status.indexedAt).toISOString() : null
       });
     }
-    return json(res, 200, import_core11.codeGraph.affectedTests(workdir, files));
+    return json(res, 200, import_core12.codeGraph.affectedTests(workdir, files));
   }
   handleGet(res, externalSessionId) {
     const session = this.sessions.get(externalSessionId);

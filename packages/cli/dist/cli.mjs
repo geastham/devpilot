@@ -338,7 +338,7 @@ import { Command as Command24 } from "commander";
 import updateNotifier from "update-notifier";
 
 // src/version.ts
-var VERSION = "0.11.0";
+var VERSION = "0.12.0";
 
 // src/commands/init.ts
 import { Command } from "commander";
@@ -5790,7 +5790,14 @@ import { Command as Command19 } from "commander";
 import os2 from "os";
 import { Command as Command16 } from "commander";
 import chalk19 from "chalk";
-import { buildSessionHandoff, SESSION_LIMITS } from "@devpilot.sh/bridge-protocol";
+import {
+  buildSessionHandoff,
+  INTENT_MODE,
+  SESSION_INTENTS,
+  SESSION_LIFETIMES,
+  SESSION_LIMITS
+} from "@devpilot.sh/bridge-protocol";
+import { adoption as adoption7 } from "@devpilot.sh/core";
 import {
   DEFAULT_BRIDGE_URL as DEFAULT_BRIDGE_URL4,
   SharedSessionClient,
@@ -5798,9 +5805,12 @@ import {
 } from "@devpilot.sh/bridge-client";
 var MODES = ["observe", "relay", "auto"];
 var newCommand = new Command16("new").description("Create a shared session and print the message to send your teammate").argument("<title>", "What this session is about (stored in plaintext \u2014 no secrets)").option("-u, --url <url>", "Bridge URL (defaults to the one this machine is connected to)").option("-t, --token <token>", "Machine token (defaults to the one this machine is connected with)").option("--issue <identifier>", "Linear issue identifier to attach, e.g. ENG-394").option(
+  "--intent <intent>",
+  "Why someone is being asked in: look (come and see) | pair (work it through) | fix (the agents sort it out, bounded)",
+  "look"
+).option("--lifetime <lifetime>", "How long it lasts before it ends and its messages are deleted: 1h | 24h | 7d (default 24h)").option(
   "--mode <mode>",
-  "observe (agents post only when asked) | relay | auto (agents may reply, bounded)",
-  "observe"
+  "Override the mode the intent sets: observe (agents post only when asked) | relay | auto (agents may reply, bounded)"
 ).option("--budget <n>", `Agent messages allowed in auto mode (default ${SESSION_LIMITS.autoDefaultBudget})`).option("--minutes <n>", `Minutes auto mode lasts (default ${SESSION_LIMITS.autoDefaultTtlMinutes})`).option("-n, --name <name>", "Your display name in the transcript", os2.hostname()).option("-m, --message <text>", "Post this as the first message (encrypted)").option("--link-only", "Print just the join link, for scripts").action(async (title, options) => {
   const credentials = resolveBridgeCredentials4({ url: options.url, token: options.token });
   if (!credentials.token) {
@@ -5811,11 +5821,22 @@ var newCommand = new Command16("new").description("Create a shared session and p
     console.error(chalk19.gray("  is remembered, or pass --token / set DEVPILOT_BRIDGE_TOKEN."));
     process.exit(1);
   }
-  if (!MODES.includes(options.mode)) {
+  if (!SESSION_INTENTS.includes(options.intent)) {
+    console.error(chalk19.red(`\u2717 Unknown intent "${options.intent}" \u2014 use look, pair or fix`));
+    process.exit(1);
+  }
+  const intent = options.intent;
+  if (options.lifetime && !SESSION_LIFETIMES.includes(options.lifetime)) {
+    console.error(chalk19.red(`\u2717 Unknown lifetime "${options.lifetime}" \u2014 use 1h, 24h or 7d`));
+    process.exit(1);
+  }
+  const lifetime = options.lifetime;
+  if (options.mode && !MODES.includes(options.mode)) {
     console.error(chalk19.red(`\u2717 Unknown mode "${options.mode}" \u2014 use observe, relay or auto`));
     process.exit(1);
   }
-  const mode = options.mode;
+  const mode = options.mode ?? INTENT_MODE[intent];
+  const repo = adoption7.resolveRepo(process.cwd())?.repo ?? null;
   const autoBudget = options.budget ? parseInt(options.budget, 10) : SESSION_LIMITS.autoDefaultBudget;
   const autoTtlMinutes = options.minutes ? parseInt(options.minutes, 10) : SESSION_LIMITS.autoDefaultTtlMinutes;
   if (mode === "auto" && !(autoBudget > 0 && autoTtlMinutes > 0)) {
@@ -5833,7 +5854,10 @@ var newCommand = new Command16("new").description("Create a shared session and p
       linearIdentifier: options.issue,
       mode,
       autoBudget,
-      autoTtlMinutes
+      autoTtlMinutes,
+      intent,
+      ...repo ? { repo } : {},
+      ...lifetime ? { lifetime } : {}
     });
   } catch (err) {
     console.error(chalk19.red("\u2717 Could not create the session"));
@@ -5851,7 +5875,16 @@ var newCommand = new Command16("new").description("Create a shared session and p
   console.log("");
   console.log(chalk19.gray("  Send this to your teammate:"));
   console.log("");
-  for (const line of buildSessionHandoff({ title, link, mode, autoBudget, autoTtlMinutes }).split("\n")) {
+  for (const line of buildSessionHandoff({
+    title,
+    link,
+    mode,
+    autoBudget,
+    autoTtlMinutes,
+    intent,
+    repo,
+    expiresAt: created.client.session.expiresAt
+  }).split("\n")) {
     console.log(`  ${line}`);
   }
   console.log("");

@@ -685,15 +685,19 @@ var _SharedSessionClient = class _SharedSessionClient {
     };
     const key = import_bridge_protocol2.sessionCrypto.generateKey();
     const { joinKeyHash } = await import_bridge_protocol2.sessionCrypto.deriveJoinCredentials(key);
-    const created = await fetchImpl(`${baseUrl}/api/sessions/shared`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        title: options.title,
-        joinKeyHash,
-        ...options.linearIdentifier ? { linearIdentifier: options.linearIdentifier } : {}
-      })
-    });
+    const base = {
+      title: options.title,
+      joinKeyHash,
+      ...options.linearIdentifier ? { linearIdentifier: options.linearIdentifier } : {}
+    };
+    const described = {
+      ...options.intent ? { intent: options.intent } : {},
+      ...options.repo ? { repo: options.repo } : {},
+      ...options.lifetime ? { lifetime: options.lifetime } : {}
+    };
+    const post = (body) => fetchImpl(`${baseUrl}/api/sessions/shared`, { method: "POST", headers, body: JSON.stringify(body) });
+    let created = await post({ ...base, ...described });
+    if (created.status === 400 && Object.keys(described).length > 0) created = await post(base);
     if (!created.ok) {
       const body = await created.json().catch(() => null);
       throw new BridgeError(

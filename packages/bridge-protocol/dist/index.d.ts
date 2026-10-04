@@ -566,6 +566,23 @@ type SessionParticipant = z.infer<typeof SessionParticipantSchema>;
  * Note what is absent: `joinKeyHash` and `orgId` are server-side concerns and
  * are never returned to a participant, who may be from another org entirely.
  */
+/**
+ * Why someone is being asked into a session. A label for people and agents;
+ * the MODE is still what governs what an agent may do.
+ *
+ *   look — "I'm seeing something, come and see." Agents post only when asked.
+ *   pair — people and their agents work one problem; agents ask before replying.
+ *   fix  — the agents may work it out between them, bounded.
+ */
+declare const SESSION_INTENTS: readonly ["look", "pair", "fix"];
+declare const SessionIntentSchema: z.ZodEnum<["look", "pair", "fix"]>;
+type SessionIntent = z.infer<typeof SessionIntentSchema>;
+/** The mode an intent starts a session in. */
+declare const INTENT_MODE: Record<SessionIntent, SessionMode>;
+/** How long a session lasts before it ends and its messages are deleted. */
+declare const SESSION_LIFETIMES: readonly ["1h", "24h", "7d"];
+declare const SessionLifetimeSchema: z.ZodEnum<["1h", "24h", "7d"]>;
+type SessionLifetime = z.infer<typeof SessionLifetimeSchema>;
 declare const SharedSessionSchema: z.ZodObject<{
     id: z.ZodString;
     /** Plaintext BY CHOICE — it is the portal list label. Never put secrets here. */
@@ -576,6 +593,12 @@ declare const SharedSessionSchema: z.ZodObject<{
     autoBudgetRemaining: z.ZodOptional<z.ZodNumber>;
     autoExpiresAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     closedAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    /** Absent from a hosted plane older than these fields. */
+    intent: z.ZodOptional<z.ZodEnum<["look", "pair", "fix"]>>;
+    /** `owner/name` of the repository the session is about. */
+    repo: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    /** When the session ends and its messages are deleted. */
+    expiresAt: z.ZodOptional<z.ZodString>;
     /**
      * Highest assigned `seq`, so a joiner knows how far behind it is without
      * fetching the transcript first.
@@ -595,9 +618,12 @@ declare const SharedSessionSchema: z.ZodObject<{
     createdAt: string;
     mode: "observe" | "relay" | "auto";
     linearIdentifier?: string | null | undefined;
+    repo?: string | null | undefined;
+    expiresAt?: string | undefined;
     autoBudgetRemaining?: number | undefined;
     autoExpiresAt?: string | null | undefined;
     closedAt?: string | null | undefined;
+    intent?: "look" | "pair" | "fix" | undefined;
     lastSeq?: number | undefined;
 }, {
     title: string;
@@ -606,9 +632,12 @@ declare const SharedSessionSchema: z.ZodObject<{
     createdAt: string;
     mode: "observe" | "relay" | "auto";
     linearIdentifier?: string | null | undefined;
+    repo?: string | null | undefined;
+    expiresAt?: string | undefined;
     autoBudgetRemaining?: number | undefined;
     autoExpiresAt?: string | null | undefined;
     closedAt?: string | null | undefined;
+    intent?: "look" | "pair" | "fix" | undefined;
     lastSeq?: number | undefined;
 }>;
 type SharedSession = z.infer<typeof SharedSessionSchema>;
@@ -626,16 +655,26 @@ declare const CreateSharedSessionRequestSchema: z.ZodObject<{
     joinKeyHash: z.ZodString;
     linearIssueId: z.ZodOptional<z.ZodString>;
     linearIdentifier: z.ZodOptional<z.ZodString>;
+    intent: z.ZodOptional<z.ZodEnum<["look", "pair", "fix"]>>;
+    /** `owner/name`. Never a path. */
+    repo: z.ZodOptional<z.ZodString>;
+    lifetime: z.ZodOptional<z.ZodEnum<["1h", "24h", "7d"]>>;
 }, "strict", z.ZodTypeAny, {
     title: string;
     joinKeyHash: string;
     linearIssueId?: string | undefined;
     linearIdentifier?: string | undefined;
+    repo?: string | undefined;
+    intent?: "look" | "pair" | "fix" | undefined;
+    lifetime?: "1h" | "24h" | "7d" | undefined;
 }, {
     title: string;
     joinKeyHash: string;
     linearIssueId?: string | undefined;
     linearIdentifier?: string | undefined;
+    repo?: string | undefined;
+    intent?: "look" | "pair" | "fix" | undefined;
+    lifetime?: "1h" | "24h" | "7d" | undefined;
 }>;
 type CreateSharedSessionRequest = z.infer<typeof CreateSharedSessionRequestSchema>;
 declare const CreateSharedSessionResponseSchema: z.ZodObject<{
@@ -649,6 +688,12 @@ declare const CreateSharedSessionResponseSchema: z.ZodObject<{
         autoBudgetRemaining: z.ZodOptional<z.ZodNumber>;
         autoExpiresAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         closedAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        /** Absent from a hosted plane older than these fields. */
+        intent: z.ZodOptional<z.ZodEnum<["look", "pair", "fix"]>>;
+        /** `owner/name` of the repository the session is about. */
+        repo: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        /** When the session ends and its messages are deleted. */
+        expiresAt: z.ZodOptional<z.ZodString>;
         /**
          * Highest assigned `seq`, so a joiner knows how far behind it is without
          * fetching the transcript first.
@@ -668,9 +713,12 @@ declare const CreateSharedSessionResponseSchema: z.ZodObject<{
         createdAt: string;
         mode: "observe" | "relay" | "auto";
         linearIdentifier?: string | null | undefined;
+        repo?: string | null | undefined;
+        expiresAt?: string | undefined;
         autoBudgetRemaining?: number | undefined;
         autoExpiresAt?: string | null | undefined;
         closedAt?: string | null | undefined;
+        intent?: "look" | "pair" | "fix" | undefined;
         lastSeq?: number | undefined;
     }, {
         title: string;
@@ -679,9 +727,12 @@ declare const CreateSharedSessionResponseSchema: z.ZodObject<{
         createdAt: string;
         mode: "observe" | "relay" | "auto";
         linearIdentifier?: string | null | undefined;
+        repo?: string | null | undefined;
+        expiresAt?: string | undefined;
         autoBudgetRemaining?: number | undefined;
         autoExpiresAt?: string | null | undefined;
         closedAt?: string | null | undefined;
+        intent?: "look" | "pair" | "fix" | undefined;
         lastSeq?: number | undefined;
     }>;
 }, "strip", z.ZodTypeAny, {
@@ -692,9 +743,12 @@ declare const CreateSharedSessionResponseSchema: z.ZodObject<{
         createdAt: string;
         mode: "observe" | "relay" | "auto";
         linearIdentifier?: string | null | undefined;
+        repo?: string | null | undefined;
+        expiresAt?: string | undefined;
         autoBudgetRemaining?: number | undefined;
         autoExpiresAt?: string | null | undefined;
         closedAt?: string | null | undefined;
+        intent?: "look" | "pair" | "fix" | undefined;
         lastSeq?: number | undefined;
     };
 }, {
@@ -705,9 +759,12 @@ declare const CreateSharedSessionResponseSchema: z.ZodObject<{
         createdAt: string;
         mode: "observe" | "relay" | "auto";
         linearIdentifier?: string | null | undefined;
+        repo?: string | null | undefined;
+        expiresAt?: string | undefined;
         autoBudgetRemaining?: number | undefined;
         autoExpiresAt?: string | null | undefined;
         closedAt?: string | null | undefined;
+        intent?: "look" | "pair" | "fix" | undefined;
         lastSeq?: number | undefined;
     };
 }>;
@@ -784,6 +841,12 @@ declare const JoinSessionResponseSchema: z.ZodObject<{
         autoBudgetRemaining: z.ZodOptional<z.ZodNumber>;
         autoExpiresAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         closedAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        /** Absent from a hosted plane older than these fields. */
+        intent: z.ZodOptional<z.ZodEnum<["look", "pair", "fix"]>>;
+        /** `owner/name` of the repository the session is about. */
+        repo: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        /** When the session ends and its messages are deleted. */
+        expiresAt: z.ZodOptional<z.ZodString>;
         /**
          * Highest assigned `seq`, so a joiner knows how far behind it is without
          * fetching the transcript first.
@@ -803,9 +866,12 @@ declare const JoinSessionResponseSchema: z.ZodObject<{
         createdAt: string;
         mode: "observe" | "relay" | "auto";
         linearIdentifier?: string | null | undefined;
+        repo?: string | null | undefined;
+        expiresAt?: string | undefined;
         autoBudgetRemaining?: number | undefined;
         autoExpiresAt?: string | null | undefined;
         closedAt?: string | null | undefined;
+        intent?: "look" | "pair" | "fix" | undefined;
         lastSeq?: number | undefined;
     }, {
         title: string;
@@ -814,9 +880,12 @@ declare const JoinSessionResponseSchema: z.ZodObject<{
         createdAt: string;
         mode: "observe" | "relay" | "auto";
         linearIdentifier?: string | null | undefined;
+        repo?: string | null | undefined;
+        expiresAt?: string | undefined;
         autoBudgetRemaining?: number | undefined;
         autoExpiresAt?: string | null | undefined;
         closedAt?: string | null | undefined;
+        intent?: "look" | "pair" | "fix" | undefined;
         lastSeq?: number | undefined;
     }>;
 }, "strip", z.ZodTypeAny, {
@@ -828,9 +897,12 @@ declare const JoinSessionResponseSchema: z.ZodObject<{
         createdAt: string;
         mode: "observe" | "relay" | "auto";
         linearIdentifier?: string | null | undefined;
+        repo?: string | null | undefined;
+        expiresAt?: string | undefined;
         autoBudgetRemaining?: number | undefined;
         autoExpiresAt?: string | null | undefined;
         closedAt?: string | null | undefined;
+        intent?: "look" | "pair" | "fix" | undefined;
         lastSeq?: number | undefined;
     };
     participantToken: string;
@@ -853,9 +925,12 @@ declare const JoinSessionResponseSchema: z.ZodObject<{
         createdAt: string;
         mode: "observe" | "relay" | "auto";
         linearIdentifier?: string | null | undefined;
+        repo?: string | null | undefined;
+        expiresAt?: string | undefined;
         autoBudgetRemaining?: number | undefined;
         autoExpiresAt?: string | null | undefined;
         closedAt?: string | null | undefined;
+        intent?: "look" | "pair" | "fix" | undefined;
         lastSeq?: number | undefined;
     };
     participantToken: string;
@@ -1077,7 +1152,23 @@ interface SessionHandoffInput {
     mode: SessionMode;
     autoBudget?: number;
     autoTtlMinutes?: number;
+    intent?: SessionIntent;
+    repo?: string | null;
+    /** ISO time the session ends. */
+    expiresAt?: string;
 }
+/** What each intent asks of whoever is being brought in, in one line. */
+declare const INTENT_ASK: Record<SessionIntent, string>;
+/**
+ * What a joining agent is told about why it is there and what to do first.
+ * ONE builder, used by the handoff message and by the join tool's answer.
+ */
+declare function sessionBriefing(input: {
+    intent?: SessionIntent;
+    mode: SessionMode;
+    repo?: string | null;
+    expiresAt?: string;
+}): string;
 /**
  * The message one person sends another to bring their agent into a session.
  *
@@ -1854,4 +1945,4 @@ declare function buildAdoptionIssueDescription(input: {
 }): string;
 declare function linearIdentifierFromBranch(branch: string): string | null;
 
-export { ADOPTION_AGENTS, ADOPTION_LIMITS, ADOPTION_MATCH_KINDS, ADOPTION_OUTCOME_STATUSES, AGENT_KINDS, type AdoptionAgent, AdoptionAgentSchema, type AdoptionCandidate, AdoptionCandidateSchema, type AdoptionCommentInput, type AdoptionMatchKind, AdoptionMatchKindSchema, type AdoptionOutcome, AdoptionOutcomeSchema, type AdoptionOutcomeStatus, AdoptionOutcomeStatusSchema, type AdoptionRequest, AdoptionRequestSchema, type AdoptionResponse, AdoptionResponseSchema, type AgentKind, AgentKindSchema, type ApiErrorBody, ApiErrorSchema, type CompletionCommentInput, type CreateSharedSessionRequest, CreateSharedSessionRequestSchema, type CreateSharedSessionResponse, CreateSharedSessionResponseSchema, type DiscoveredRepo, DiscoveredRepoSchema, type DiscoveryRequest, DiscoveryRequestSchema, type DiscoveryResponse, DiscoveryResponseSchema, DispatchPollResponseSchema, ERROR_CODES, type HeartbeatRequest, HeartbeatRequestSchema, JOIN_PROOF_HEADER, type JoinCredentials, type JoinSessionRequest, JoinSessionRequestSchema, type JoinSessionResponse, JoinSessionResponseSchema, type ObservationRequest, ObservationRequestSchema, type ObservationResponse, ObservationResponseSchema, PARTICIPANT_KINDS, type ParticipantKind, ParticipantKindSchema, type PostSessionMessageRequest, PostSessionMessageRequestSchema, type PostSessionMessageResponse, PostSessionMessageResponseSchema, type ProgressCommentInput, RealtimeCredentialsSchema, type RegisterRequest, RegisterRequestSchema, type RegisterResponse, RegisterResponseSchema, RepoSlugSchema, type RotateSessionKeyRequest, RotateSessionKeyRequestSchema, type RotateSessionKeyResponse, RotateSessionKeyResponseSchema, SESSION_EVENT_TYPES, SESSION_LIMITS, SESSION_MESSAGE_KINDS, SESSION_MODES, SESSION_STATUSES, type SessionCipher, type SessionComplete, SessionCompleteResponseSchema, SessionCompleteSchema, SessionCryptoError, SessionDecryptionError, type SessionEventType, SessionEventTypeSchema, type SessionHandoffInput, SessionKeyError, type SessionMessage, type SessionMessageKind, SessionMessageKindSchema, type SessionMessagePage, SessionMessagePageSchema, SessionMessageSchema, type SessionMode, SessionModeSchema, type SessionParticipant, SessionParticipantSchema, type SessionStatus, SessionStatusSchema, type SessionStatusUpdate, SessionStatusUpdateSchema, type SetSessionModeRequest, SetSessionModeRequestSchema, type SharedSession, SharedSessionSchema, TERMINAL_STATUSES, type TaskDispatchMessage, TaskDispatchMessageSchema, type TerminalStatus, buildAdoptionComment, buildAdoptionIssueDescription, buildBridgeCompletionComment, buildCompletionComment, buildJoinLink, buildProgressComment, buildSessionHandoff, escapeLinearMarkdown, findJoinLink, formatApiError, isTerminal, linearIdentifierFromBranch, parseJoinLink, parseSessionMessage, parseSessionMessagePage, parseTaskDispatchMessage, safeParseSessionMessage, safeParseTaskDispatchMessage, sessionCrypto };
+export { ADOPTION_AGENTS, ADOPTION_LIMITS, ADOPTION_MATCH_KINDS, ADOPTION_OUTCOME_STATUSES, AGENT_KINDS, type AdoptionAgent, AdoptionAgentSchema, type AdoptionCandidate, AdoptionCandidateSchema, type AdoptionCommentInput, type AdoptionMatchKind, AdoptionMatchKindSchema, type AdoptionOutcome, AdoptionOutcomeSchema, type AdoptionOutcomeStatus, AdoptionOutcomeStatusSchema, type AdoptionRequest, AdoptionRequestSchema, type AdoptionResponse, AdoptionResponseSchema, type AgentKind, AgentKindSchema, type ApiErrorBody, ApiErrorSchema, type CompletionCommentInput, type CreateSharedSessionRequest, CreateSharedSessionRequestSchema, type CreateSharedSessionResponse, CreateSharedSessionResponseSchema, type DiscoveredRepo, DiscoveredRepoSchema, type DiscoveryRequest, DiscoveryRequestSchema, type DiscoveryResponse, DiscoveryResponseSchema, DispatchPollResponseSchema, ERROR_CODES, type HeartbeatRequest, HeartbeatRequestSchema, INTENT_ASK, INTENT_MODE, JOIN_PROOF_HEADER, type JoinCredentials, type JoinSessionRequest, JoinSessionRequestSchema, type JoinSessionResponse, JoinSessionResponseSchema, type ObservationRequest, ObservationRequestSchema, type ObservationResponse, ObservationResponseSchema, PARTICIPANT_KINDS, type ParticipantKind, ParticipantKindSchema, type PostSessionMessageRequest, PostSessionMessageRequestSchema, type PostSessionMessageResponse, PostSessionMessageResponseSchema, type ProgressCommentInput, RealtimeCredentialsSchema, type RegisterRequest, RegisterRequestSchema, type RegisterResponse, RegisterResponseSchema, RepoSlugSchema, type RotateSessionKeyRequest, RotateSessionKeyRequestSchema, type RotateSessionKeyResponse, RotateSessionKeyResponseSchema, SESSION_EVENT_TYPES, SESSION_INTENTS, SESSION_LIFETIMES, SESSION_LIMITS, SESSION_MESSAGE_KINDS, SESSION_MODES, SESSION_STATUSES, type SessionCipher, type SessionComplete, SessionCompleteResponseSchema, SessionCompleteSchema, SessionCryptoError, SessionDecryptionError, type SessionEventType, SessionEventTypeSchema, type SessionHandoffInput, type SessionIntent, SessionIntentSchema, SessionKeyError, type SessionLifetime, SessionLifetimeSchema, type SessionMessage, type SessionMessageKind, SessionMessageKindSchema, type SessionMessagePage, SessionMessagePageSchema, SessionMessageSchema, type SessionMode, SessionModeSchema, type SessionParticipant, SessionParticipantSchema, type SessionStatus, SessionStatusSchema, type SessionStatusUpdate, SessionStatusUpdateSchema, type SetSessionModeRequest, SetSessionModeRequestSchema, type SharedSession, SharedSessionSchema, TERMINAL_STATUSES, type TaskDispatchMessage, TaskDispatchMessageSchema, type TerminalStatus, buildAdoptionComment, buildAdoptionIssueDescription, buildBridgeCompletionComment, buildCompletionComment, buildJoinLink, buildProgressComment, buildSessionHandoff, escapeLinearMarkdown, findJoinLink, formatApiError, isTerminal, linearIdentifierFromBranch, parseJoinLink, parseSessionMessage, parseSessionMessagePage, parseTaskDispatchMessage, safeParseSessionMessage, safeParseTaskDispatchMessage, sessionBriefing, sessionCrypto };

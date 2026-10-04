@@ -1,7 +1,16 @@
 import os from 'os';
 import { Command } from 'commander';
 import chalk from 'chalk';
-import { buildSessionHandoff, SESSION_LIMITS } from '@devpilot.sh/bridge-protocol';
+import {
+  buildSessionHandoff,
+  INTENT_MODE,
+  SESSION_INTENTS,
+  SESSION_LIFETIMES,
+  SESSION_LIMITS,
+  type SessionIntent,
+  type SessionLifetime,
+} from '@devpilot.sh/bridge-protocol';
+import { adoption } from '@devpilot.sh/core';
 import {
   DEFAULT_BRIDGE_URL,
   SharedSessionClient,
@@ -12,7 +21,9 @@ interface NewOptions {
   url?: string;
   token?: string;
   issue?: string;
-  mode: string;
+  mode?: string;
+  intent: string;
+  lifetime?: string;
   budget?: string;
   minutes?: string;
   name: string;
@@ -52,9 +63,14 @@ export const newCommand = new Command('new')
   .option('-t, --token <token>', 'Machine token (defaults to the one this machine is connected with)')
   .option('--issue <identifier>', 'Linear issue identifier to attach, e.g. ENG-394')
   .option(
+    '--intent <intent>',
+    'Why someone is being asked in: look (come and see) | pair (work it through) | fix (the agents sort it out, bounded)',
+    'look',
+  )
+  .option('--lifetime <lifetime>', 'How long it lasts before it ends and its messages are deleted: 1h | 24h | 7d (default 24h)')
+  .option(
     '--mode <mode>',
-    'observe (agents post only when asked) | relay | auto (agents may reply, bounded)',
-    'observe',
+    'Override the mode the intent sets: observe (agents post only when asked) | relay | auto (agents may reply, bounded)',
   )
   .option('--budget <n>', `Agent messages allowed in auto mode (default ${SESSION_LIMITS.autoDefaultBudget})`)
   .option('--minutes <n>', `Minutes auto mode lasts (default ${SESSION_LIMITS.autoDefaultTtlMinutes})`)
@@ -72,11 +88,24 @@ export const newCommand = new Command('new')
       process.exit(1);
     }
 
-    if (!(MODES as readonly string[]).includes(options.mode)) {
+    if (!(SESSION_INTENTS as readonly string[]).includes(options.intent)) {
+      console.error(chalk.red(`✗ Unknown intent "${options.intent}" — use look, pair or fix`));
+      process.exit(1);
+    }
+    const intent = options.intent as SessionIntent;
+    if (options.lifetime && !(SESSION_LIFETIMES as readonly string[]).includes(options.lifetime)) {
+      console.error(chalk.red(`✗ Unknown lifetime "${options.lifetime}" — use 1h, 24h or 7d`));
+      process.exit(1);
+    }
+    const lifetime = options.lifetime as SessionLifetime | undefined;
+    if (options.mode && !(MODES as readonly string[]).includes(options.mode)) {
       console.error(chalk.red(`✗ Unknown mode "${options.mode}" — use observe, relay or auto`));
       process.exit(1);
     }
-    const mode = options.mode as Mode;
+    // The intent chooses the mode unless one was named.
+    const mode = (options.mode as Mode | undefined) ?? INTENT_MODE[intent];
+    // A name, from the origin remote of wherever this was run. Never a path.
+    const repo = adoption.resolveRepo(process.cwd())?.repo ?? null;
     const autoBudget = options.budget ? parseInt(options.budget, 10) : SESSION_LIMITS.autoDefaultBudget;
     const autoTtlMinutes = options.minutes
       ? parseInt(options.minutes, 10)
@@ -99,6 +128,9 @@ export const newCommand = new Command('new')
         mode,
         autoBudget,
         autoTtlMinutes,
+        intent,
+        ...(repo ? { repo } : {}),
+        ...(lifetime ? { lifetime } : {}),
       });
     } catch (err) {
       console.error(chalk.red('✗ Could not create the session'));
@@ -119,7 +151,16 @@ export const newCommand = new Command('new')
     console.log('');
     console.log(chalk.gray('  Send this to your teammate:'));
     console.log('');
-    for (const line of buildSessionHandoff({ title, link, mode, autoBudget, autoTtlMinutes }).split('\n')) {
+    for (const line of buildSessionHandoff({
+      title,
+      link,
+      mode,
+      autoBudget,
+      autoTtlMinutes,
+      intent,
+      repo,
+      expiresAt: created.client.session.expiresAt,
+    }).split('\n')) {
       console.log(`  ${line}`);
     }
     console.log('');

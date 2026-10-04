@@ -61,6 +61,12 @@ export interface SharedSessionCreateOptions extends ParticipantOptions {
   mode?: 'observe' | 'relay' | 'auto';
   autoBudget?: number;
   autoTtlMinutes?: number;
+  /** Why someone is being asked in. Sent only when given: an older hosted plane refuses fields it does not know. */
+  intent?: 'look' | 'pair' | 'fix';
+  /** `owner/name` of the repository this is about. */
+  repo?: string;
+  /** How long the session lasts before it ends and its messages are deleted. Hosted default: a day. */
+  lifetime?: '1h' | '24h' | '7d';
 }
 
 /**
@@ -189,15 +195,23 @@ export class SharedSessionClient {
     const key = sessionCrypto.generateKey();
     const { joinKeyHash } = await sessionCrypto.deriveJoinCredentials(key);
 
-    const created = await fetchImpl(`${baseUrl}/api/sessions/shared`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        title: options.title,
-        joinKeyHash,
-        ...(options.linearIdentifier ? { linearIdentifier: options.linearIdentifier } : {}),
-      }),
-    });
+    const base = {
+      title: options.title,
+      joinKeyHash,
+      ...(options.linearIdentifier ? { linearIdentifier: options.linearIdentifier } : {}),
+    };
+    const described = {
+      ...(options.intent ? { intent: options.intent } : {}),
+      ...(options.repo ? { repo: options.repo } : {}),
+      ...(options.lifetime ? { lifetime: options.lifetime } : {}),
+    };
+    const post = (body: object) =>
+      fetchImpl(`${baseUrl}/api/sessions/shared`, { method: 'POST', headers, body: JSON.stringify(body) });
+
+    let created = await post({ ...base, ...described });
+    // A hosted plane older than these fields refuses a body it does not know.
+    // The session matters more than its label: ask again without them.
+    if (created.status === 400 && Object.keys(described).length > 0) created = await post(base);
     if (!created.ok) {
       const body = await created.json().catch(() => null);
       throw new BridgeError(
