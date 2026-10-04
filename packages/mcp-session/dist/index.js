@@ -38,6 +38,7 @@ __export(index_exports, {
   main: () => main,
   renderHistory: () => renderHistory,
   renderTranscript: () => renderTranscript,
+  repoFromOrigin: () => repoFromOrigin,
   toolGroups: () => toolGroups
 });
 module.exports = __toCommonJS(index_exports);
@@ -46,6 +47,7 @@ var import_mcp = require("@modelcontextprotocol/sdk/server/mcp.js");
 var import_stdio = require("@modelcontextprotocol/sdk/server/stdio.js");
 var import_zod = require("zod");
 var import_bridge_client = require("@devpilot.sh/bridge-client");
+var import_node_child_process2 = require("child_process");
 var import_bridge_protocol = require("@devpilot.sh/bridge-protocol");
 
 // src/delivery.ts
@@ -113,15 +115,26 @@ function writeHandoffFile(dir, sessionId, text2) {
 
 // src/index.ts
 var SERVER_NAME = "devpilot-session";
-var SERVER_VERSION = "0.5.0";
+var SERVER_VERSION = "0.6.0";
 var WAIT_DEFAULT_S = 30;
 var WAIT_MAX_S = 50;
+function repoFromOrigin(cwd = process.cwd()) {
+  try {
+    const remote = (0, import_node_child_process2.execFileSync)("git", ["remote", "get-url", "origin"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5e3 }).trim();
+    const match = /[:/]([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(remote);
+    if (!match || /^\.+$/.test(match[1]) || /^\.+$/.test(match[2])) return null;
+    return `${match[1]}/${match[2]}`;
+  } catch {
+    return null;
+  }
+}
 function defaultDeps() {
   return {
     env: process.env,
     clipboard: systemClipboard,
     handoffDir: handoffDir(),
-    hostname: import_node_os2.default.hostname()
+    hostname: import_node_os2.default.hostname(),
+    repo: () => repoFromOrigin()
   };
 }
 function text(body) {
@@ -190,10 +203,28 @@ function createTools(overrides = {}) {
         return text(`Could not join: ${err instanceof Error ? err.message : String(err)}`);
       }
       const s = state.client.session;
+      let opening = "";
+      try {
+        const [{ entries, latestSeq }, who] = await Promise.all([state.client.read(0), names(state.client)]);
+        if (entries.length > 0) {
+          const shown = entries.slice(0, 5);
+          state.cursor = shown[shown.length - 1].seq;
+          const rest = latestSeq - state.cursor;
+          opening = `
+
+What has been said so far:
+
+${renderTranscript(shown, who)}` + (rest > 0 ? `
+
+(${rest} more \u2014 devpilot_session_read with since=${state.cursor}.)` : "");
+        }
+      } catch {
+        opening = "\n\nThe transcript could not be read just now; use devpilot_session_read.";
+      }
       return text(
         `Joined "${s.title}" (${state.client.sessionId}).
-Mode is ${s.mode}. ${modeGuidance(s.mode)}
-Messages so far: ${s.lastSeq ?? 0}. Use devpilot_session_read to catch up.`
+${(0, import_bridge_protocol.sessionBriefing)({ intent: s.intent, mode: s.mode, repo: s.repo, expiresAt: s.expiresAt })}
+Mode is ${s.mode}. ${modeGuidance(s.mode)}` + (opening || "\n\nNothing has been posted yet.")
       );
     },
     async share(input) {
@@ -203,7 +234,9 @@ Messages so far: ${s.lastSeq ?? 0}. Use devpilot_session_read to catch up.`
           "This machine has no DevPilot machine token, so it cannot start a session. Run `devpilot bridge connect --token <token>` once (mint a token in the dashboard under Settings \u2192 Tokens) and it will be remembered, or set DEVPILOT_BRIDGE_TOKEN for this MCP server. Joining a session someone else started needs no token."
         );
       }
-      const mode = input.mode ?? "observe";
+      const intent = input.intent ?? "look";
+      const mode = input.mode ?? import_bridge_protocol.INTENT_MODE[intent];
+      const repo = deps.repo();
       const autoBudget = input.autoBudget ?? import_bridge_protocol.SESSION_LIMITS.autoDefaultBudget;
       const autoTtlMinutes = input.autoTtlMinutes ?? import_bridge_protocol.SESSION_LIMITS.autoDefaultTtlMinutes;
       let link;
@@ -218,6 +251,9 @@ Messages so far: ${s.lastSeq ?? 0}. Use devpilot_session_read to catch up.`
           mode,
           autoBudget,
           autoTtlMinutes,
+          intent,
+          ...repo ? { repo } : {},
+          ...input.lifetime ? { lifetime: input.lifetime } : {},
           fetchImpl: deps.fetchImpl
         });
         state.client = created.client;
@@ -234,7 +270,16 @@ Messages so far: ${s.lastSeq ?? 0}. Use devpilot_session_read to catch up.`
       } catch (err) {
         posted = `The session exists, but posting your context failed (${err instanceof Error ? err.message : String(err)}). Post it with devpilot_session_post.`;
       }
-      const handoff = (0, import_bridge_protocol.buildSessionHandoff)({ title: input.title, link, mode, autoBudget, autoTtlMinutes });
+      const handoff = (0, import_bridge_protocol.buildSessionHandoff)({
+        title: input.title,
+        link,
+        mode,
+        autoBudget,
+        autoTtlMinutes,
+        intent,
+        repo,
+        expiresAt: state.client.session.expiresAt
+      });
       const file = writeHandoffFile(deps.handoffDir, state.client.sessionId, handoff);
       const deliver = input.deliver ?? "clipboard";
       const copied = deliver === "clipboard" && deps.clipboard.write(handoff);
@@ -247,7 +292,8 @@ ${handoff}`
       const modeNote = mode === "auto" ? `Mode is auto for up to ${autoBudget} agent messages or ${autoTtlMinutes} minutes, after which it drops back to observe. ` : `Mode is ${mode}. `;
       return text(
         `Started "${input.title}" (${state.client.sessionId}). ${posted}
-${modeNote}${modeGuidance(mode)}
+` + (state.client.session.expiresAt ? `It ends at ${state.client.session.expiresAt}; its messages are deleted then.
+` : "") + `${modeNote}${modeGuidance(mode)}
 
 ${where}
 
@@ -434,8 +480,12 @@ function registerSessionTools(server, tools) {
         context: import_zod.z.string().min(1).describe(
           "What the other agent needs to pick this up: the goal, what you have tried and ruled out, the files or commands that matter, and what you want from them. Encrypted before it leaves this machine. Be specific \u2014 this replaces a conversation."
         ),
+        intent: import_zod.z.enum(["look", "pair", "fix"]).optional().describe(
+          `Why the other person is being asked in. 'look' (default): "I'm seeing something, come and see" \u2014 agents post only when asked. 'pair': work it through together \u2014 agents follow along and ask before replying. 'fix': the agents work it out between themselves, bounded by a message budget and a time limit \u2014 choose it only when the person says the agents should sort it out themselves. It sets the mode.`
+        ),
+        lifetime: import_zod.z.enum(["1h", "24h", "7d"]).optional().describe("How long the session lasts before it ends and its messages are deleted. Default a day."),
         mode: import_zod.z.enum(["observe", "relay", "auto"]).optional().describe(
-          "'observe' (default): agents read and post only when their human asks. 'relay': agents may wait for new messages but ask before replying. 'auto': agents may reply to each other, bounded by a message budget and a time limit. Choose auto only if the person explicitly asks for the agents to talk it through themselves."
+          "Overrides the mode the intent would set. Usually omit. 'observe': agents read and post only when their human asks. 'relay': agents may wait for new messages but ask before replying. 'auto': agents may reply to each other, bounded by a message budget and a time limit. Choose auto only if the person explicitly asks for the agents to talk it through themselves."
         ),
         autoBudget: import_zod.z.number().int().positive().max(200).optional().describe(`Agent messages allowed in auto mode. Default ${import_bridge_protocol.SESSION_LIMITS.autoDefaultBudget}.`),
         autoTtlMinutes: import_zod.z.number().int().positive().max(240).optional().describe(`Minutes auto mode lasts. Default ${import_bridge_protocol.SESSION_LIMITS.autoDefaultTtlMinutes}.`),
@@ -537,6 +587,7 @@ async function main() {
   main,
   renderHistory,
   renderTranscript,
+  repoFromOrigin,
   toolGroups
 });
 //# sourceMappingURL=index.js.map

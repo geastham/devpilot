@@ -32,7 +32,11 @@ function makeBridge() {
     keyVersion: 1,
     lastSeq: seq,
     createdAt: new Date().toISOString(),
+    ...asked,
+    expiresAt: '2026-10-06T12:00:00.000Z',
   });
+  /** What the starter said the session was for, as a newer hosted plane echoes it. */
+  let asked: Record<string, unknown> = {};
 
   const fetchImpl = (async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = String(input);
@@ -46,6 +50,8 @@ function makeBridge() {
 
     if (url.endsWith('/api/sessions/shared') && method === 'POST') {
       if (headers.Authorization !== 'Bearer dp_orch_test') return json(401, { error: { message: 'no' } });
+      const { intent, repo } = JSON.parse(body);
+      asked = { ...(intent ? { intent } : {}), ...(repo ? { repo } : {}) };
       return json(201, { session: session() });
     }
     if (url.endsWith('/mode') && method === 'POST') {
@@ -130,6 +136,7 @@ function agent(
     credentialsPath: join(workspace, 'no-such-credentials.json'),
     fetchImpl: bridge.fetchImpl,
     waitIntervalMs: 250,
+    repo: () => 'acme/storefront',
   });
 }
 
@@ -153,7 +160,7 @@ describe('starting a session from inside an agent', () => {
 
     // The person has something they can send as it is.
     expect(clipboard.text).toContain('Join my DevPilot shared session: "Checkout 500s"');
-    expect(clipboard.text).toContain('claude mcp add devpilot-session');
+    expect(clipboard.text).toContain('claude mcp add --scope user devpilot-local');
     expect(findJoinLink(clipboard.text ?? '')).toMatch(/^https:\/\/devpilot\.test\/s\/sess_1#k=/);
   });
 
@@ -398,3 +405,81 @@ describe('the handoff file', () => {
     expect(statSync(again).mode & 0o777).toBe(0o600);
   });
 });
+
+describe('why a session exists', () => {
+  const created = (bridge: ReturnType<typeof makeBridge>) =>
+    JSON.parse(bridge.requests.find((r) => r.url.endsWith('/api/sessions/shared') && r.method === 'POST')!.body);
+
+  it('is a "come and look" in observe mode unless the person asked for more, and names the repository, never a path', async () => {
+    const bridge = makeBridge();
+    const alice = agent(bridge, makeClipboard(), 'alice-mbp.local');
+    await alice.share({ title: 'Checkout 500s', context: 'x' });
+    expect(created(bridge)).toMatchObject({ intent: 'look', repo: 'acme/storefront' });
+    expect(created(bridge).lifetime).toBeUndefined();
+    expect(bridge.requests.some((r) => r.url.endsWith('/mode'))).toBe(false);
+    expect(JSON.stringify(created(bridge))).not.toContain(workspace);
+  });
+
+  it('"fix" lets the agents work it out, bounded, and lasts as long as asked', async () => {
+    const bridge = makeBridge();
+    const clipboard = makeClipboard();
+    const alice = agent(bridge, clipboard, 'alice-mbp.local');
+    const result = said(await alice.share({ title: 'Checkout 500s', context: 'x', intent: 'fix', lifetime: '1h' }));
+    expect(created(bridge)).toMatchObject({ intent: 'fix', lifetime: '1h' });
+    expect(JSON.parse(bridge.requests.find((r) => r.url.endsWith('/mode'))!.body)).toMatchObject({ mode: 'auto' });
+    expect(result).toContain('Mode is auto');
+    expect(result).toContain('It ends at');
+    // The message the person sends says why, and when it ends.
+    expect(clipboard.text).toContain('I want our agents to work this out between them');
+    expect(clipboard.text).toContain('acme/storefront');
+    expect(clipboard.text).toContain('deleted then');
+  });
+
+  it('tells a joining agent why it is there and what was said, in the one call', async () => {
+    const bridge = makeBridge();
+    const clipboard = makeClipboard();
+    const alice = agent(bridge, clipboard, 'alice-mbp.local');
+    await alice.share({ title: 'Checkout 500s', context: 'The retry wrapper swallows the 500. I ruled out the gateway.', intent: 'pair' });
+
+    const bob = agent(bridge, clipboard, 'bob-linux', {});
+    const joined = said(await bob.join({}));
+    expect(joined).toContain('Why you were brought in: I want to work this through together');
+    expect(joined).toContain('It is about the repository acme/storefront.');
+    expect(joined).toContain('ask them before you reply');
+    expect(joined).toContain('Claude Code (alice-mbp): The retry wrapper swallows the 500.');
+    expect(joined).toContain('The session ends at 2026-10-06');
+    // And it has read that message: waiting does not hand it back as new.
+    expect(said(await bob.wait({ timeoutSeconds: 1 }))).not.toContain('retry wrapper');
+  });
+
+  it('still joins a session on a hosted plane that says nothing of intent', async () => {
+    const bridge = makeBridge();
+    const clipboard = makeClipboard();
+    await agent(bridge, clipboard, 'alice-mbp.local').share({ title: 'Checkout 500s', context: 'hello' });
+    // An older plane: no intent in what it returns.
+    const older = { ...bridge, fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+      const res = await bridge.fetchImpl(input, init);
+      const body = (await res.json()) as { session?: Record<string, unknown> };
+      if (body.session) { delete body.session.intent; delete body.session.repo; delete body.session.expiresAt; }
+      return new Response(JSON.stringify(body), { status: res.status, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch };
+    const joined = said(await agent(older as never, clipboard, 'bob-linux', {}).join({}));
+    expect(joined).toContain('Joined "Checkout 500s"');
+    expect(joined).not.toContain('Why you were brought in');
+    expect(joined).toContain('hello');
+  });
+
+  it('starts the session on a hosted plane too old to know why, rather than failing', async () => {
+    const bridge = makeBridge();
+    // Strict about its body, as the older route is.
+    const strict = { ...bridge, fetchImpl: (async (input: string | URL | Request, init: RequestInit = {}) => {
+      if (String(input).endsWith('/api/sessions/shared') && init.method === 'POST' && /"intent"|"repo"|"lifetime"/.test(String(init.body))) {
+        return new Response(JSON.stringify({ error: { message: 'Unrecognized key(s) in object' } }), { status: 400 });
+      }
+      return bridge.fetchImpl(input, init);
+    }) as typeof fetch };
+    const result = said(await agent(strict as never, makeClipboard(), 'alice-mbp.local').share({ title: 'Checkout 500s', context: 'x', intent: 'pair' }));
+    expect(result).toContain('Started "Checkout 500s"');
+  });
+});
+

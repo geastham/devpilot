@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SharedSessionClient, TranscriptEntry } from '@devpilot.sh/bridge-client';
+import { SessionIntent, SessionLifetime } from '@devpilot.sh/bridge-protocol';
 
 interface Clipboard {
     /** True when the text is now on the clipboard. */
@@ -9,7 +10,7 @@ interface Clipboard {
 }
 
 declare const SERVER_NAME = "devpilot-session";
-declare const SERVER_VERSION = "0.5.0";
+declare const SERVER_VERSION = "0.6.0";
 /** Everything the tools reach outside this process for. Injected in tests. */
 interface ToolDeps {
     env: NodeJS.ProcessEnv;
@@ -22,7 +23,15 @@ interface ToolDeps {
     fetchImpl?: typeof fetch;
     /** Poll interval for `wait`. Overridden in tests so they do not sleep. */
     waitIntervalMs?: number;
+    /** `owner/name` of the repository this process was started in, if any. */
+    repo: () => string | null;
 }
+/**
+ * The repository the session is in, from its `origin` remote. A name, never a
+ * path: it labels a shared session so whoever is asked in knows what it is
+ * about. Null outside a repository or without a remote the shape of one.
+ */
+declare function repoFromOrigin(cwd?: string): string | null;
 /** The one joined session, and how far this agent has read. Nothing persisted. */
 interface State {
     client: SharedSessionClient | null;
@@ -60,6 +69,8 @@ declare function createTools(overrides?: Partial<ToolDeps>): {
     share(input: {
         title: string;
         context: string;
+        intent?: SessionIntent;
+        lifetime?: SessionLifetime;
         mode?: "observe" | "relay" | "auto";
         autoBudget?: number;
         autoTtlMinutes?: number;
@@ -168,4 +179,4 @@ declare function createServer(overrides?: Partial<ToolDeps>): McpServer;
 declare function connectStdio(server: McpServer): Promise<void>;
 declare function main(): Promise<void>;
 
-export { SERVER_NAME, SERVER_VERSION, type ToolDeps, connectStdio, createServer, createTools, main, renderHistory, renderTranscript, toolGroups };
+export { SERVER_NAME, SERVER_VERSION, type ToolDeps, connectStdio, createServer, createTools, main, renderHistory, renderTranscript, repoFromOrigin, toolGroups };

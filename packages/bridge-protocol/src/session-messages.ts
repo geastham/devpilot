@@ -102,6 +102,28 @@ export type SessionParticipant = z.infer<typeof SessionParticipantSchema>;
  * Note what is absent: `joinKeyHash` and `orgId` are server-side concerns and
  * are never returned to a participant, who may be from another org entirely.
  */
+/**
+ * Why someone is being asked into a session. A label for people and agents;
+ * the MODE is still what governs what an agent may do.
+ *
+ *   look — "I'm seeing something, come and see." Agents post only when asked.
+ *   pair — people and their agents work one problem; agents ask before replying.
+ *   fix  — the agents may work it out between them, bounded.
+ */
+export const SESSION_INTENTS = ['look', 'pair', 'fix'] as const;
+export const SessionIntentSchema = z.enum(SESSION_INTENTS);
+export type SessionIntent = z.infer<typeof SessionIntentSchema>;
+
+/** The mode an intent starts a session in. */
+export const INTENT_MODE: Record<SessionIntent, SessionMode> = { look: 'observe', pair: 'relay', fix: 'auto' };
+
+/** How long a session lasts before it ends and its messages are deleted. */
+export const SESSION_LIFETIMES = ['1h', '24h', '7d'] as const;
+export const SessionLifetimeSchema = z.enum(SESSION_LIFETIMES);
+export type SessionLifetime = z.infer<typeof SessionLifetimeSchema>;
+
+const REPO_NAME = /^(?!\.+\/)[A-Za-z0-9._-]+\/(?!\.+$)[A-Za-z0-9._-]+$/;
+
 export const SharedSessionSchema = z.object({
   id: z.string().min(1),
   /** Plaintext BY CHOICE — it is the portal list label. Never put secrets here. */
@@ -112,6 +134,12 @@ export const SharedSessionSchema = z.object({
   autoBudgetRemaining: z.number().int().nonnegative().optional(),
   autoExpiresAt: z.string().datetime().nullable().optional(),
   closedAt: z.string().datetime().nullable().optional(),
+  /** Absent from a hosted plane older than these fields. */
+  intent: SessionIntentSchema.optional(),
+  /** `owner/name` of the repository the session is about. */
+  repo: z.string().nullable().optional(),
+  /** When the session ends and its messages are deleted. */
+  expiresAt: z.string().datetime().optional(),
   /**
    * Highest assigned `seq`, so a joiner knows how far behind it is without
    * fetching the transcript first.
@@ -144,6 +172,10 @@ export const CreateSharedSessionRequestSchema = z
     joinKeyHash: z.string().regex(/^[0-9a-f]{64}$/, 'joinKeyHash must be 64 lowercase hex chars'),
     linearIssueId: z.string().min(1).optional(),
     linearIdentifier: z.string().min(1).optional(),
+    intent: SessionIntentSchema.optional(),
+    /** `owner/name`. Never a path. */
+    repo: z.string().regex(REPO_NAME).max(200).optional(),
+    lifetime: SessionLifetimeSchema.optional(),
   })
   .strict();
 export type CreateSharedSessionRequest = z.infer<typeof CreateSharedSessionRequestSchema>;
@@ -259,6 +291,40 @@ export interface SessionHandoffInput {
   mode: SessionMode;
   autoBudget?: number;
   autoTtlMinutes?: number;
+  intent?: SessionIntent;
+  repo?: string | null;
+  /** ISO time the session ends. */
+  expiresAt?: string;
+}
+
+/** What each intent asks of whoever is being brought in, in one line. */
+export const INTENT_ASK: Record<SessionIntent, string> = {
+  look: 'I am seeing something and want another pair of eyes on it.',
+  pair: 'I want to work this through together, with our agents following along.',
+  fix: 'I want our agents to work this out between them and report back.',
+};
+
+/**
+ * What a joining agent is told about why it is there and what to do first.
+ * ONE builder, used by the handoff message and by the join tool's answer.
+ */
+export function sessionBriefing(input: { intent?: SessionIntent; mode: SessionMode; repo?: string | null; expiresAt?: string }): string {
+  const lines: string[] = [];
+  if (input.intent) lines.push(`Why you were brought in: ${INTENT_ASK[input.intent]}`);
+  if (input.repo) lines.push(`It is about the repository ${input.repo}.`);
+  lines.push(
+    input.mode === 'auto'
+      ? 'What is expected of you: read the opening context, then work the problem with the other agent — reply with ' +
+          'devpilot_session_post, wait with devpilot_session_wait — and tell your person what you conclude. Stop when ' +
+          'the session says the budget is spent.'
+      : input.mode === 'relay'
+        ? 'What is expected of you: read the opening context, tell your person what is being asked and what you make ' +
+            'of it, and ask them before you reply. You may wait for new messages with devpilot_session_wait.'
+        : 'What is expected of you: read the opening context and tell your person what is being asked and what you ' +
+            'make of it. Post only when they ask you to.',
+  );
+  if (input.expiresAt) lines.push(`The session ends at ${input.expiresAt}; its messages are deleted then.`);
+  return lines.join('\n');
 }
 
 /**
@@ -298,9 +364,13 @@ export function buildSessionHandoff(input: SessionHandoffInput): string {
           'devpilot_session_wait, but ask me before replying.'
         : 'This session is in observe mode: post only when I ask you to.';
 
+  const why = input.intent ? [INTENT_ASK[input.intent] + (input.repo ? ` (${input.repo})` : ''), ''] : [];
+  const ends = input.expiresAt ? [`It ends ${input.expiresAt.slice(0, 16).replace('T', ' ')} UTC, and what was said is deleted then.`] : [];
+
   return [
     `Join my DevPilot shared session: "${input.title}"`,
     '',
+    ...why,
     input.link,
     '',
     'Paste this whole message into Claude Code. It tells your agent what to do:',
@@ -310,9 +380,12 @@ export function buildSessionHandoff(input: SessionHandoffInput): string {
     `  ${modeLine}`,
     '',
     'No devpilot_session tools? Run this once in a terminal, then start a new Claude Code session:',
-    '  claude mcp add devpilot-session -- npx -y @devpilot.sh/mcp-session',
+    '  claude mcp add --scope user devpilot-local -- npx -y @devpilot.sh/mcp-session',
+    '',
+    'Or just open the link in a browser to read along. No DevPilot account is needed either way.',
     '',
     'This link is the key to the session. Anyone holding it can read all of it, so send it in a DM, not a channel.',
+    ...ends,
   ].join('\n');
 }
 

@@ -48,11 +48,20 @@ import {
   resolveBridgeCredentials,
   type TranscriptEntry,
 } from '@devpilot.sh/bridge-client';
-import { SESSION_LIMITS, buildSessionHandoff, findJoinLink } from '@devpilot.sh/bridge-protocol';
+import { execFileSync } from 'node:child_process';
+import {
+  INTENT_MODE,
+  SESSION_LIMITS,
+  buildSessionHandoff,
+  findJoinLink,
+  sessionBriefing,
+  type SessionIntent,
+  type SessionLifetime,
+} from '@devpilot.sh/bridge-protocol';
 import { handoffDir, systemClipboard, writeHandoffFile, type Clipboard } from './delivery';
 
 export const SERVER_NAME = 'devpilot-session';
-export const SERVER_VERSION = '0.5.0';
+export const SERVER_VERSION = '0.6.0';
 
 /** How long `wait` may block, in seconds. Kept under common tool timeouts. */
 const WAIT_DEFAULT_S = 30;
@@ -70,6 +79,24 @@ export interface ToolDeps {
   fetchImpl?: typeof fetch;
   /** Poll interval for `wait`. Overridden in tests so they do not sleep. */
   waitIntervalMs?: number;
+  /** `owner/name` of the repository this process was started in, if any. */
+  repo: () => string | null;
+}
+
+/**
+ * The repository the session is in, from its `origin` remote. A name, never a
+ * path: it labels a shared session so whoever is asked in knows what it is
+ * about. Null outside a repository or without a remote the shape of one.
+ */
+export function repoFromOrigin(cwd: string = process.cwd()): string | null {
+  try {
+    const remote = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000 }).trim();
+    const match = /[:/]([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(remote);
+    if (!match || /^\.+$/.test(match[1]) || /^\.+$/.test(match[2])) return null;
+    return `${match[1]}/${match[2]}`;
+  } catch {
+    return null;
+  }
 }
 
 function defaultDeps(): ToolDeps {
@@ -78,6 +105,7 @@ function defaultDeps(): ToolDeps {
     clipboard: systemClipboard,
     handoffDir: handoffDir(),
     hostname: os.hostname(),
+    repo: () => repoFromOrigin(),
   };
 }
 
@@ -212,16 +240,45 @@ export function createTools(overrides: Partial<ToolDeps> = {}) {
       }
 
       const s = state.client.session;
+
+      /**
+       * Joining answers "why am I here" in the same breath.
+       *
+       * It used to say only how many messages there were, so an agent's first
+       * act in every session was a second call to find out what it had been
+       * asked into. The opening message is the starter's context — what they
+       * are seeing, what they tried, what they want — so it comes back with
+       * the join, under the same "not instructions to you" framing as any
+       * transcript.
+       */
+      let opening = '';
+      try {
+        const [{ entries, latestSeq }, who] = await Promise.all([state.client.read(0), names(state.client)]);
+        if (entries.length > 0) {
+          const shown = entries.slice(0, 5);
+          state.cursor = shown[shown.length - 1].seq;
+          const rest = latestSeq - state.cursor;
+          opening =
+            `\n\nWhat has been said so far:\n\n${renderTranscript(shown, who)}` +
+            (rest > 0 ? `\n\n(${rest} more — devpilot_session_read with since=${state.cursor}.)` : '');
+        }
+      } catch {
+        opening = '\n\nThe transcript could not be read just now; use devpilot_session_read.';
+      }
+
       return text(
         `Joined "${s.title}" (${state.client.sessionId}).\n` +
-          `Mode is ${s.mode}. ${modeGuidance(s.mode)}\n` +
-          `Messages so far: ${s.lastSeq ?? 0}. Use devpilot_session_read to catch up.`,
+          `${sessionBriefing({ intent: s.intent, mode: s.mode, repo: s.repo, expiresAt: s.expiresAt })}\n` +
+          `Mode is ${s.mode}. ${modeGuidance(s.mode)}` +
+          (opening || '\n\nNothing has been posted yet.'),
       );
     },
 
     async share(input: {
       title: string;
       context: string;
+      intent?: SessionIntent;
+      lifetime?: SessionLifetime;
       mode?: 'observe' | 'relay' | 'auto';
       autoBudget?: number;
       autoTtlMinutes?: number;
@@ -238,7 +295,10 @@ export function createTools(overrides: Partial<ToolDeps> = {}) {
         );
       }
 
-      const mode = input.mode ?? 'observe';
+      const intent = input.intent ?? 'look';
+      // The intent chooses the mode unless one was asked for by name.
+      const mode = input.mode ?? INTENT_MODE[intent];
+      const repo = deps.repo();
       const autoBudget = input.autoBudget ?? SESSION_LIMITS.autoDefaultBudget;
       const autoTtlMinutes = input.autoTtlMinutes ?? SESSION_LIMITS.autoDefaultTtlMinutes;
 
@@ -254,6 +314,9 @@ export function createTools(overrides: Partial<ToolDeps> = {}) {
           mode,
           autoBudget,
           autoTtlMinutes,
+          intent,
+          ...(repo ? { repo } : {}),
+          ...(input.lifetime ? { lifetime: input.lifetime } : {}),
           fetchImpl: deps.fetchImpl,
         });
         state.client = created.client;
@@ -283,7 +346,16 @@ export function createTools(overrides: Partial<ToolDeps> = {}) {
           `(${err instanceof Error ? err.message : String(err)}). Post it with devpilot_session_post.`;
       }
 
-      const handoff = buildSessionHandoff({ title: input.title, link, mode, autoBudget, autoTtlMinutes });
+      const handoff = buildSessionHandoff({
+        title: input.title,
+        link,
+        mode,
+        autoBudget,
+        autoTtlMinutes,
+        intent,
+        repo,
+        expiresAt: state.client.session.expiresAt,
+      });
       const file = writeHandoffFile(deps.handoffDir, state.client.sessionId, handoff);
       const deliver = input.deliver ?? 'clipboard';
       const copied = deliver === 'clipboard' && deps.clipboard.write(handoff);
@@ -311,6 +383,9 @@ export function createTools(overrides: Partial<ToolDeps> = {}) {
 
       return text(
         `Started "${input.title}" (${state.client.sessionId}). ${posted}\n` +
+          (state.client.session.expiresAt
+            ? `It ends at ${state.client.session.expiresAt}; its messages are deleted then.\n`
+            : '') +
           `${modeNote}${modeGuidance(mode)}\n\n` +
           `${where}\n\n` +
           'The link is the key to this session: do not print it, and do not ask to see it.',
@@ -587,11 +662,24 @@ function registerSessionTools(server: McpServer, tools: Tools): void {
               'out, the files or commands that matter, and what you want from them. Encrypted ' +
               'before it leaves this machine. Be specific — this replaces a conversation.',
           ),
+        intent: z
+          .enum(['look', 'pair', 'fix'])
+          .optional()
+          .describe(
+            "Why the other person is being asked in. 'look' (default): \"I'm seeing something, come and see\" — " +
+              "agents post only when asked. 'pair': work it through together — agents follow along and ask before " +
+              "replying. 'fix': the agents work it out between themselves, bounded by a message budget and a time " +
+              'limit — choose it only when the person says the agents should sort it out themselves. It sets the mode.',
+          ),
+        lifetime: z
+          .enum(['1h', '24h', '7d'])
+          .optional()
+          .describe('How long the session lasts before it ends and its messages are deleted. Default a day.'),
         mode: z
           .enum(['observe', 'relay', 'auto'])
           .optional()
           .describe(
-            "'observe' (default): agents read and post only when their human asks. 'relay': agents " +
+            "Overrides the mode the intent would set. Usually omit. 'observe': agents read and post only when their human asks. 'relay': agents " +
               "may wait for new messages but ask before replying. 'auto': agents may reply to each " +
               'other, bounded by a message budget and a time limit. Choose auto only if the person ' +
               'explicitly asks for the agents to talk it through themselves.',

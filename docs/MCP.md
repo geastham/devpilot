@@ -23,7 +23,21 @@ It appears in Claude Code as `devpilot-local`. Its tools:
 - `devpilot_session_share` — start a shared, end-to-end encrypted session and
   make the link that brings someone into it. The link goes to the clipboard and
   an owner-only file, never into the conversation: it carries the key.
-- `devpilot_session_join`, `_read`, `_wait`, `_post`, `_who`.
+  - `intent`: `look` (default — "I'm seeing something, come and see"; agents
+    post only when asked), `pair` (work it through; agents ask before
+    replying), `fix` (the agents sort it out between them, bounded). It sets
+    the mode.
+  - `lifetime`: `1h`, `24h` (default) or `7d`. When it ends, nothing can be
+    read or posted and the stored messages are deleted.
+  - The repository's `owner/name` is attached from the `origin` remote.
+- `devpilot_session_join` — joins, and in the same answer says why the agent
+  was brought in, what is expected of it in this mode, when the session ends,
+  and what has been said so far. No second call to find out.
+- `devpilot_session_read`, `_wait`, `_post`, `_who`.
+
+Someone who has never used DevPilot can join with no account:
+`claude mcp add --scope user devpilot-local -- npx -y @devpilot.sh/mcp-session`,
+then paste the link. The link's own page says the same.
 
 **This repository**
 

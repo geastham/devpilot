@@ -42,6 +42,8 @@ __export(index_exports, {
   DispatchPollResponseSchema: () => DispatchPollResponseSchema,
   ERROR_CODES: () => ERROR_CODES,
   HeartbeatRequestSchema: () => HeartbeatRequestSchema,
+  INTENT_ASK: () => INTENT_ASK,
+  INTENT_MODE: () => INTENT_MODE,
   JOIN_PROOF_HEADER: () => JOIN_PROOF_HEADER,
   JoinSessionRequestSchema: () => JoinSessionRequestSchema,
   JoinSessionResponseSchema: () => JoinSessionResponseSchema,
@@ -58,6 +60,8 @@ __export(index_exports, {
   RotateSessionKeyRequestSchema: () => RotateSessionKeyRequestSchema,
   RotateSessionKeyResponseSchema: () => RotateSessionKeyResponseSchema,
   SESSION_EVENT_TYPES: () => SESSION_EVENT_TYPES,
+  SESSION_INTENTS: () => SESSION_INTENTS,
+  SESSION_LIFETIMES: () => SESSION_LIFETIMES,
   SESSION_LIMITS: () => SESSION_LIMITS,
   SESSION_MESSAGE_KINDS: () => SESSION_MESSAGE_KINDS,
   SESSION_MODES: () => SESSION_MODES,
@@ -67,7 +71,9 @@ __export(index_exports, {
   SessionCryptoError: () => SessionCryptoError,
   SessionDecryptionError: () => SessionDecryptionError,
   SessionEventTypeSchema: () => SessionEventTypeSchema,
+  SessionIntentSchema: () => SessionIntentSchema,
   SessionKeyError: () => SessionKeyError,
+  SessionLifetimeSchema: () => SessionLifetimeSchema,
   SessionMessageKindSchema: () => SessionMessageKindSchema,
   SessionMessagePageSchema: () => SessionMessagePageSchema,
   SessionMessageSchema: () => SessionMessageSchema,
@@ -97,6 +103,7 @@ __export(index_exports, {
   parseTaskDispatchMessage: () => parseTaskDispatchMessage,
   safeParseSessionMessage: () => safeParseSessionMessage,
   safeParseTaskDispatchMessage: () => safeParseTaskDispatchMessage,
+  sessionBriefing: () => sessionBriefing,
   sessionCrypto: () => sessionCrypto
 });
 module.exports = __toCommonJS(index_exports);
@@ -530,6 +537,12 @@ var SessionParticipantSchema = import_zod4.z.object({
   lastSeenAt: import_zod4.z.string().datetime().nullable().optional(),
   leftAt: import_zod4.z.string().datetime().nullable().optional()
 });
+var SESSION_INTENTS = ["look", "pair", "fix"];
+var SessionIntentSchema = import_zod4.z.enum(SESSION_INTENTS);
+var INTENT_MODE = { look: "observe", pair: "relay", fix: "auto" };
+var SESSION_LIFETIMES = ["1h", "24h", "7d"];
+var SessionLifetimeSchema = import_zod4.z.enum(SESSION_LIFETIMES);
+var REPO_NAME = /^(?!\.+\/)[A-Za-z0-9._-]+\/(?!\.+$)[A-Za-z0-9._-]+$/;
 var SharedSessionSchema = import_zod4.z.object({
   id: import_zod4.z.string().min(1),
   /** Plaintext BY CHOICE — it is the portal list label. Never put secrets here. */
@@ -540,6 +553,12 @@ var SharedSessionSchema = import_zod4.z.object({
   autoBudgetRemaining: import_zod4.z.number().int().nonnegative().optional(),
   autoExpiresAt: import_zod4.z.string().datetime().nullable().optional(),
   closedAt: import_zod4.z.string().datetime().nullable().optional(),
+  /** Absent from a hosted plane older than these fields. */
+  intent: SessionIntentSchema.optional(),
+  /** `owner/name` of the repository the session is about. */
+  repo: import_zod4.z.string().nullable().optional(),
+  /** When the session ends and its messages are deleted. */
+  expiresAt: import_zod4.z.string().datetime().optional(),
   /**
    * Highest assigned `seq`, so a joiner knows how far behind it is without
    * fetching the transcript first.
@@ -558,7 +577,11 @@ var CreateSharedSessionRequestSchema = import_zod4.z.object({
   /** sha256 hex of the join verifier. 64 lowercase hex chars. */
   joinKeyHash: import_zod4.z.string().regex(/^[0-9a-f]{64}$/, "joinKeyHash must be 64 lowercase hex chars"),
   linearIssueId: import_zod4.z.string().min(1).optional(),
-  linearIdentifier: import_zod4.z.string().min(1).optional()
+  linearIdentifier: import_zod4.z.string().min(1).optional(),
+  intent: SessionIntentSchema.optional(),
+  /** `owner/name`. Never a path. */
+  repo: import_zod4.z.string().regex(REPO_NAME).max(200).optional(),
+  lifetime: SessionLifetimeSchema.optional()
 }).strict();
 var CreateSharedSessionResponseSchema = import_zod4.z.object({
   session: SharedSessionSchema
@@ -618,13 +641,31 @@ var RotateSessionKeyRequestSchema = import_zod4.z.object({
 var RotateSessionKeyResponseSchema = import_zod4.z.object({
   keyVersion: import_zod4.z.number().int().positive()
 });
+var INTENT_ASK = {
+  look: "I am seeing something and want another pair of eyes on it.",
+  pair: "I want to work this through together, with our agents following along.",
+  fix: "I want our agents to work this out between them and report back."
+};
+function sessionBriefing(input) {
+  const lines = [];
+  if (input.intent) lines.push(`Why you were brought in: ${INTENT_ASK[input.intent]}`);
+  if (input.repo) lines.push(`It is about the repository ${input.repo}.`);
+  lines.push(
+    input.mode === "auto" ? "What is expected of you: read the opening context, then work the problem with the other agent \u2014 reply with devpilot_session_post, wait with devpilot_session_wait \u2014 and tell your person what you conclude. Stop when the session says the budget is spent." : input.mode === "relay" ? "What is expected of you: read the opening context, tell your person what is being asked and what you make of it, and ask them before you reply. You may wait for new messages with devpilot_session_wait." : "What is expected of you: read the opening context and tell your person what is being asked and what you make of it. Post only when they ask you to."
+  );
+  if (input.expiresAt) lines.push(`The session ends at ${input.expiresAt}; its messages are deleted then.`);
+  return lines.join("\n");
+}
 function buildSessionHandoff(input) {
   const budget = input.autoBudget ?? SESSION_LIMITS.autoDefaultBudget;
   const ttl = input.autoTtlMinutes ?? SESSION_LIMITS.autoDefaultTtlMinutes;
   const modeLine = input.mode === "auto" ? `This session is in auto mode for up to ${budget} agent messages or ${ttl} minutes: you may reply to the other agent with devpilot_session_post and wait for answers with devpilot_session_wait. Stop when the session says the budget is spent.` : input.mode === "relay" ? "This session is in relay mode: you may wait for new messages with devpilot_session_wait, but ask me before replying." : "This session is in observe mode: post only when I ask you to.";
+  const why = input.intent ? [INTENT_ASK[input.intent] + (input.repo ? ` (${input.repo})` : ""), ""] : [];
+  const ends = input.expiresAt ? [`It ends ${input.expiresAt.slice(0, 16).replace("T", " ")} UTC, and what was said is deleted then.`] : [];
   return [
     `Join my DevPilot shared session: "${input.title}"`,
     "",
+    ...why,
     input.link,
     "",
     "Paste this whole message into Claude Code. It tells your agent what to do:",
@@ -634,9 +675,12 @@ function buildSessionHandoff(input) {
     `  ${modeLine}`,
     "",
     "No devpilot_session tools? Run this once in a terminal, then start a new Claude Code session:",
-    "  claude mcp add devpilot-session -- npx -y @devpilot.sh/mcp-session",
+    "  claude mcp add --scope user devpilot-local -- npx -y @devpilot.sh/mcp-session",
     "",
-    "This link is the key to the session. Anyone holding it can read all of it, so send it in a DM, not a channel."
+    "Or just open the link in a browser to read along. No DevPilot account is needed either way.",
+    "",
+    "This link is the key to the session. Anyone holding it can read all of it, so send it in a DM, not a channel.",
+    ...ends
   ].join("\n");
 }
 function findJoinLink(text) {
@@ -986,6 +1030,8 @@ function linearIdentifierFromBranch(branch) {
   DispatchPollResponseSchema,
   ERROR_CODES,
   HeartbeatRequestSchema,
+  INTENT_ASK,
+  INTENT_MODE,
   JOIN_PROOF_HEADER,
   JoinSessionRequestSchema,
   JoinSessionResponseSchema,
@@ -1002,6 +1048,8 @@ function linearIdentifierFromBranch(branch) {
   RotateSessionKeyRequestSchema,
   RotateSessionKeyResponseSchema,
   SESSION_EVENT_TYPES,
+  SESSION_INTENTS,
+  SESSION_LIFETIMES,
   SESSION_LIMITS,
   SESSION_MESSAGE_KINDS,
   SESSION_MODES,
@@ -1011,7 +1059,9 @@ function linearIdentifierFromBranch(branch) {
   SessionCryptoError,
   SessionDecryptionError,
   SessionEventTypeSchema,
+  SessionIntentSchema,
   SessionKeyError,
+  SessionLifetimeSchema,
   SessionMessageKindSchema,
   SessionMessagePageSchema,
   SessionMessageSchema,
@@ -1041,6 +1091,7 @@ function linearIdentifierFromBranch(branch) {
   parseTaskDispatchMessage,
   safeParseSessionMessage,
   safeParseTaskDispatchMessage,
+  sessionBriefing,
   sessionCrypto
 });
 //# sourceMappingURL=index.js.map
