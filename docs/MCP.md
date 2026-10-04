@@ -33,6 +33,11 @@ It appears in Claude Code as `devpilot-local`. Its tools:
 - `devpilot_session_join` — joins, and in the same answer says why the agent
   was brought in, what is expected of it in this mode, when the session ends,
   and what has been said so far. No second call to find out.
+- `devpilot_session_link` — gives the person the link for the session already
+  started or joined, on a line of its own. For "show me the link", and for
+  anyone not at the machine whose clipboard has it (a phone, a remote session,
+  SSH). It starts nothing. Showing the link puts the key in the conversation,
+  and the answer says so.
 - `devpilot_session_read`, `_wait`, `_post`, `_who`.
 
 Someone who has never used DevPilot can join with no account:

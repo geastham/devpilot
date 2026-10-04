@@ -338,7 +338,7 @@ import { Command as Command24 } from "commander";
 import updateNotifier from "update-notifier";
 
 // src/version.ts
-var VERSION = "0.12.0";
+var VERSION = "0.13.0";
 
 // src/commands/init.ts
 import { Command } from "commander";

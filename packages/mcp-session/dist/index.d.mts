@@ -10,7 +10,7 @@ interface Clipboard {
 }
 
 declare const SERVER_NAME = "devpilot-session";
-declare const SERVER_VERSION = "0.6.0";
+declare const SERVER_VERSION = "0.7.0";
 /** Everything the tools reach outside this process for. Injected in tests. */
 interface ToolDeps {
     env: NodeJS.ProcessEnv;
@@ -37,6 +37,15 @@ interface State {
     client: SharedSessionClient | null;
     /** Highest seq this agent has been shown. `wait` resumes from here. */
     cursor: number;
+    /**
+     * The invite for the session this process is in: the link and the message
+     * around it. Kept in memory only, so that being asked for the link later
+     * means showing THIS session's, not starting a second one.
+     */
+    invite: {
+        link: string;
+        handoff: string;
+    } | null;
 }
 /**
  * Renders a transcript for a model to read.
@@ -103,6 +112,13 @@ declare function createTools(overrides?: Partial<ToolDeps>): {
         message: string;
         kind?: "chat" | "agent_output";
     }): Promise<{
+        content: {
+            type: "text";
+            text: string;
+        }[];
+    }>;
+    /** The link for the session this process is already in. Starts nothing. */
+    link(): Promise<{
         content: {
             type: "text";
             text: string;

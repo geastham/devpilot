@@ -115,7 +115,7 @@ function writeHandoffFile(dir, sessionId, text2) {
 
 // src/index.ts
 var SERVER_NAME = "devpilot-session";
-var SERVER_VERSION = "0.6.0";
+var SERVER_VERSION = "0.7.0";
 var WAIT_DEFAULT_S = 30;
 var WAIT_MAX_S = 50;
 function repoFromOrigin(cwd = process.cwd()) {
@@ -136,6 +136,17 @@ function defaultDeps() {
     hostname: import_node_os2.default.hostname(),
     repo: () => repoFromOrigin()
   };
+}
+function showInvite(invite) {
+  return `Give the person this link exactly as written, on a line of its own so it can be copied:
+
+${invite.link}
+
+It is the key to the session: anyone holding it can read all of it, so it belongs in a direct message. It is now part of this conversation.
+
+Or the whole invite, which also tells their agent what to do \u2014 offer it, do not paste it unasked:
+
+` + invite.handoff;
 }
 function text(body) {
   return { content: [{ type: "text", text: body }] };
@@ -175,7 +186,7 @@ function defaultDisplayName(hostname) {
 }
 function createTools(overrides = {}) {
   const deps = { ...defaultDeps(), ...overrides };
-  const state = { client: null, cursor: 0 };
+  const state = { client: null, cursor: 0, invite: null };
   async function names(client) {
     const participants = await client.who().catch(() => []);
     return new Map(participants.map((p) => [p.id, p.displayName]));
@@ -199,6 +210,18 @@ function createTools(overrides = {}) {
           fetchImpl: deps.fetchImpl
         });
         state.cursor = 0;
+        const joined = state.client.session;
+        state.invite = {
+          link,
+          handoff: (0, import_bridge_protocol.buildSessionHandoff)({
+            title: joined.title,
+            link,
+            mode: joined.mode,
+            intent: joined.intent,
+            repo: joined.repo,
+            expiresAt: joined.expiresAt
+          })
+        };
       } catch (err) {
         return text(`Could not join: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -280,15 +303,14 @@ Mode is ${s.mode}. ${modeGuidance(s.mode)}` + (opening || "\n\nNothing has been 
         repo,
         expiresAt: state.client.session.expiresAt
       });
+      state.invite = { link, handoff };
       const file = writeHandoffFile(deps.handoffDir, state.client.sessionId, handoff);
       const deliver = input.deliver ?? "clipboard";
       const copied = deliver === "clipboard" && deps.clipboard.write(handoff);
       const where = deliver === "inline" ? (
         // Asked for, so given — and said plainly what that cost.
-        `Here is the handoff. It contains the session key, which is now part of this conversation's transcript:
-
-${handoff}`
-      ) : copied ? `The handoff message is on the clipboard${file ? ` (and saved at ${file})` : ""}. Tell the person to paste it to their teammate in a direct message.` : file ? `${deliver === "clipboard" ? "No clipboard is available here, so the" : "The"} handoff message is saved at ${file}, readable only by this user. Tell the person to send its contents to their teammate in a direct message.` : 'The session was created but the handoff could not be copied or saved here. Call this again with deliver: "inline" to see it.';
+        showInvite(state.invite)
+      ) : copied ? `The handoff message is on the clipboard${file ? ` (and saved at ${file})` : ""}. Tell the person to paste it to their teammate in a direct message.` : file ? `${deliver === "clipboard" ? "No clipboard is available here, so the" : "The"} handoff message is saved at ${file}, readable only by this user. Tell the person to send its contents to their teammate in a direct message.` : "The session was created but the invite could not be copied or saved here. Call devpilot_session_link to give the person the link.";
       const modeNote = mode === "auto" ? `Mode is auto for up to ${autoBudget} agent messages or ${autoTtlMinutes} minutes, after which it drops back to observe. ` : `Mode is ${mode}. `;
       return text(
         `Started "${input.title}" (${state.client.sessionId}). ${posted}
@@ -297,7 +319,7 @@ ${handoff}`
 
 ${where}
 
-The link is the key to this session: do not print it, and do not ask to see it.`
+` + (deliver === "inline" ? "" : 'Tell the person both of these: where the invite is, and that if they are not at this computer \u2014 on a phone, or driving this session remotely \u2014 they can say "show me the link" and you will give it to them here. When they ask, call devpilot_session_link; do not start another session.')
       );
     },
     async read(input) {
@@ -362,6 +384,16 @@ The link is the key to this session: do not print it, and do not ask to see it.`
       } catch (err) {
         return text(`Could not post: ${err instanceof Error ? err.message : String(err)}`);
       }
+    },
+    /** The link for the session this process is already in. Starts nothing. */
+    async link() {
+      if (!state.client || !state.invite) {
+        return text(
+          'There is no session here to give a link for. Start one with devpilot_session_share (pass deliver: "inline" to be given the link in the same answer), or join one with devpilot_session_join.'
+        );
+      }
+      deps.clipboard.write(state.invite.handoff);
+      return text(showInvite(state.invite));
     },
     async who() {
       const client = state.client;
@@ -474,7 +506,7 @@ function registerSessionTools(server, tools) {
     "devpilot_session_share",
     {
       title: "Start a DevPilot shared session",
-      description: "Start a shared, end-to-end encrypted session so another person and their agent can work with you on what you are doing now. Use it when the person asks to share this session, hand work off, or bring in a teammate. It creates the session, joins it, posts your `context` as the first encrypted message, and puts a ready-to-send handoff message on the person's clipboard. The link is the session key: this tool does not show it to you, and you should not ask for it.",
+      description: 'Start a shared, end-to-end encrypted session so another person and their agent can work with you on what you are doing now. Use it when the person asks to share this session, hand work off, or bring in a teammate. It creates the session, joins it, posts your `context` as the first encrypted message, and puts a ready-to-send handoff message on the person\'s clipboard. By default the link is not shown here, because it is the session key. If the person asks for "a link" in the same breath, or is not at this computer, pass deliver: "inline"; if they ask afterwards, call devpilot_session_link \u2014 never start a second session to get one.',
       inputSchema: {
         title: import_zod.z.string().min(1).max(200).describe("What the session is about. Stored unencrypted as a label \u2014 no secrets, no code."),
         context: import_zod.z.string().min(1).describe(
@@ -491,7 +523,7 @@ function registerSessionTools(server, tools) {
         autoTtlMinutes: import_zod.z.number().int().positive().max(240).optional().describe(`Minutes auto mode lasts. Default ${import_bridge_protocol.SESSION_LIMITS.autoDefaultTtlMinutes}.`),
         displayName: import_zod.z.string().optional().describe("How this agent appears in the transcript."),
         deliver: import_zod.z.enum(["clipboard", "file", "inline"]).optional().describe(
-          "Where the handoff message goes. 'clipboard' (default) also saves a private file. 'inline' returns it here, which puts the session key into this conversation \u2014 use it only if the person asks to see the link."
+          "Where the invite goes. 'clipboard' (default) also saves a private file. 'inline' also returns the link here, on its own line, for a person who asked for a link or is on a phone or a remote session; that puts the session key into this conversation."
         )
       }
     },
@@ -545,6 +577,15 @@ function registerSessionTools(server, tools) {
       }
     },
     (input) => tools.post(input)
+  );
+  server.registerTool(
+    "devpilot_session_link",
+    {
+      title: "Give the person the link to this shared session",
+      description: 'Show the join link for the shared session you already started or joined, so the person can copy and send it. Use it when they ask for the link ("show me the link", "give me something I can paste"), or say they are on a phone, working remotely, or cannot reach the clipboard. It does not start a new session. The link is the session key, and showing it puts it in this conversation \u2014 say so once, in a sentence.',
+      inputSchema: {}
+    },
+    () => tools.link()
   );
   server.registerTool(
     "devpilot_session_who",

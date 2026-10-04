@@ -214,7 +214,7 @@ describe('starting a session from inside an agent', () => {
     );
 
     expect(result).toContain('#k=');
-    expect(result).toContain("now part of this conversation's transcript");
+    expect(result).toContain('It is now part of this conversation.');
   });
 
   it('says what to do when the machine has no token, rather than failing obscurely', async () => {
@@ -480,6 +480,42 @@ describe('why a session exists', () => {
     }) as typeof fetch };
     const result = said(await agent(strict as never, makeClipboard(), 'alice-mbp.local').share({ title: 'Checkout 500s', context: 'x', intent: 'pair' }));
     expect(result).toContain('Started "Checkout 500s"');
+  });
+
+  it('gives the link for the session it is already in, when asked afterwards, without starting another', async () => {
+    const bridge = makeBridge();
+    const clipboard = makeClipboard();
+    const alice = agent(bridge, clipboard, 'alice-mbp.local');
+    const started = said(await alice.share({ title: 'Checkout 500s', context: 'x' }));
+    // Not shown by default, but the way to get it is said.
+    expect(started).not.toContain('#k=');
+    expect(started).toContain('show me the link');
+
+    clipboard.text = 'something else copied since';
+    const shown = said(await alice.link());
+    const link = /https:\/\/devpilot\.test\/s\/sess_1#k=[A-Za-z0-9_-]+/.exec(shown)?.[0];
+    expect(link).toBeTruthy();
+    // On a line of its own, so it can be copied from a phone.
+    expect(shown.split('\n')).toContain(link);
+    expect(shown).toContain('It is now part of this conversation.');
+    // One session, not two; and the invite is back on the clipboard too.
+    expect(bridge.requests.filter((r) => r.url.endsWith('/api/sessions/shared') && r.method === 'POST')).toHaveLength(1);
+    expect(clipboard.text).toContain(link!);
+  });
+
+  it('gives the link to someone who joined, so they can bring a third person in', async () => {
+    const bridge = makeBridge();
+    const clipboard = makeClipboard();
+    await agent(bridge, clipboard, 'alice-mbp.local').share({ title: 'Checkout 500s', context: 'x' });
+    const bob = agent(bridge, clipboard, 'bob-linux', {});
+    await bob.join({});
+    expect(said(await bob.link())).toMatch(/\/s\/sess_1#k=/);
+  });
+
+  it('says there is nothing to link to before any session exists', async () => {
+    const result = said(await agent(makeBridge(), makeClipboard(), 'alice-mbp.local').link());
+    expect(result).toContain('no session here');
+    expect(result).not.toContain('#k=');
   });
 });
 
