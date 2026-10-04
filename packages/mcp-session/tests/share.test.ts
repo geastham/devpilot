@@ -459,7 +459,7 @@ describe('why a session exists', () => {
     // An older plane: no intent in what it returns.
     const older = { ...bridge, fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
       const res = await bridge.fetchImpl(input, init);
-      const body = await res.json();
+      const body = (await res.json()) as { session?: Record<string, unknown> };
       if (body.session) { delete body.session.intent; delete body.session.repo; delete body.session.expiresAt; }
       return new Response(JSON.stringify(body), { status: res.status, headers: { 'content-type': 'application/json' } });
     }) as typeof fetch };
