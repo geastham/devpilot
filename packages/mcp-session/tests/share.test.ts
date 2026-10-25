@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { findJoinLink, parseJoinLink } from '@devpilot.sh/bridge-protocol';
-import { createTools } from '../src/index';
+import { createTools, install } from '../src/index';
 import type { Clipboard } from '../src/delivery';
 
 /**
@@ -160,7 +160,7 @@ describe('starting a session from inside an agent', () => {
 
     // The person has something they can send as it is.
     expect(clipboard.text).toContain('Join my DevPilot shared session: "Checkout 500s"');
-    expect(clipboard.text).toContain('claude mcp add --scope user devpilot-local');
+    expect(clipboard.text).toContain('npx -y @devpilot.sh/mcp-session install');
     expect(findJoinLink(clipboard.text ?? '')).toMatch(/^https:\/\/devpilot\.test\/s\/sess_1#k=/);
   });
 
@@ -498,6 +498,11 @@ describe('why a session exists', () => {
     // On a line of its own, so it can be copied from a phone.
     expect(shown.split('\n')).toContain(link);
     expect(shown).toContain('It is now part of this conversation.');
+    // Leads with three lines a person can paste into Slack: link, what to do, the one-time command.
+    const invite = shown.split('\n\n')[1]!.split('\n');
+    expect(invite).toHaveLength(3);
+    expect(invite[0]).toBe(`Join my DevPilot session "Checkout 500s": ${link}`);
+    expect(invite[2]).toContain('npx -y @devpilot.sh/mcp-session install');
     // One session, not two; and the invite is back on the clipboard too.
     expect(bridge.requests.filter((r) => r.url.endsWith('/api/sessions/shared') && r.method === 'POST')).toHaveLength(1);
     expect(clipboard.text).toContain(link!);
@@ -519,3 +524,34 @@ describe('why a session exists', () => {
   });
 });
 
+
+describe('npx -y @devpilot.sh/mcp-session install', () => {
+  it('adds the server to Claude Code at user scope, under the name the join page uses', () => {
+    const calls: string[][] = [];
+    const lines: string[] = [];
+    const code = install((cmd, args) => void calls.push([cmd, ...args]), (l) => lines.push(l));
+    expect(code).toBe(0);
+    expect(calls).toEqual([
+      ['claude', 'mcp', 'add', '--scope', 'user', 'devpilot-local', '--', 'npx', '-y', '@devpilot.sh/mcp-session'],
+    ]);
+    expect(lines.join('\n')).toContain('Added to Claude Code');
+  });
+
+  it('is not an error to run twice', () => {
+    const lines: string[] = [];
+    const code = install(() => {
+      throw Object.assign(new Error('Command failed'), { stderr: 'MCP server devpilot-local already exists in user config' });
+    }, (l) => lines.push(l));
+    expect(code).toBe(0);
+    expect(lines.join('\n')).toContain('already has devpilot-local');
+  });
+
+  it('prints the command to run elsewhere when claude is not on the PATH', () => {
+    const lines: string[] = [];
+    const code = install(() => {
+      throw Object.assign(new Error('spawn claude ENOENT'), { code: 'ENOENT' });
+    }, (l) => lines.push(l));
+    expect(code).toBe(1);
+    expect(lines.join('\n')).toContain('claude mcp add --scope user devpilot-local -- npx -y @devpilot.sh/mcp-session');
+  });
+});

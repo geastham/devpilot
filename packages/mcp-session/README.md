@@ -10,8 +10,11 @@ the join link's URL fragment and never leaves the machines holding it.
 ## Install
 
 ```bash
-claude mcp add devpilot-session -- npx -y @devpilot.sh/mcp-session
+npx -y @devpilot.sh/mcp-session install
 ```
+
+That runs `claude mcp add --scope user devpilot-local -- npx -y @devpilot.sh/mcp-session`
+for you (or prints it, if `claude` is not on the PATH).
 
 Or in `.mcp.json`:
 

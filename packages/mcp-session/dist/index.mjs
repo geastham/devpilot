@@ -12,7 +12,9 @@ import { execFileSync } from "child_process";
 import {
   INTENT_MODE,
   SESSION_LIMITS,
+  SESSION_TOOLS_INSTALL,
   buildSessionHandoff,
+  buildSessionInvite,
   findJoinLink,
   sessionBriefing
 } from "@devpilot.sh/bridge-protocol";
@@ -82,7 +84,7 @@ function writeHandoffFile(dir, sessionId, text2) {
 
 // src/index.ts
 var SERVER_NAME = "devpilot-session";
-var SERVER_VERSION = "0.7.0";
+var SERVER_VERSION = "0.8.0";
 var WAIT_DEFAULT_S = 30;
 var WAIT_MAX_S = 50;
 function repoFromOrigin(cwd = process.cwd()) {
@@ -104,14 +106,25 @@ function defaultDeps() {
     repo: () => repoFromOrigin()
   };
 }
+function makeInvite(input) {
+  return {
+    link: input.link,
+    handoff: buildSessionHandoff(input),
+    short: buildSessionInvite({ title: input.title, link: input.link })
+  };
+}
 function showInvite(invite) {
-  return `Give the person this link exactly as written, on a line of its own so it can be copied:
+  return `Give the person this message exactly as written, so they can paste it into Slack or a text:
+
+${invite.short}
+
+If they want only the link, it is the end of the first line; give it on a line of its own:
 
 ${invite.link}
 
 It is the key to the session: anyone holding it can read all of it, so it belongs in a direct message. It is now part of this conversation.
 
-Or the whole invite, which also tells their agent what to do \u2014 offer it, do not paste it unasked:
+There is also a longer invite that tells their agent step by step what to do \u2014 offer it, do not paste it unasked:
 
 ` + invite.handoff;
 }
@@ -178,17 +191,14 @@ function createTools(overrides = {}) {
         });
         state.cursor = 0;
         const joined = state.client.session;
-        state.invite = {
+        state.invite = makeInvite({
+          title: joined.title,
           link,
-          handoff: buildSessionHandoff({
-            title: joined.title,
-            link,
-            mode: joined.mode,
-            intent: joined.intent,
-            repo: joined.repo,
-            expiresAt: joined.expiresAt
-          })
-        };
+          mode: joined.mode,
+          intent: joined.intent,
+          repo: joined.repo,
+          expiresAt: joined.expiresAt
+        });
       } catch (err) {
         return text(`Could not join: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -260,7 +270,7 @@ Mode is ${s.mode}. ${modeGuidance(s.mode)}` + (opening || "\n\nNothing has been 
       } catch (err) {
         posted = `The session exists, but posting your context failed (${err instanceof Error ? err.message : String(err)}). Post it with devpilot_session_post.`;
       }
-      const handoff = buildSessionHandoff({
+      state.invite = makeInvite({
         title: input.title,
         link,
         mode,
@@ -270,7 +280,7 @@ Mode is ${s.mode}. ${modeGuidance(s.mode)}` + (opening || "\n\nNothing has been 
         repo,
         expiresAt: state.client.session.expiresAt
       });
-      state.invite = { link, handoff };
+      const { handoff } = state.invite;
       const file = writeHandoffFile(deps.handoffDir, state.client.sessionId, handoff);
       const deliver = input.deliver ?? "clipboard";
       const copied = deliver === "clipboard" && deps.clipboard.write(handoff);
@@ -582,7 +592,39 @@ function registerHistoryTool(server, tools) {
 async function connectStdio(server) {
   await server.connect(new StdioServerTransport());
 }
-async function main() {
+function install(run = (cmd, args) => {
+  execFileSync(cmd, args, { stdio: ["ignore", "pipe", "pipe"], timeout: 3e4 });
+}, log = (line) => console.log(line)) {
+  const args = ["mcp", "add", "--scope", "user", "devpilot-local", "--", "npx", "-y", "@devpilot.sh/mcp-session"];
+  try {
+    run("claude", args);
+  } catch (err) {
+    const e = err;
+    const why = `${e.stderr ?? ""}${e.message ?? ""}`;
+    if (/already exists/i.test(why)) {
+      log("Claude Code already has devpilot-local. Start a new session and the devpilot_session tools are there.");
+      return 0;
+    }
+    log("Could not run `claude` here. Run this where you use Claude Code:");
+    log(`  claude ${args.join(" ")}`);
+    return 1;
+  }
+  log("Added to Claude Code as devpilot-local.");
+  log("Start a new Claude Code session (or run /mcp in an open one), then paste the DevPilot link you were sent.");
+  return 0;
+}
+async function main(argv = process.argv.slice(2)) {
+  if (argv[0] === "install") {
+    process.exitCode = install();
+    return;
+  }
+  if (argv[0] === "--help" || argv[0] === "-h") {
+    console.log(`devpilot-mcp-session \u2014 DevPilot shared sessions for a coding agent (MCP over stdio).
+
+  ${SESSION_TOOLS_INSTALL}   add it to Claude Code
+  npx -y @devpilot.sh/mcp-session           serve over stdio (what Claude Code runs)`);
+    return;
+  }
   await connectStdio(createServer());
 }
 export {
@@ -591,6 +633,7 @@ export {
   connectStdio,
   createServer,
   createTools,
+  install,
   main,
   renderHistory,
   renderTranscript,

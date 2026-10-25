@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
+  buildSessionInvite,
+  buildSessionHandoff,
   SessionMessageSchema,
   SessionParticipantSchema,
   SharedSessionSchema,
@@ -267,5 +269,20 @@ describe('what the server hands back', () => {
       leftAt: null,
     });
     expect(parsed.kind).toBe('agent');
+  });
+});
+
+describe('the invite a person pastes into Slack', () => {
+  const link = 'https://devpilot.sh/s/abc#k=secret';
+  it('is three lines: the link, what to do with it, and the one-time install', () => {
+    const lines = buildSessionInvite({ title: 'Checkout 500s', link }).split('\n');
+    expect(lines).toEqual([
+      `Join my DevPilot session "Checkout 500s": ${link}`,
+      'Open it to read along, or paste the link into Claude Code to bring your agent.',
+      'First time? Run once: `npx -y @devpilot.sh/mcp-session install`',
+    ]);
+  });
+  it('and the long handoff gives the same one-time command', () => {
+    expect(buildSessionHandoff({ title: 't', link, mode: 'observe' })).toContain('npx -y @devpilot.sh/mcp-session install');
   });
 });

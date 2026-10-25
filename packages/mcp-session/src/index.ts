@@ -52,16 +52,19 @@ import { execFileSync } from 'node:child_process';
 import {
   INTENT_MODE,
   SESSION_LIMITS,
+  SESSION_TOOLS_INSTALL,
   buildSessionHandoff,
+  buildSessionInvite,
   findJoinLink,
   sessionBriefing,
   type SessionIntent,
+  type SessionHandoffInput,
   type SessionLifetime,
 } from '@devpilot.sh/bridge-protocol';
 import { handoffDir, systemClipboard, writeHandoffFile, type Clipboard } from './delivery';
 
 export const SERVER_NAME = 'devpilot-session';
-export const SERVER_VERSION = '0.7.0';
+export const SERVER_VERSION = '0.8.0';
 
 /** How long `wait` may block, in seconds. Kept under common tool timeouts. */
 const WAIT_DEFAULT_S = 30;
@@ -119,7 +122,7 @@ interface State {
    * around it. Kept in memory only, so that being asked for the link later
    * means showing THIS session's, not starting a second one.
    */
-  invite: { link: string; handoff: string } | null;
+  invite: Invite | null;
 }
 
 /**
@@ -132,13 +135,32 @@ interface State {
  * session. So this is one ask away, says what it costs in a sentence, and puts
  * the link on a line of its own so it can be copied from a small screen.
  */
-function showInvite(invite: { link: string; handoff: string }): string {
+interface Invite {
+  link: string;
+  /** Fifteen lines, written for the recipient's agent. Goes on the clipboard. */
+  handoff: string;
+  /** Three lines, for a Slack message or a text. What `devpilot_session_link` leads with. */
+  short: string;
+}
+
+function makeInvite(input: SessionHandoffInput): Invite {
+  return {
+    link: input.link,
+    handoff: buildSessionHandoff(input),
+    short: buildSessionInvite({ title: input.title, link: input.link }),
+  };
+}
+
+function showInvite(invite: Invite): string {
   return (
-    'Give the person this link exactly as written, on a line of its own so it can be copied:\n\n' +
+    'Give the person this message exactly as written, so they can paste it into Slack or a text:\n\n' +
+    `${invite.short}\n\n` +
+    'If they want only the link, it is the end of the first line; give it on a line of its own:\n\n' +
     `${invite.link}\n\n` +
     'It is the key to the session: anyone holding it can read all of it, so it belongs in a direct message. ' +
     'It is now part of this conversation.\n\n' +
-    'Or the whole invite, which also tells their agent what to do — offer it, do not paste it unasked:\n\n' +
+    'There is also a longer invite that tells their agent step by step what to do — offer it, do not paste it ' +
+    'unasked:\n\n' +
     invite.handoff
   );
 }
@@ -261,17 +283,14 @@ export function createTools(overrides: Partial<ToolDeps> = {}) {
         });
         state.cursor = 0;
         const joined = state.client.session;
-        state.invite = {
+        state.invite = makeInvite({
+          title: joined.title,
           link,
-          handoff: buildSessionHandoff({
-            title: joined.title,
-            link,
-            mode: joined.mode,
-            intent: joined.intent,
-            repo: joined.repo,
-            expiresAt: joined.expiresAt,
-          }),
-        };
+          mode: joined.mode,
+          intent: joined.intent,
+          repo: joined.repo,
+          expiresAt: joined.expiresAt,
+        });
       } catch (err) {
         // Deliberately does NOT echo the link: it contains the key, and a tool
         // result is transcript the model may later repeat.
@@ -385,7 +404,7 @@ export function createTools(overrides: Partial<ToolDeps> = {}) {
           `(${err instanceof Error ? err.message : String(err)}). Post it with devpilot_session_post.`;
       }
 
-      const handoff = buildSessionHandoff({
+      state.invite = makeInvite({
         title: input.title,
         link,
         mode,
@@ -395,7 +414,7 @@ export function createTools(overrides: Partial<ToolDeps> = {}) {
         repo,
         expiresAt: state.client.session.expiresAt,
       });
-      state.invite = { link, handoff };
+      const { handoff } = state.invite;
       const file = writeHandoffFile(deps.handoffDir, state.client.sessionId, handoff);
       const deliver = input.deliver ?? 'clipboard';
       const copied = deliver === 'clipboard' && deps.clipboard.write(handoff);
@@ -916,6 +935,49 @@ export async function connectStdio(server: McpServer): Promise<void> {
   await server.connect(new StdioServerTransport());
 }
 
-export async function main(): Promise<void> {
+/**
+ * `npx -y @devpilot.sh/mcp-session install` — the one command a newcomer runs.
+ *
+ * The invite people paste into Slack has room for one short command, not
+ * `claude mcp add --scope user devpilot-local -- npx -y @devpilot.sh/mcp-session`.
+ * This runs that for them. When `claude` is not on the PATH it prints the long
+ * form to run wherever Claude Code is, rather than guessing at config files.
+ */
+export function install(
+  run: (cmd: string, args: string[]) => void = (cmd, args) => {
+    execFileSync(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
+  },
+  log: (line: string) => void = (line) => console.log(line),
+): number {
+  const args = ['mcp', 'add', '--scope', 'user', 'devpilot-local', '--', 'npx', '-y', '@devpilot.sh/mcp-session'];
+  try {
+    run('claude', args);
+  } catch (err) {
+    const e = err as { stderr?: Buffer | string; message?: string };
+    const why = `${e.stderr ?? ''}${e.message ?? ''}`;
+    if (/already exists/i.test(why)) {
+      log('Claude Code already has devpilot-local. Start a new session and the devpilot_session tools are there.');
+      return 0;
+    }
+    log('Could not run `claude` here. Run this where you use Claude Code:');
+    log(`  claude ${args.join(' ')}`);
+    return 1;
+  }
+  log('Added to Claude Code as devpilot-local.');
+  log('Start a new Claude Code session (or run /mcp in an open one), then paste the DevPilot link you were sent.');
+  return 0;
+}
+
+export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
+  if (argv[0] === 'install') {
+    process.exitCode = install();
+    return;
+  }
+  if (argv[0] === '--help' || argv[0] === '-h') {
+    console.log(`devpilot-mcp-session — DevPilot shared sessions for a coding agent (MCP over stdio).\n\n` +
+      `  ${SESSION_TOOLS_INSTALL}   add it to Claude Code\n` +
+      `  npx -y @devpilot.sh/mcp-session           serve over stdio (what Claude Code runs)`);
+    return;
+  }
   await connectStdio(createServer());
 }

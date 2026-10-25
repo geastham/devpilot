@@ -10,7 +10,7 @@ interface Clipboard {
 }
 
 declare const SERVER_NAME = "devpilot-session";
-declare const SERVER_VERSION = "0.7.0";
+declare const SERVER_VERSION = "0.8.0";
 /** Everything the tools reach outside this process for. Injected in tests. */
 interface ToolDeps {
     env: NodeJS.ProcessEnv;
@@ -42,10 +42,24 @@ interface State {
      * around it. Kept in memory only, so that being asked for the link later
      * means showing THIS session's, not starting a second one.
      */
-    invite: {
-        link: string;
-        handoff: string;
-    } | null;
+    invite: Invite | null;
+}
+/**
+ * The link, given to the person in the conversation.
+ *
+ * The default keeps it out — clipboard and an owner-only file — because a tool
+ * result is context the model re-sends on every later turn. But a clipboard is
+ * on one machine, and the person is often not at it: on a phone, driving the
+ * session remotely, over SSH. A link they cannot reach is not a shared
+ * session. So this is one ask away, says what it costs in a sentence, and puts
+ * the link on a line of its own so it can be copied from a small screen.
+ */
+interface Invite {
+    link: string;
+    /** Fifteen lines, written for the recipient's agent. Goes on the clipboard. */
+    handoff: string;
+    /** Three lines, for a Slack message or a text. What `devpilot_session_link` leads with. */
+    short: string;
 }
 /**
  * Renders a transcript for a model to read.
@@ -193,6 +207,15 @@ declare function toolGroups(env: NodeJS.ProcessEnv): Set<'session' | 'history'>;
 declare function createServer(overrides?: Partial<ToolDeps>): McpServer;
 /** Serve over stdio. Exported so a host that adds tools of its own can start the server it built. */
 declare function connectStdio(server: McpServer): Promise<void>;
-declare function main(): Promise<void>;
+/**
+ * `npx -y @devpilot.sh/mcp-session install` — the one command a newcomer runs.
+ *
+ * The invite people paste into Slack has room for one short command, not
+ * `claude mcp add --scope user devpilot-local -- npx -y @devpilot.sh/mcp-session`.
+ * This runs that for them. When `claude` is not on the PATH it prints the long
+ * form to run wherever Claude Code is, rather than guessing at config files.
+ */
+declare function install(run?: (cmd: string, args: string[]) => void, log?: (line: string) => void): number;
+declare function main(argv?: string[]): Promise<void>;
 
-export { SERVER_NAME, SERVER_VERSION, type ToolDeps, connectStdio, createServer, createTools, main, renderHistory, renderTranscript, repoFromOrigin, toolGroups };
+export { SERVER_NAME, SERVER_VERSION, type ToolDeps, connectStdio, createServer, createTools, install, main, renderHistory, renderTranscript, repoFromOrigin, toolGroups };
