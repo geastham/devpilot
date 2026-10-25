@@ -380,12 +380,38 @@ export function buildSessionHandoff(input: SessionHandoffInput): string {
     `  ${modeLine}`,
     '',
     'No devpilot_session tools? Run this once in a terminal, then start a new Claude Code session:',
-    '  claude mcp add --scope user devpilot-local -- npx -y @devpilot.sh/mcp-session',
+    `  ${SESSION_TOOLS_INSTALL}`,
     '',
     'Or just open the link in a browser to read along. No DevPilot account is needed either way.',
     '',
     'This link is the key to the session. Anyone holding it can read all of it, so send it in a DM, not a channel.',
     ...ends,
+  ].join('\n');
+}
+
+/**
+ * The one command that gives someone the devpilot_session tools in Claude Code.
+ * It runs `claude mcp add` for them; `@devpilot.sh/mcp-session install` falls
+ * back to printing the long form if `claude` is not on the PATH.
+ */
+export const SESSION_TOOLS_INSTALL = 'npx -y @devpilot.sh/mcp-session install';
+
+/**
+ * The invite that fits in a chat message: three lines, for Slack or a text.
+ *
+ * The full handoff is fifteen lines written for the recipient's agent; pasted
+ * into a channel thread it reads as a wall. This is what a person sends when
+ * they would write "can you take a look?" — the link, what to do with it, and
+ * the one-time command for someone who has never used DevPilot. Their agent
+ * still gets the full briefing: joining returns it.
+ *
+ * It carries the key, like the handoff.
+ */
+export function buildSessionInvite(input: { title: string; link: string }): string {
+  return [
+    `Join my DevPilot session "${input.title}": ${input.link}`,
+    'Open it to read along, or paste the link into Claude Code to bring your agent.',
+    `First time? Run once: \`${SESSION_TOOLS_INSTALL}\``,
   ].join('\n');
 }
 

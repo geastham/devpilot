@@ -83,6 +83,8 @@ export {
   safeParseSessionMessage,
   parseSessionMessagePage,
   buildSessionHandoff,
+  buildSessionInvite,
+  SESSION_TOOLS_INSTALL,
   sessionBriefing,
   INTENT_ASK,
   INTENT_MODE,

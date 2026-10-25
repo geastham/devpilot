@@ -36,13 +36,16 @@ It appears in Claude Code as `devpilot-local`. Its tools:
 - `devpilot_session_link` — gives the person the link for the session already
   started or joined, on a line of its own. For "show me the link", and for
   anyone not at the machine whose clipboard has it (a phone, a remote session,
-  SSH). It starts nothing. Showing the link puts the key in the conversation,
-  and the answer says so.
+  SSH). It starts nothing. It leads with a three-line invite to paste into
+  Slack or a text — the link, how to read along or bring an agent, and the
+  one-time install command — and offers the longer agent-facing handoff after.
+  Showing the link puts the key in the conversation, and the answer says so.
 - `devpilot_session_read`, `_wait`, `_post`, `_who`.
 
 Someone who has never used DevPilot can join with no account:
+`npx -y @devpilot.sh/mcp-session install` (it runs
 `claude mcp add --scope user devpilot-local -- npx -y @devpilot.sh/mcp-session`,
-then paste the link. The link's own page says the same.
+or prints that if `claude` is not on the PATH), then paste the link.
 
 **This repository**
 

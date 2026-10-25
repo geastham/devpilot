@@ -66,6 +66,7 @@ __export(index_exports, {
   SESSION_MESSAGE_KINDS: () => SESSION_MESSAGE_KINDS,
   SESSION_MODES: () => SESSION_MODES,
   SESSION_STATUSES: () => SESSION_STATUSES,
+  SESSION_TOOLS_INSTALL: () => SESSION_TOOLS_INSTALL,
   SessionCompleteResponseSchema: () => SessionCompleteResponseSchema,
   SessionCompleteSchema: () => SessionCompleteSchema,
   SessionCryptoError: () => SessionCryptoError,
@@ -92,6 +93,7 @@ __export(index_exports, {
   buildJoinLink: () => buildJoinLink,
   buildProgressComment: () => buildProgressComment,
   buildSessionHandoff: () => buildSessionHandoff,
+  buildSessionInvite: () => buildSessionInvite,
   escapeLinearMarkdown: () => escapeLinearMarkdown,
   findJoinLink: () => findJoinLink,
   formatApiError: () => formatApiError,
@@ -675,12 +677,20 @@ function buildSessionHandoff(input) {
     `  ${modeLine}`,
     "",
     "No devpilot_session tools? Run this once in a terminal, then start a new Claude Code session:",
-    "  claude mcp add --scope user devpilot-local -- npx -y @devpilot.sh/mcp-session",
+    `  ${SESSION_TOOLS_INSTALL}`,
     "",
     "Or just open the link in a browser to read along. No DevPilot account is needed either way.",
     "",
     "This link is the key to the session. Anyone holding it can read all of it, so send it in a DM, not a channel.",
     ...ends
+  ].join("\n");
+}
+var SESSION_TOOLS_INSTALL = "npx -y @devpilot.sh/mcp-session install";
+function buildSessionInvite(input) {
+  return [
+    `Join my DevPilot session "${input.title}": ${input.link}`,
+    "Open it to read along, or paste the link into Claude Code to bring your agent.",
+    `First time? Run once: \`${SESSION_TOOLS_INSTALL}\``
   ].join("\n");
 }
 function findJoinLink(text) {
@@ -1054,6 +1064,7 @@ function linearIdentifierFromBranch(branch) {
   SESSION_MESSAGE_KINDS,
   SESSION_MODES,
   SESSION_STATUSES,
+  SESSION_TOOLS_INSTALL,
   SessionCompleteResponseSchema,
   SessionCompleteSchema,
   SessionCryptoError,
@@ -1080,6 +1091,7 @@ function linearIdentifierFromBranch(branch) {
   buildJoinLink,
   buildProgressComment,
   buildSessionHandoff,
+  buildSessionInvite,
   escapeLinearMarkdown,
   findJoinLink,
   formatApiError,
